@@ -117,6 +117,7 @@ async function stop() {
   ++state.playback;
   const ticket = state.ticket; state.ticket = null;
   destroyPlayer(); state.current = null; state.job = null; $('#player-wrap').hidden = true;
+  document.body.classList.remove('is-playing');
   $('#preferences').hidden = false;
   renderRecents();
   if (ticket) await post('/stop', {ticket}, {skipAuthRedirect: true}).catch(failure);
@@ -127,6 +128,7 @@ function playbackUI(title, live) {
   // de preferences et la reprise. Le reglage de qualite reste dans le lecteur.
   $('#preferences').hidden = true;
   const recent = $('#recent-wrap'); if (recent) recent.hidden = true;
+  document.body.classList.add('is-playing');
   $('#live-badge').textContent = live ? '● DIRECT' : '● FILM PRÊT';
   $('#back-live').hidden = !live; $('#player-status').textContent = 'Préparation de la lecture…';
   $('#usage').textContent = live ? '0 Mo de vidéo' : 'Version préparée';
@@ -139,6 +141,12 @@ async function play(channel) {
   if (attempt !== state.playback) return;
   state.current = channel; state.generation = null;
   playbackUI(channel.label, true); message('');
+  // Reperer la chaine en cours dans la liste laterale.
+  document.querySelectorAll('#channels li.now-playing').forEach(n => n.classList.remove('now-playing'));
+  document.querySelectorAll('#channels li').forEach(li => {
+    const name = li.querySelector('.name');
+    if (name && name.textContent === channel.label) li.classList.add('now-playing');
+  });
   try {
     const info = await post('/play', {lang: channel.lang, canonical: channel.canonical,
       mode: $('#play-mode').value, budget_mb: Number($('#budget-mb').value), minutes: Number($('#budget-minutes').value)});
