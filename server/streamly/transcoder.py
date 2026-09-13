@@ -134,6 +134,19 @@ class Transcoder:
         if monitor:
             threading.Thread(target=self._watchdog, daemon=True).start()
 
+    def _rung_fps(self, rung, source_fps):
+        """Cadence a encoder pour un barreau.
+
+        Une source de sport a 50 i/s double le cout d'encodage. Sur les
+        barreaux basse definition, cette fluidite est invisible alors qu'elle
+        se paie plein pot : on la ramene a la moitie. Les barreaux hauts, eux,
+        gardent la cadence source — c'est la que le mouvement rapide compte.
+        """
+        seuil = int(self.cfg.get('high_fps_min_height', 480))
+        if source_fps > 30 and int(rung['height']) < seuil:
+            return source_fps / 2.0
+        return source_fps
+
     def _command(self, source, media, generation):
         seg = int(self.cfg.get('segment_seconds', 2))
         fps = float(media['fps'])
@@ -163,8 +176,10 @@ class Transcoder:
                     '-preset:v:%d' % i, self.cfg.get('x264_preset', 'veryfast'),
                     '-pix_fmt:v:%d' % i, 'yuv420p', '-profile:v:%d' % i, 'high',
                     '-b:v:%d' % i, r['bitrate'], '-maxrate:v:%d' % i, r['maxrate'],
-                    '-bufsize:v:%d' % i, r['bufsize'], '-r:v:%d' % i, str(fps),
-                    '-g:v:%d' % i, str(round(seg * fps)), '-keyint_min:v:%d' % i, str(round(seg * fps)),
+                    '-bufsize:v:%d' % i, r['bufsize'],
+                    '-r:v:%d' % i, str(self._rung_fps(r, fps)),
+                    '-g:v:%d' % i, str(round(seg * self._rung_fps(r, fps))),
+                    '-keyint_min:v:%d' % i, str(round(seg * self._rung_fps(r, fps))),
                     '-sc_threshold:v:%d' % i, '0']
             if threads:
                 cmd += ['-threads:v:%d' % i, str(threads)]
@@ -219,6 +234,14 @@ class Transcoder:
         key = hashlib.sha256(identity.encode()).hexdigest()[:20]
         with self._lock:
             self._expire_locked()
+            # Un meme appareil ne regarde qu'une chaine a la fois. Son ticket
+            # precedent retenait la connexion de l'abonnement : changer de
+            # chaine se heurtait alors a sa propre lecture, avec le message
+            # « toutes les connexions sont occupees ». Un onglet laisse ouvert
+            # ou une page rechargee suffisait a bloquer jusqu'a l'expiration.
+            for stale in [k for k, t in self.tickets.items()
+                          if t['owner'] == owner and t['key'] != key]:
+                self._release_locked(stale, owner)
             w = self.workers.get(key)
             if not w:
                 if len(self.workers) + len(self.reservations) >= max(1, int(self.cfg.get('max_concurrent_streams', 1))):
@@ -297,7 +320,7 @@ class Transcoder:
                 width = round(h * media['width'] / media['height'] / 2) * 2
                 # Include transport overhead; do not invent codec level strings.
                 bw = int((_bps(r['maxrate']) + _bps(self.cfg.get('audio_bitrate', '96k'))) * 1.08)
-                lines += ['#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=%.3f' % (bw, width, h, media['fps']),
+                lines += ['#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=%.3f' % (bw, width, h, self._rung_fps(r, media['fps'])),
                           'g%d_s_%d.m3u8' % (w['generation'], i)]
             return '\n'.join(lines) + '\n'
 
@@ -319,11 +342,14 @@ class Transcoder:
 
     def release(self, ticket, owner=None):
         with self._lock:
-            t = self.tickets.get(ticket)
-            if t and (owner is None or owner == t['owner']):
-                del self.tickets[ticket]
-                if not any(x['key'] == t['key'] for x in self.tickets.values()):
-                    self._stop_locked(t['key'])
+            self._release_locked(ticket, owner)
+
+    def _release_locked(self, ticket, owner=None):
+        t = self.tickets.get(ticket)
+        if t and (owner is None or owner == t['owner']):
+            del self.tickets[ticket]
+            if not any(x['key'] == t['key'] for x in self.tickets.values()):
+                self._stop_locked(t['key'])
 
     def release_owner(self, owner):
         with self._lock:
