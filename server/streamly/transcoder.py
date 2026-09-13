@@ -148,18 +148,26 @@ class Transcoder:
                '-rw_timeout', '12000000', '-user_agent', ua,
                '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3',
                '-analyzeduration', '2000000', '-probesize', '2000000', '-i', source]
-        if self._ffmpeg_caps.get('filter_complex_threads'):
-            cmd += ['-filter_complex_threads', '1']
+        # Brider chaque encodeur a un seul thread laissait la machine aux trois
+        # quarts inutilisee : suffisant pour une source a 25 i/s, insuffisant a
+        # 50 i/s, ou la production tombait a 65 % du temps reel et le lecteur
+        # se vidait. 0 laisse ffmpeg decider ; la consommation totale reste
+        # bornee par CPUQuota dans l'unite systemd.
+        threads = max(0, int(self.cfg.get('encoder_threads', 0)))
+        if threads and self._ffmpeg_caps.get('filter_complex_threads'):
+            cmd += ['-filter_complex_threads', str(threads)]
         cmd += ['-filter_complex', fc]
         force_key_frame_expression = 'expr:gte(t,n_forced*%d)' % seg
         for i, r in enumerate(self.ladder):
             cmd += ['-map', '[o%d]' % i, '-c:v:%d' % i, 'libx264',
-                    '-threads:v:%d' % i, '1', '-preset:v:%d' % i, self.cfg.get('x264_preset', 'veryfast'),
+                    '-preset:v:%d' % i, self.cfg.get('x264_preset', 'veryfast'),
                     '-pix_fmt:v:%d' % i, 'yuv420p', '-profile:v:%d' % i, 'high',
                     '-b:v:%d' % i, r['bitrate'], '-maxrate:v:%d' % i, r['maxrate'],
                     '-bufsize:v:%d' % i, r['bufsize'], '-r:v:%d' % i, str(fps),
                     '-g:v:%d' % i, str(round(seg * fps)), '-keyint_min:v:%d' % i, str(round(seg * fps)),
                     '-sc_threshold:v:%d' % i, '0']
+            if threads:
+                cmd += ['-threads:v:%d' % i, str(threads)]
             if self._ffmpeg_caps.get('force_key_frames_vstream_spec'):
                 cmd += ['-force_key_frames:v:%d' % i, force_key_frame_expression]
         if not self._ffmpeg_caps.get('force_key_frames_vstream_spec'):

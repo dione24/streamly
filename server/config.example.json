@@ -52,6 +52,9 @@
   "segment_seconds": 2,
   "playlist_size": 36,
   "idle_timeout_seconds": 120,
+  "_comment_threads": "Threads par encodeur. 0 = laisser ffmpeg decider (recommande) ; la consommation totale est bornee par CPUQuota dans l'unite systemd.",
+  "encoder_threads": 0,
+
   "x264_preset": "veryfast",
   "audio_bitrate": "96k",
   "max_concurrent_streams": 2,

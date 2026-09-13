@@ -11,8 +11,10 @@ Restart=always
 RestartSec=3
 
 # On borne le CPU pour ne jamais etouffer les autres services de la machine.
-# 300% = 3 coeurs au maximum ; un transcodage type en consomme environ 1.
-CPUQuota=300%
+# 400% = les 4 coeurs. Un transcodage 4 barreaux a 50 i/s en consomme ~3,5 :
+# le brider plus bas fait produire moins vite que le direct, et le lecteur
+# se vide. Abaisser cette valeur si la machine heberge d autres services.
+CPUQuota=400%
 
 # Durcissement de base
 NoNewPrivileges=true
