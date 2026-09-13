@@ -84,6 +84,16 @@ class XtreamClient:
     def vod_info(self, vod_id):
         return self._api("get_vod_info", vod_id=vod_id) or {}
 
+    def series(self):
+        return self._api("get_series") or []
+
+    def series_categories(self):
+        return self._api("get_series_categories") or []
+
+    def series_info(self, series_id):
+        """Saisons et episodes d'une serie. Un appel reseau par serie."""
+        return self._api("get_series_info", series_id=series_id) or {}
+
     def m3u(self):
         """Export M3U complet. Lent (le panel le regenere a la volee)."""
         q = urllib.parse.urlencode({
@@ -99,6 +109,12 @@ class XtreamClient:
 
     def hls_url(self, stream_id):
         return "%s/live/%s/%s/%s.m3u8" % (self.host, self.username, self.password, stream_id)
+
+    def episode_url(self, episode_id, container):
+        # Les episodes ne sont pas servis sous /movie/ : un panel renvoie 404
+        # sur ce chemin, et l'erreur ne dit pas pourquoi.
+        return "%s/series/%s/%s/%s.%s" % (
+            self.host, self.username, self.password, episode_id, container)
 
     def _coerce_epg_items(self, payload):
         if not payload:
@@ -157,6 +173,61 @@ class XtreamClient:
             if m:
                 mapping[m.group(1)] = group
         return mapping
+
+
+def parse_series_info(payload):
+    """Extrait (resume, episodes) d'une reponse `get_series_info`.
+
+    Le champ `episodes` n'a pas de forme stable : la plupart des panels
+    renvoient un objet indexe par numero de saison, certains une liste de
+    listes. Le numero de saison lui-meme est tantot dans l'episode, tantot
+    seulement porte par la cle. On accepte les deux plutot que de renvoyer
+    une serie vide sur un panel un peu different.
+    """
+    if not isinstance(payload, dict):
+        return "", []
+    info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    plot = info.get("plot") or info.get("description") or ""
+
+    raw = payload.get("episodes")
+    buckets = []
+    if isinstance(raw, dict):
+        buckets = list(raw.items())
+    elif isinstance(raw, list):
+        buckets = [(str(i + 1), group) for i, group in enumerate(raw)]
+
+    episodes = []
+    for season_key, group in buckets:
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            try:
+                episode_id = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            detail = item.get("info") if isinstance(item.get("info"), dict) else {}
+            episodes.append({
+                "episode_id": episode_id,
+                "season": _as_int(item.get("season"), _as_int(season_key, 0)),
+                "episode": _as_int(item.get("episode_num"), 0),
+                "title": (item.get("title") or "").strip(),
+                # Sans extension exacte, l'URL renvoie 404 : mp4 est le defaut
+                # le plus frequent, mais on prend ce que le panel annonce.
+                "container": (item.get("container_extension") or "mp4").lstrip("."),
+                "duration": detail.get("duration") or "",
+                "plot": detail.get("plot") or detail.get("description") or "",
+            })
+    episodes.sort(key=lambda e: (e["season"], e["episode"]))
+    return plot, episodes
+
+
+def _as_int(value, default=0):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 # ------------------------------------------------------------ analyse des noms

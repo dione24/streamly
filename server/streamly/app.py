@@ -18,7 +18,7 @@ from .transcoder import Transcoder, CapacityError
 from .auth import Sessions
 from .vod import Movies
 from .m3u import M3UClient, PlaylistError, detect_xtream
-from .xtream import XtreamClient
+from .xtream import XtreamClient, parse_series_info
 
 STARTUP_TIMEOUT = 25      # secondes d'attente de la premiere playlist
 ACCESS_LOG = []           # journal d'acces circulaire, expose via /api/access
@@ -350,6 +350,30 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_vod(self, path):
         return self._err(410, 'Préparez une version adaptée depuis la fiche du film.')
 
+    def _episode_source(self, pid, eid):
+        """Fichier d'un episode. Les series ne sont pas servies sous /movie/."""
+        provider = STATE.provider(pid)
+        episode = STATE.catalog.episode_get(pid, eid) if provider else None
+        if not provider or not provider.get('enabled', True) or not episode:
+            raise ValueError('episode indisponible')
+        if provider.get('kind') == 'm3u':
+            raise ValueError('les series exigent un abonnement Xtream')
+        container = (episode.get('container') or 'mp4').lstrip('.')
+        if not re.fullmatch(r'[a-zA-Z0-9]+', container):
+            raise ValueError('conteneur invalide')
+        show = STATE.catalog.series_get(pid, episode['series_id']) or {}
+        label = show.get('title') or 'Serie'
+        if episode.get('season') or episode.get('episode'):
+            label = '%s S%02dE%02d' % (label, episode.get('season') or 0, episode.get('episode') or 0)
+        if episode.get('title'):
+            label = '%s — %s' % (label, episode['title'])
+        # Movies.start() attend une fiche de film : un episode en presente une
+        # equivalente, ce qui evite un second chemin de preparation.
+        movie = {'provider_id': pid, 'stream_id': int(eid), 'title': label,
+                 'container': container, 'bitrate': 0,
+                 'duration': episode.get('duration') or ''}
+        return movie, STATE.client(provider).episode_url(int(eid), container)
+
     def _movie_source(self, pid, sid):
         provider = STATE.provider(pid)
         movie = STATE.catalog.vod_get(pid, sid)
@@ -523,7 +547,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/preparations':
             return self._json(STATE.movies.list())
         if path == '/api/vod/tracks':
-            movie, source = self._movie_source(one('provider'), one('id'))
+            if one('kind') == 'episode':
+                movie, source = self._episode_source(one('provider'), one('id'))
+            else:
+                movie, source = self._movie_source(one('provider'), one('id'))
             reservation = secrets.token_urlsafe(12)
             try:
                 STATE.transcoder.reserve(reservation, movie['provider_id'])
@@ -538,6 +565,45 @@ class Handler(BaseHTTPRequestHandler):
                 lang=one("lang"), category=one("category"), query=one("q"),
                 limit=max(1, min(int(one("limit", 120)), 500)),
                 offset=max(0, int(one("offset", 0)))))
+
+        if path == "/api/series":
+            return self._json(cat.series_browse(
+                lang=one("lang"), category=one("category"), query=one("q"),
+                limit=max(1, min(int(one("limit", 120)), 500)),
+                offset=max(0, int(one("offset", 0)))))
+
+        if path == "/api/series/categories":
+            return self._json(cat.series_categories(one("lang")))
+
+        if path == "/api/series/languages":
+            return self._json(cat.series_languages())
+
+        if path == "/api/series/info":
+            pid, sid = one("provider"), one("id")
+            show = cat.series_get(pid, sid)
+            if not show:
+                return self._err(404, "serie introuvable")
+            # Saisons et episodes coutent un appel reseau par serie : on le
+            # fait a l'ouverture de la fiche, puis on le garde.
+            if not show.get("episodes_at"):
+                provider = STATE.provider(pid)
+                if not provider:
+                    return self._err(404, "abonnement introuvable")
+                try:
+                    plot, episodes = parse_series_info(STATE.client(provider).series_info(sid))
+                except Exception as exc:
+                    return self._err(502, "episodes indisponibles : %s" % exc)
+                if not episodes:
+                    return self._err(502, "aucun episode annonce pour cette serie")
+                cat.series_set_episodes(pid, sid, plot, episodes)
+                show = cat.series_get(pid, sid)
+            episodes = cat.series_episodes(pid, sid)
+            seasons = {}
+            for e in episodes:
+                seasons.setdefault(e["season"] or 0, []).append(e)
+            show["seasons"] = [{"season": n, "episodes": seasons[n]} for n in sorted(seasons)]
+            show["episode_count"] = len(episodes)
+            return self._json(show)
 
         if path == "/api/vod/categories":
             return self._json(cat.vod_categories(one("lang")))
@@ -590,7 +656,10 @@ class Handler(BaseHTTPRequestHandler):
         cat = STATE.catalog
 
         if path == '/api/prepare':
-            movie, source = self._movie_source(body.get('provider'), body.get('id'))
+            if body.get('kind') == 'episode':
+                movie, source = self._episode_source(body.get('provider'), body.get('id'))
+            else:
+                movie, source = self._movie_source(body.get('provider'), body.get('id'))
             try:
                 job = STATE.movies.start(movie, source, int(body.get('height', 480)),
                     int(body['audio']) if body.get('audio') is not None else None,
@@ -756,12 +825,20 @@ def _run_sync(only_id=None):
             except Exception as exc:
                 log("[%s] ECHEC direct : %s" % (provider.get("id"), exc))
                 continue
+            nvod = 0
             try:
                 nvod = STATE.catalog.sync_vod(provider, client, log)
-                log("[%s] termine : %d chaines, %d films" %
-                    (provider["id"], count, nvod))
             except Exception as exc:
                 log("[%s] ECHEC VOD : %s" % (provider.get("id"), exc))
+            # Un panel sans series ne doit pas faire echouer la synchro : une
+            # playlist M3U n'en a jamais, et certains abonnements non plus.
+            nseries = 0
+            try:
+                nseries = STATE.catalog.sync_series(provider, client, log)
+            except Exception as exc:
+                log("[%s] ECHEC series : %s" % (provider.get("id"), exc))
+            log("[%s] termine : %d chaines, %d films, %d series" %
+                (provider["id"], count, nvod, nseries))
 
 
 def main():

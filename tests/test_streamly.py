@@ -15,7 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server'))
 from streamly.transcoder import Transcoder, CapacityError, _redact_credentials
 from streamly.auth import Sessions
 from streamly.catalog import Catalog
-from streamly.xtream import parse_name
+from streamly.xtream import parse_name, parse_series_info
 from streamly import m3u
 from streamly import app, config
 from streamly.vod import Movies
@@ -360,6 +360,70 @@ class CatalogPlaylistTests(unittest.TestCase):
         client.live_categories.return_value = [{'category_id': '1', 'category_name': 'TNT'}]
         self.cat.sync_provider({'id': 'panel'}, client, lambda _: None)
         self.assertIsNone(self.cat.channel('panel', 7)['url'])
+
+
+class SeriesTests(unittest.TestCase):
+    """Series : import, episodes paresseux, et suppression en cascade."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.cat = Catalog(self.tmp.name + '/c.db')
+        self.client = Mock()
+        self.client.series.return_value = [
+            {'series_id': 10, 'name': 'FR| Engrenages', 'category_id': '3',
+             'cover': 'http://img/1.jpg', 'rating': '8.4', 'last_modified': '1700000000'},
+            {'series_id': 11, 'name': 'US| Lioness', 'category_id': '3', 'cover': '', 'rating': 'n/a'}]
+        self.client.series_categories.return_value = [{'category_id': '3', 'category_name': 'Drame'}]
+    def tearDown(self): self.cat.close(); self.tmp.cleanup()
+
+    def test_import_parses_language_and_survives_bad_ratings(self):
+        self.assertEqual(self.cat.sync_series({'id': 'p'}, self.client, lambda _: None), 2)
+        rows = self.cat.series_browse()
+        self.assertEqual({r['lang'] for r in rows}, {'FR', 'US'})
+        self.assertEqual(self.cat.series_get('p', 10)['title'], 'Engrenages')
+        # 'n/a' ne doit pas faire echouer tout l'import.
+        self.assertEqual(self.cat.series_get('p', 11)['rating'], 0.0)
+        self.assertEqual([c['name'] for c in self.cat.series_categories()], ['Drame'])
+
+    def test_episodes_are_stored_then_replaced_not_merged(self):
+        self.cat.sync_series({'id': 'p'}, self.client, lambda _: None)
+        plot, episodes = parse_series_info({
+            'info': {'plot': 'Un resume'},
+            'episodes': {'1': [
+                {'id': '901', 'episode_num': '1', 'title': 'Pilote', 'container_extension': 'mkv',
+                 'info': {'duration': '52:00'}},
+                {'id': '902', 'episode_num': '2', 'title': 'Suite', 'container_extension': 'mkv'}]}})
+        self.cat.series_set_episodes('p', 10, plot, episodes)
+        self.assertEqual(len(self.cat.series_episodes('p', 10)), 2)
+        self.assertEqual(self.cat.series_get('p', 10)['plot'], 'Un resume')
+        self.assertTrue(self.cat.series_get('p', 10)['episodes_at'])
+        self.assertEqual(self.cat.episode_get('p', 901)['container'], 'mkv')
+        # Une saison retiree par le fournisseur doit disparaitre.
+        _, fewer = parse_series_info({'episodes': {'1': [{'id': '901', 'episode_num': '1'}]}})
+        self.cat.series_set_episodes('p', 10, '', fewer)
+        self.assertEqual([e['episode_id'] for e in self.cat.series_episodes('p', 10)], [901])
+        self.assertIsNone(self.cat.episode_get('p', 902))
+
+    def test_removing_a_series_removes_its_episodes(self):
+        self.cat.sync_series({'id': 'p'}, self.client, lambda _: None)
+        _, eps = parse_series_info({'episodes': {'1': [{'id': '901', 'episode_num': '1'}]}})
+        self.cat.series_set_episodes('p', 10, '', eps)
+        self.client.series.return_value = [self.client.series.return_value[1]]
+        self.cat.sync_series({'id': 'p'}, self.client, lambda _: None)
+        self.assertIsNone(self.cat.series_get('p', 10))
+        self.assertIsNone(self.cat.episode_get('p', 901), 'episode orphelin laisse en base')
+
+    def test_purge_of_an_absent_provider_covers_series(self):
+        self.cat.sync_series({'id': 'p'}, self.client, lambda _: None)
+        _, eps = parse_series_info({'episodes': {'1': [{'id': '901', 'episode_num': '1'}]}})
+        self.cat.series_set_episodes('p', 10, '', eps)
+        removed = self.cat.purge_absent(['autre'])
+        self.assertEqual(removed.get('series'), 2)
+        self.assertEqual(removed.get('episodes'), 1)
+
+    def test_episode_urls_do_not_use_the_movie_path(self):
+        from streamly.xtream import XtreamClient
+        c = XtreamClient('http://h:80', 'u', 'p', 'UA')
+        self.assertEqual(c.episode_url(901, 'mkv'), 'http://h:80/series/u/p/901.mkv')
+        self.assertNotIn('/movie/', c.episode_url(901, 'mkv'))
 
 
 class HTTPTests(unittest.TestCase):

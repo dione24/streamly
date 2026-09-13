@@ -166,6 +166,15 @@ class M3UClient:
     def vod_info(self, vod_id):
         return {}
 
+    def series(self):
+        return []
+
+    def series_categories(self):
+        return []
+
+    def series_info(self, series_id):
+        return {}
+
     def live_epg(self, stream_id, epg_channel_id=None):
         return []
 

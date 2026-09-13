@@ -4,8 +4,8 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0e120f"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="style.css?v=20260913-v15">
-<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260913-v15"></script>
+<link rel="stylesheet" href="style.css?v=20260913-v16">
+<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260913-v16"></script>
 </head>
 <body>
 <!-- Masque au depart, comme #app : c'est /api/me qui tranche. Sans cela, le
@@ -36,7 +36,7 @@
  <header class="topbar">
   <a class="wordmark" href="/" aria-label="Accueil Streamly"><span class="brand-icon">S</span> streamly<span class="brand-dot">.</span></a>
   <nav class="tabs" aria-label="Bibliothèque">
-   <button id="tab-live" class="tab active" data-nav="tab">Direct</button><button id="tab-vod" class="tab" data-nav="tab">Films</button><button id="tab-fav" class="tab" data-nav="tab">Favoris</button><button id="tab-prepared" class="tab" data-nav="tab">Mes films prêts</button>
+   <button id="tab-live" class="tab active" data-nav="tab">Direct</button><button id="tab-vod" class="tab" data-nav="tab">Films</button><button id="tab-series" class="tab" data-nav="tab">Séries</button><button id="tab-fav" class="tab" data-nav="tab">Favoris</button><button id="tab-prepared" class="tab" data-nav="tab">Mes films prêts</button>
   </nav>
   <div class="account-actions">
    <button id="tab-conf" class="quiet" data-nav="tab">Réglages</button>
@@ -191,6 +191,16 @@
   </div>
 </footer>
 </main>
+<dialog id="series-dialog">
+ <form method="dialog"><button class="dialog-close quiet" aria-label="Fermer">✕</button></form>
+ <span class="eyebrow">CHOISISSEZ UN ÉPISODE</span>
+ <h2 id="series-title"></h2>
+ <p id="series-details" class="muted"></p>
+ <p id="series-plot"></p>
+ <label id="series-season-field" hidden>Saison<select id="series-season"></select></label>
+ <ul id="series-episodes" class="episode-list"></ul>
+ <p id="series-message" role="status"></p>
+</dialog>
 <dialog id="movie-dialog">
  <form method="dialog"><button class="dialog-close quiet" aria-label="Fermer">✕</button></form>
  <span class="eyebrow">UNE VERSION ADAPTÉE À VOTRE FORFAIT</span>

@@ -563,7 +563,8 @@ function renderSkeletons(count = 6) {
 }
 
 // Catalogue row
-function row(c, movie = false) {
+function row(c, kind = 'channel') {
+  const movie = kind === 'movie' || kind === 'series';
   const li = el('li', 'channel-card' + (movie ? ' movie-card' : ''));
   li.dataset.channelKey = channelKey(c);
   const button = el('button', 'channel-main');
@@ -600,10 +601,12 @@ function row(c, movie = false) {
   const meta = el('span', 'meta');
   meta.append(
     el('div', 'name', nameLabel),
-    el('div', 'sub', movie ? (c.category_name || 'Film') : [c.category || 'Direct', c.lang].filter(Boolean).join(' · '))
+    el('div', 'sub', movie ? (c.category_name || (kind === 'series' ? 'Série' : 'Film'))
+                           : [c.category || 'Direct', c.lang].filter(Boolean).join(' · '))
   );
   button.append(meta);
-  button.onclick = () => (movie ? movieDialog(c) : play(c)).catch(failure);
+  button.onclick = () => (kind === 'series' ? seriesDialog(c)
+                        : kind === 'movie' ? movieDialog(c) : play(c)).catch(failure);
   li.append(button);
 
   if (!movie) {
@@ -650,7 +653,8 @@ async function renderChannels(more = false) {
       if (state.category) q.set('category', state.category);
       if (state.query) q.set('q', state.query);
       if (state.provider) q.set('provider', state.provider);
-      items = await api((state.mode === 'vod' ? '/vod?' : '/channels?') + q, {signal: controller.signal});
+      const endpoint = {vod: '/vod?', series: '/series?'}[state.mode] || '/channels?';
+      items = await api(endpoint + q, {signal: controller.signal});
     }
     if (serial !== state.request) return;
     const hasMore = state.mode !== 'favorites' && items.length > state.pageSize;
@@ -662,12 +666,14 @@ async function renderChannels(more = false) {
     }
     if (!more) $('#channels').replaceChildren();
     const fragment = document.createDocumentFragment();
-    items.forEach(c => fragment.append(row(c, state.mode === 'vod')));
+    const kind = {vod: 'movie', series: 'series'}[state.mode] || 'channel';
+    items.forEach(c => fragment.append(row(c, kind)));
     $('#channels').append(fragment);
     $('#load-more').hidden = !hasMore;
     $('#empty').hidden = $('#channels').children.length > 0;
     const totalRendered = $('#channels').children.length;
-    $('#count').textContent = totalRendered + (state.mode === 'vod' ? ' films affichés' : ' chaînes affichées') + (hasMore ? ' · suite disponible' : '');
+    const noun = {vod: ' films affichés', series: ' séries affichées'}[state.mode] || ' chaînes affichées';
+    $('#count').textContent = totalRendered + noun + (hasMore ? ' · suite disponible' : '');
     markNowPlaying(state.current);
     if (!state.current) state.selectedChannelIndex = -1;
   } catch (err) {
@@ -747,7 +753,8 @@ async function loadCategories() {
   if (state.lang) params.set('lang', state.lang);
   if (state.provider) params.set('provider', state.provider);
   const suffix = params.toString() ? '?' + params : '';
-  const cats = await api((state.mode === 'vod' ? '/vod/categories' : '/categories') + suffix).catch(() => []);
+  const catsPath = {vod: '/vod/categories', series: '/series/categories'}[state.mode] || '/categories';
+  const cats = await api(catsPath + suffix).catch(() => []);
   if (serial !== filterGeneration) return;
   const sel = $('#category');
   const rawValues = cats.map(normalizeCategoryValue).filter(Boolean);
@@ -839,14 +846,16 @@ async function setMode(mode) {
   $('#recent-wrap').hidden = mode !== 'live' || !store.json('recents', []).length;
   
   const modeClass = 'mode-' + (mode === 'favorites' ? 'favorites' : mode);
-  document.body.classList.remove('mode-live', 'mode-vod', 'mode-favorites', 'mode-prepared');
+  document.body.classList.remove('mode-live', 'mode-vod', 'mode-series', 'mode-favorites', 'mode-prepared');
   document.body.classList.add(modeClass);
 
-  ['live', 'vod', 'fav', 'prepared'].forEach(k => {
+  ['live', 'vod', 'series', 'fav', 'prepared'].forEach(k => {
     $('#tab-' + k).classList.toggle('active', (k === 'fav' ? 'favorites' : k) === mode);
   });
-  $('#catalogue-title').textContent = {live: 'À l’antenne.', vod: 'Une soirée cinéma.', favorites: 'Vos incontournables.'}[mode] || '';
-  $('#search').placeholder = mode === 'vod' ? 'Rechercher un film…' : 'Rechercher une chaîne…';
+  $('#catalogue-title').textContent = {live: 'À l’antenne.', vod: 'Une soirée cinéma.',
+    series: 'Vos séries.', favorites: 'Vos incontournables.'}[mode] || '';
+  $('#search').placeholder = {vod: 'Rechercher un film…', series: 'Rechercher une série…'}[mode]
+    || 'Rechercher une chaîne…';
   
   clearInterval(state.jobTimer);
   if (mode === 'prepared') {
@@ -900,6 +909,7 @@ async function closeSettings() {
 
 $('#tab-live').onclick = () => setMode('live').catch(failure);
 $('#tab-vod').onclick = () => setMode('vod').catch(failure);
+$('#tab-series').onclick = () => setMode('series').catch(failure);
 $('#tab-fav').onclick = () => setMode('favorites').catch(failure);
 $('#tab-prepared').onclick = () => setMode('prepared').catch(failure);
 
@@ -922,6 +932,91 @@ function renderRecents() {
 }
 
 // Dialog films
+async function seriesDialog(show) {
+  $('#series-title').textContent = show.title || show.name;
+  $('#series-details').textContent = '';
+  $('#series-plot').textContent = '';
+  $('#series-message').textContent = 'Chargement des saisons…';
+  $('#series-episodes').replaceChildren();
+  $('#series-season-field').hidden = true;
+  $('#series-dialog').showModal();
+  let info;
+  try {
+    info = await api('/series/info?provider=' + encodeURIComponent(show.provider_id) + '&id=' + show.series_id);
+  } catch (err) {
+    $('#series-message').textContent = err.message;
+    return;
+  }
+  const seasons = info.seasons || [];
+  $('#series-title').textContent = info.title || show.title;
+  $('#series-plot').textContent = info.plot || '';
+  $('#series-details').textContent = [
+    seasons.length ? seasons.length + (seasons.length > 1 ? ' saisons' : ' saison') : '',
+    info.episode_count ? info.episode_count + (info.episode_count > 1 ? ' épisodes' : ' épisode') : ''
+  ].filter(Boolean).join(' · ');
+  $('#series-message').textContent = '';
+  if (!seasons.length) {
+    $('#series-message').textContent = 'Aucun épisode annoncé pour cette série.';
+    return;
+  }
+
+  const select = $('#series-season');
+  select.replaceChildren();
+  seasons.forEach(s => select.add(new Option(s.season ? 'Saison ' + s.season : 'Épisodes', String(s.season))));
+  // Une serie a saison unique n'a pas besoin d'un selecteur a une entree.
+  $('#series-season-field').hidden = seasons.length < 2;
+
+  const showSeason = () => {
+    const chosen = seasons.find(s => String(s.season) === select.value) || seasons[0];
+    const list = $('#series-episodes');
+    list.replaceChildren();
+    chosen.episodes.forEach(ep => {
+      const li = el('li');
+      const button = el('button');
+      button.type = 'button';
+      const numero = (ep.season ? 'S' + String(ep.season).padStart(2, '0') : '')
+        + (ep.episode ? 'E' + String(ep.episode).padStart(2, '0') : '');
+      button.append(
+        el('span', 'ep-num', numero || '—'),
+        el('span', 'ep-title', ep.title || 'Épisode ' + (ep.episode || '')),
+        el('span', 'ep-dur', ep.duration || '')
+      );
+      button.onclick = () => {
+        $('#series-dialog').close();
+        // On rejoint la fiche de preparation des films : meme choix de
+        // qualite, memes pistes, meme file d'attente.
+        episodeDialog(info, ep);
+      };
+      li.append(button);
+      list.append(li);
+    });
+  };
+  select.onchange = showSeason;
+  showSeason();
+}
+
+function episodeDialog(show, episode) {
+  const numero = (episode.season ? 'S' + String(episode.season).padStart(2, '0') : '')
+    + (episode.episode ? 'E' + String(episode.episode).padStart(2, '0') : '');
+  const label = [show.title, numero, episode.title].filter(Boolean).join(' · ');
+  state.movie = {
+    kind: 'episode',
+    provider_id: show.provider_id,
+    stream_id: episode.episode_id,
+    title: label,
+    duration: episode.duration || '',
+    plot: episode.plot || show.plot || ''
+  };
+  $('#movie-title').textContent = label;
+  $('#movie-details').textContent = [episode.duration, 'Taille source inconnue'].filter(Boolean).join(' · ');
+  $('#movie-plot').textContent = state.movie.plot;
+  $('#movie-message').textContent = '';
+  $('#track-fields').hidden = true;
+  $('#prepare-movie').disabled = false;
+  movieEstimate();
+  $('#movie-dialog').showModal();
+}
+
 async function movieDialog(c) {
   $('#movie-title').textContent = c.title;
   $('#movie-message').textContent = 'Chargement des informations…';
@@ -932,7 +1027,7 @@ async function movieDialog(c) {
   $('#movie-dialog').showModal();
   try {
     const info = await api('/vod/info?provider=' + encodeURIComponent(c.provider_id) + '&id=' + c.stream_id);
-    state.movie = info;
+    state.movie = {...info, kind: 'movie'};
     $('#movie-title').textContent = info.title;
     $('#movie-details').textContent = [info.duration, info.size_bytes ? 'Source : ≈ ' + size(info.size_bytes) : 'Taille source inconnue'].filter(Boolean).join(' · ');
     $('#movie-plot').textContent = info.plot || '';
@@ -955,7 +1050,8 @@ $('#check-tracks').onclick = async () => {
   if (!state.movie) return;
   $('#check-tracks').disabled = true;
   try {
-    const tracks = await api('/vod/tracks?provider=' + encodeURIComponent(state.movie.provider_id) + '&id=' + state.movie.stream_id);
+    const tracks = await api('/vod/tracks?kind=' + (state.movie.kind || 'movie')
+      + '&provider=' + encodeURIComponent(state.movie.provider_id) + '&id=' + state.movie.stream_id);
     if (!tracks.verified) throw new Error('Impossible de vérifier les pistes de cette source.');
     $('#movie-audio').replaceChildren(new Option('Piste par défaut', ''));
     tracks.audio.forEach(t => $('#movie-audio').add(new Option(t.label + ' · ' + t.codec, String(t.index))));
@@ -974,6 +1070,7 @@ $('#prepare-movie').onclick = async () => {
   $('#prepare-movie').disabled = true;
   try {
     await post('/prepare', {
+      kind: state.movie.kind || 'movie',
       provider: state.movie.provider_id,
       id: state.movie.stream_id,
       height: Number($('#movie-height').value),

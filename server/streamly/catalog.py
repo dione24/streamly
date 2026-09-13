@@ -81,6 +81,41 @@ CREATE INDEX IF NOT EXISTS idx_vod_lang  ON vod(lang);
 CREATE INDEX IF NOT EXISTS idx_vod_cat   ON vod(category_name);
 CREATE INDEX IF NOT EXISTS idx_vod_title ON vod(title);
 
+CREATE TABLE IF NOT EXISTS series (
+    provider_id   TEXT NOT NULL,
+    series_id     INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    lang          TEXT,
+    title         TEXT,
+    category_id   TEXT,
+    category_name TEXT,
+    icon          TEXT,
+    rating        REAL,
+    added         INTEGER,
+    -- Renseignes paresseusement par get_series_info, comme le conteneur d'un
+    -- film : un appel reseau par serie, fait a l'ouverture de la fiche.
+    plot          TEXT,
+    episodes_at   INTEGER,
+    PRIMARY KEY (provider_id, series_id)
+);
+CREATE INDEX IF NOT EXISTS idx_series_lang  ON series(lang);
+CREATE INDEX IF NOT EXISTS idx_series_cat   ON series(category_name);
+CREATE INDEX IF NOT EXISTS idx_series_title ON series(title);
+
+CREATE TABLE IF NOT EXISTS episodes (
+    provider_id TEXT NOT NULL,
+    episode_id  INTEGER NOT NULL,
+    series_id   INTEGER NOT NULL,
+    season      INTEGER,
+    episode     INTEGER,
+    title       TEXT,
+    container   TEXT,
+    duration    TEXT,
+    plot        TEXT,
+    PRIMARY KEY (provider_id, episode_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ep_series ON episodes(provider_id, series_id, season, episode);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     provider_id TEXT PRIMARY KEY,
     last_sync   INTEGER,
@@ -128,7 +163,7 @@ class Catalog:
         active = tuple(active_ids)
         removed = {}
         with self._db:
-            for table in ("channels", "vod", "sync_state"):
+            for table in ("channels", "vod", "series", "episodes", "sync_state"):
                 if active:
                     holes = ",".join("?" * len(active))
                     cur = self._db.execute(
@@ -276,6 +311,141 @@ class Catalog:
                 "icon=excluded.icon, rating=excluded.rating, added=excluded.added",
                 rows)
         return len(rows)
+
+    def sync_series(self, provider, client, log=print):
+        """Importe le catalogue de series.
+
+        Seule la liste est importee ici. Les saisons et les episodes exigent
+        un appel `get_series_info` par serie : sur un catalogue de plusieurs
+        milliers de titres, les prefetcher rendrait la synchronisation
+        interminable. Ils sont recuperes a l'ouverture de la fiche, puis
+        conserves — meme compromis que le conteneur d'un film.
+        """
+        pid = provider["id"]
+        try:
+            shows = client.series()
+        except Exception as exc:
+            log("[%s] series indisponibles (%s)" % (pid, exc))
+            return 0
+        log("[%s] %d series" % (pid, len(shows)))
+
+        cat_names = {}
+        try:
+            for c in client.series_categories():
+                cat_names[str(c.get("category_id"))] = c.get("category_name") or ""
+        except Exception as exc:
+            log("[%s] categories de series indisponibles (%s)" % (pid, exc))
+
+        rows = []
+        for show in shows:
+            name = show.get("name") or ""
+            lang, _canon, _q = xtream.parse_name(name)
+            cid = str(show.get("category_id"))
+            try:
+                rating = float(show.get("rating") or 0)
+            except (TypeError, ValueError):
+                rating = 0.0
+            rows.append((
+                pid, int(show.get("series_id") or 0), name, lang,
+                _clean_label(re.sub(r"^\s*[A-Z]{2,4}\s*[-|:]\s*", "", name)),
+                cid, cat_names.get(cid), show.get("cover") or "",
+                rating, int(show.get("last_modified") or 0),
+            ))
+
+        with self._db:
+            self._db.execute('CREATE TEMP TABLE IF NOT EXISTS incoming_series (id INTEGER PRIMARY KEY)')
+            self._db.execute('DELETE FROM incoming_series')
+            self._db.executemany('INSERT OR IGNORE INTO incoming_series VALUES (?)', [(r[1],) for r in rows])
+            # Les episodes suivent leur serie : sans cela, une serie retiree
+            # du catalogue laisserait ses episodes orphelins et injouables.
+            self._db.execute('DELETE FROM episodes WHERE provider_id=? AND series_id NOT IN (SELECT id FROM incoming_series)', (pid,))
+            self._db.execute('DELETE FROM series WHERE provider_id=? AND series_id NOT IN (SELECT id FROM incoming_series)', (pid,))
+            self._db.executemany(
+                "INSERT INTO series "
+                "(provider_id,series_id,name,lang,title,category_id,"
+                " category_name,icon,rating,added) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(provider_id,series_id) DO UPDATE SET name=excluded.name, lang=excluded.lang, "
+                "title=excluded.title, category_id=excluded.category_id, category_name=excluded.category_name, "
+                "icon=excluded.icon, rating=excluded.rating, added=excluded.added",
+                rows)
+        return len(rows)
+
+    def series_browse(self, lang=None, category=None, query=None,
+                      limit=120, offset=0):
+        sql = ["SELECT provider_id, series_id, title, lang, category_name,",
+               " icon, rating FROM series WHERE 1=1"]
+        args = []
+        if lang:
+            sql.append("AND lang=?")
+            args.append(lang)
+        if category:
+            sql.append("AND category_name=?")
+            args.append(category)
+        if query:
+            sql.append("AND name LIKE ?")
+            args.append("%" + query + "%")
+        sql.append("ORDER BY added DESC, title LIMIT ? OFFSET ?")
+        args += [limit, offset]
+        return [dict(r) for r in self._db.execute(" ".join(sql), args).fetchall()]
+
+    def series_categories(self, lang=None):
+        sql = ("SELECT category_name AS name, COUNT(*) AS n FROM series "
+               "WHERE category_name IS NOT NULL AND category_name<>''")
+        args = []
+        if lang:
+            sql += " AND lang=?"
+            args.append(lang)
+        sql += " GROUP BY category_name ORDER BY n DESC"
+        return [dict(r) for r in self._db.execute(sql, args).fetchall()]
+
+    def series_languages(self):
+        cur = self._db.execute(
+            "SELECT lang, COUNT(*) AS n FROM series WHERE lang IS NOT NULL "
+            "GROUP BY lang ORDER BY n DESC")
+        return [dict(r) for r in cur.fetchall()]
+
+    def series_get(self, provider_id, series_id):
+        row = self._db.execute(
+            "SELECT * FROM series WHERE provider_id=? AND series_id=?",
+            (provider_id, int(series_id))).fetchone()
+        return dict(row) if row else None
+
+    def series_episodes(self, provider_id, series_id):
+        cur = self._db.execute(
+            "SELECT episode_id, season, episode, title, container, duration, plot "
+            "FROM episodes WHERE provider_id=? AND series_id=? "
+            "ORDER BY season, episode", (provider_id, int(series_id)))
+        return [dict(r) for r in cur.fetchall()]
+
+    def series_set_episodes(self, provider_id, series_id, plot, episodes):
+        """Remplace les episodes connus d'une serie.
+
+        Un remplacement complet plutot qu'une fusion : une saison retiree par
+        le fournisseur doit disparaitre, sinon elle reste proposee et sa
+        lecture echoue sans explication.
+        """
+        sid = int(series_id)
+        rows = [(provider_id, int(e["episode_id"]), sid, e.get("season"), e.get("episode"),
+                 e.get("title") or "", e.get("container") or "mp4",
+                 e.get("duration") or "", (e.get("plot") or "")[:1200])
+                for e in episodes]
+        with self._db:
+            self._db.execute("DELETE FROM episodes WHERE provider_id=? AND series_id=?",
+                             (provider_id, sid))
+            self._db.executemany(
+                "INSERT OR REPLACE INTO episodes "
+                "(provider_id,episode_id,series_id,season,episode,title,container,duration,plot) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", rows)
+            self._db.execute(
+                "UPDATE series SET plot=?, episodes_at=? WHERE provider_id=? AND series_id=?",
+                ((plot or "")[:1200], int(time.time()), provider_id, sid))
+        return len(rows)
+
+    def episode_get(self, provider_id, episode_id):
+        row = self._db.execute(
+            "SELECT * FROM episodes WHERE provider_id=? AND episode_id=?",
+            (provider_id, int(episode_id))).fetchone()
+        return dict(row) if row else None
 
     def vod_browse(self, lang=None, category=None, query=None,
                    limit=120, offset=0):
