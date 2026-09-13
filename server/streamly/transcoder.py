@@ -73,6 +73,32 @@ def _ffmpeg_capabilities():
     _FFMPEG_CAPABILITIES = caps
     return caps
 
+def _int0(value):
+    """Entier tolerant : ffprobe omet ou renseigne 'N/A' selon les sources."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+# H264 8 bits 4:2:0 est le seul profil que tous les navigateurs decodent. Une
+# source 10 bits ou 4:2:2 doit etre reencodee, meme si le codec « est du H264 ».
+PASSTHROUGH_PIX_FMTS = ('yuv420p', 'yuvj420p')
+
+
+def _estimated_bitrate(media):
+    """Debit approximatif quand la source ne l'annonce pas.
+
+    Ne sert qu'a renseigner BANDWIDTH dans le manifeste : une source remuxee
+    n'expose qu'une variante, aucune decision ABR n'en depend. Ce chiffre
+    n'est jamais utilise pour valider un plafond — voir passthrough_plan.
+    """
+    w = max(1, _int0(media.get('width')) or 1280)
+    h = max(1, _int0(media.get('height')) or 720)
+    fps = max(1.0, float(media.get('fps') or 25))
+    return int(w * h * fps * 0.07)
+
+
 def _bps(value):
     value = str(value).lower()
     return int(float(value[:-1]) * {'k': 1000, 'm': 1000000}[value[-1]]) if value[-1:] in ('k', 'm') else int(float(value))
@@ -86,9 +112,14 @@ def probe(source, user_agent):
             '-of', 'json', source], capture_output=True, timeout=7, check=True)
         data = json.loads(result.stdout)
         video = next(s for s in data['streams'] if s['codec_type'] == 'video')
+        audio = next((s for s in data['streams'] if s['codec_type'] == 'audio'), {})
         fps = float(Fraction(video.get('avg_frame_rate') or video.get('r_frame_rate') or '25'))
         return {'height': int(video['height']), 'width': int(video['width']),
                 'fps': max(1, min(60, fps or 25)), 'codec': video.get('codec_name'),
+                'pix_fmt': video.get('pix_fmt'), 'video_bitrate': _int0(video.get('bit_rate')),
+                'bitrate': _int0(data.get('format', {}).get('bit_rate')),
+                'audio_codec': audio.get('codec_name'),
+                'audio_bitrate_src': _int0(audio.get('bit_rate')),
                 'streams': data['streams'], 'duration': data.get('format', {}).get('duration')}
     except (OSError, ValueError, KeyError, StopIteration, ZeroDivisionError, subprocess.SubprocessError):
         return {'height': 720, 'width': 1280, 'fps': 25, 'unverified': True, 'streams': []}
@@ -189,7 +220,60 @@ class Transcoder:
             return source_fps / 2.0
         return source_fps
 
-    def _command(self, source, media, generation, audio_only=False):
+    def passthrough_plan(self, media, ceiling=0):
+        """Decide si la source peut etre remultiplexee telle quelle.
+
+        Reencoder une source deja conforme coute les quatre barreaux x264 pour
+        un resultat visuellement identique a la source. Quand le probe confirme
+        du H264 8 bits 4:2:0 et que le debit tient sous le plafond du mode, on
+        se contente de remultiplexer : le CPU tombe d'environ 75 % a 5 % et le
+        spectateur recoit la definition source au lieu du barreau le plus haut.
+
+        Renvoie None des qu'un critere de compatibilite manque. Le plafond du
+        mode, lui, n'est verifie ici que si la source annonce son debit ; sinon
+        la verification est reportee a la mesure des premiers segments.
+        """
+        if not self.cfg.get('passthrough', True):
+            return None
+        if media.get('unverified'):
+            return None
+        if (media.get('codec') or '').lower() != 'h264':
+            return None
+        if (media.get('pix_fmt') or '').lower() not in PASSTHROUGH_PIX_FMTS:
+            return None
+        audio_codec = (media.get('audio_codec') or '').lower()
+        has_audio = bool(audio_codec)
+        # MP2/AC3/MP3 ne sont pas lisibles en HLS par les navigateurs : on
+        # reencode la seule piste audio (~2 % de CPU) et on garde la video.
+        copy_audio = audio_codec == 'aac'
+
+        video_bps = _int0(media.get('video_bitrate'))
+        total_bps = _int0(media.get('bitrate'))
+        if video_bps:
+            if not has_audio:
+                effective = video_bps
+            elif copy_audio and _int0(media.get('audio_bitrate_src')):
+                effective = video_bps + _int0(media.get('audio_bitrate_src'))
+            else:
+                effective = video_bps + _bps(self.cfg.get('audio_bitrate', '96k'))
+        else:
+            # Le debit conteneur inclut deja l'audio source : l'ajouter une
+            # seconde fois compterait double.
+            effective = total_bps
+
+        if ceiling and effective and effective * 1.08 > ceiling:
+            return None
+        # Debit inconnu : c'est le cas courant. Un flux TS servi en HTTP
+        # n'annonce ni format.bit_rate ni stream.bit_rate video — seul l'audio
+        # en a un. Exiger un chiffre ici reviendrait a reserver le remux au
+        # mode Sport. On part donc en remux, et _tick mesure le debit reel sur
+        # les premiers segments : au-dessus du plafond, il rebascule en
+        # encodage via une nouvelle generation, comme pour un failover.
+        return {'audio': has_audio, 'copy_audio': copy_audio,
+                'bitrate': effective or _estimated_bitrate(media),
+                'measured': bool(effective)}
+
+    def _command(self, source, media, generation, audio_only=False, passthrough=None):
         seg = int(self.cfg.get('segment_seconds', 2))
         fps = float(media['fps'])
         ua = self.cfg.get('user_agent', 'VLC/3.0.20')
@@ -216,6 +300,40 @@ class Transcoder:
             cmd += ['-hls_segment_type', 'mpegts',
                     '-hls_segment_filename', 'g%d_a_%%09d.ts' % generation,
                     'g%d_a.m3u8' % generation]
+            return cmd
+
+        # Remux : la source part telle quelle, sans filtre ni encodeur. Les
+        # noms de sortie restent ceux de l'echelle (une variante, niveau 0),
+        # pour que le routage des segments et des tickets ne change pas.
+        if passthrough:
+            cmd = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'warning',
+                   '-rw_timeout', '12000000', '-user_agent', ua,
+                   '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3',
+                   '-analyzeduration', '2000000', '-probesize', '2000000', '-i', source,
+                   '-map', '0:v:0', '-c:v', 'copy']
+            if passthrough['audio']:
+                cmd += ['-map', '0:a:0']
+                cmd += ['-c:a', 'copy'] if passthrough['copy_audio'] else [
+                    '-c:a', 'aac', '-b:a', self.cfg.get('audio_bitrate', '96k'), '-ac', '2']
+            # Pas de -force_key_frames possible sans encodeur : le muxeur ne
+            # peut couper que sur les images cles de la source. hls_time
+            # devient un minimum, la duree reelle des segments suit le GOP.
+            cmd += ['-sn', '-dn',
+                    '-f', 'hls', '-hls_time', str(seg),
+                    '-hls_list_size', str(max(36, int(self.cfg.get('playlist_size', 36))))]
+            if self._ffmpeg_caps.get('hls_flags'):
+                hls_flags = ['delete_segments', 'omit_endlist']
+                if self._ffmpeg_caps.get('hls_independent_segments'):
+                    hls_flags.append('independent_segments')
+                if self._ffmpeg_caps.get('hls_temp_file'):
+                    hls_flags.append('temp_file')
+                cmd += ['-hls_flags', '+'.join(hls_flags)]
+            cmd += ['-hls_segment_type', 'mpegts',
+                    '-var_stream_map', 'v:0,a:0' if passthrough['audio'] else 'v:0']
+            if self._ffmpeg_caps.get('hls_delete_threshold'):
+                cmd += ['-hls_delete_threshold', '12']
+            cmd += ['-hls_segment_filename', 'g%d_%%v_%%09d.ts' % generation,
+                    'g%d_s_%%v.m3u8' % generation]
             return cmd
 
         # Never upscale. The manifest uses the same dimensions as the encoder.
@@ -320,11 +438,19 @@ class Transcoder:
                 w = dict(key=key, sources=sources, index=0, provider=sources[0]['provider'],
                          generation=0, proc=None, state='starting', started=time.time(),
                          last=time.time(), label=label, failovers=0, media=None,
-                         audio_only=bool(audio_only), error=None)
+                         audio_only=bool(audio_only), error=None,
+                         ceiling=max(0, int(ceiling)), passthrough=None,
+                         passthrough_denied=False)
                 self.workers[key] = w
                 threading.Thread(target=self._spawn, args=(key,), daemon=True).start()
             elif w['state'] == 'failed':
                 raise CapacityError('Les sources de cette chaîne sont indisponibles. Arrêtez la lecture puis réessayez.')
+            elif (w.get('passthrough') and w['passthrough']['measured'] and ceiling
+                  and w['passthrough']['bitrate'] * 1.08 > int(ceiling)):
+                # Un flux remuxe n'a qu'une qualite, celle de la source. Un
+                # spectateur au plafond plus bas n'a rien a lire dessus : mieux
+                # vaut le dire que lui servir un flux qui depassera son budget.
+                raise CapacityError('Cette chaîne est diffusée en qualité source, au-dessus du plafond du mode choisi. Passez en Sport ou attendez la fin de l\'autre lecture.')
             ticket = secrets.token_urlsafe(24)
             self.tickets[ticket] = dict(owner=owner, key=key, last=time.time(), created=time.time(),
                                         bytes=0, ceiling=max(0, int(ceiling)), budget=max(0, int(budget)),
@@ -346,6 +472,10 @@ class Transcoder:
             outdir = os.path.join(self.hls_dir, key)
             os.makedirs(outdir, exist_ok=True)
             w['media'], w['started'], w['error'] = media, time.time(), None
+            # Chaque generation reprobe : une source de secours peut etre
+            # remuxable la ou la precedente ne l'etait pas, et inversement.
+            w['passthrough'] = None if (audio_only or w.get('passthrough_denied')) else \
+                self.passthrough_plan(media, w.get('ceiling', 0))
             try:
                 # FFmpeg recopie l'URL source (avec identifiants) dans ses logs :
                 # fichier en 600, et jamais renvoyé tel quel à l'UI.
@@ -355,7 +485,8 @@ class Transcoder:
                         os.chmod(log_path, 0o600)
                     except OSError:
                         pass
-                    w['proc'] = subprocess.Popen(self._command(source, media, generation, audio_only=audio_only),
+                    w['proc'] = subprocess.Popen(self._command(source, media, generation, audio_only=audio_only,
+                                                                  passthrough=w['passthrough']),
                                                  cwd=outdir, stdout=log, stderr=log)
                 w['state'] = 'buffering'
             except OSError:
@@ -383,6 +514,11 @@ class Transcoder:
         if t.get('audio_only'):
             return [0]
         ceiling = t.get('ceiling', 0)
+        plan = (self.workers.get(t.get('key')) or {}).get('passthrough')
+        if plan:
+            # Tant que le debit n'est pas mesure, on laisse lire : c'est _tick
+            # qui declasse le worker s'il depasse, pas un 403 a l'aveugle.
+            return [0] if not (ceiling and plan['measured']) or plan['bitrate'] * 1.08 <= ceiling else []
         audio = _bps(self.cfg.get('audio_bitrate', '96k'))
         levels = [i for i, r in enumerate(self.ladder) if not ceiling or (_bps(r['maxrate']) + audio) * 1.08 <= ceiling]
         return levels
@@ -403,6 +539,14 @@ class Transcoder:
 
             media = w['media'] or {'width': 1280, 'height': 720, 'fps': 25}
             lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-INDEPENDENT-SEGMENTS']
+            if w.get('passthrough'):
+                # Definition source, sans mise a l'echelle : c'est tout
+                # l'interet du remux. Une seule variante, donc pas d'ABR.
+                bw = int(w['passthrough']['bitrate'] * 1.08)
+                lines += ['#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=%.3f' % (
+                              bw, int(media['width']), int(media['height']), float(media['fps'])),
+                          'g%d_s_0.m3u8' % w['generation']]
+                return '\n'.join(lines) + '\n'
             for i in self.allowed_levels(t):
                 r = self.ladder[i]
                 h = min(int(r['height']), media['height']) // 2 * 2
@@ -420,6 +564,7 @@ class Transcoder:
                     'uptime_s': round(time.time() - w['started']), 'media': {
                         k: v for k, v in (w['media'] or {}).items() if k != 'streams'},
                     'viewers': sum(t['key'] == w['key'] for t in self.tickets.values()),
+                    'passthrough': bool(w.get('passthrough')),
                     'error': w.get('error')}
             if ticket:
                 t = self.tickets.get(ticket)
@@ -470,6 +615,58 @@ class Transcoder:
             if now - t['last'] > 180:
                 self.release(ticket)
 
+    def _ticket_ceiling_locked(self, key):
+        """Plafond le plus bas parmi les spectateurs d'un worker (0 = aucun)."""
+        ceilings = [t['ceiling'] for t in self.tickets.values() if t['key'] == key]
+        if not ceilings or any(c == 0 for c in ceilings):
+            return 0
+        return min(ceilings)
+
+    def _measured_bitrate_locked(self, key, generation):
+        """Debit reel des segments deja ecrits, en bits par seconde.
+
+        La source n'annonce rien : ses segments, si. On additionne les
+        segments complets de la generation courante et les durees que le
+        muxeur a inscrites en face. Le dernier segment de la playlist est
+        ignore, il peut etre en cours d'ecriture.
+        """
+        outdir = os.path.join(self.hls_dir, key)
+        try:
+            with open(os.path.join(outdir, 'g%d_s_0.m3u8' % generation), encoding='utf-8') as fh:
+                playlist = fh.read()
+        except OSError:
+            return 0
+        entries = re.findall(r'#EXTINF:([\d.]+)[^\n]*\n([^\n#]+)', playlist)
+        if len(entries) < 4:
+            return 0
+        total_bytes = seconds = 0
+        for duration, name in entries[:-1]:
+            try:
+                total_bytes += os.path.getsize(os.path.join(outdir, name.strip()))
+            except OSError:
+                continue
+            seconds += float(duration)
+        return int(total_bytes * 8 / seconds) if seconds > 0 else 0
+
+    def _restart_locked(self, key, w, reason):
+        """Relance la meme source dans une nouvelle generation.
+
+        Reutilise le mecanisme du failover : les segments deja servis restent
+        lisibles, et le lecteur recharge le manifeste en detectant le
+        changement de generation.
+        """
+        self._kill(w['proc'])
+        w['generation'] += 1
+        w['state'] = 'starting'
+        w['error'] = reason
+        outdir = os.path.join(self.hls_dir, key)
+        for f in os.listdir(outdir):
+            m = re.match(r'g(\d+)_', f)
+            if m and int(m[1]) < w['generation'] - 1:
+                try: os.unlink(os.path.join(outdir, f))
+                except FileNotFoundError: pass
+        threading.Thread(target=self._spawn, args=(key,), daemon=True).start()
+
     def _tick(self):
         with self._lock:
             self._expire_locked()
@@ -481,6 +678,18 @@ class Transcoder:
                 latest = max((os.path.getmtime(f) for f in files if os.path.exists(f)), default=w['started'])
                 if files:
                     w['state'] = 'playing'
+                if w.get('passthrough') and not w['passthrough']['measured']:
+                    measured = self._measured_bitrate_locked(key, w['generation'])
+                    if measured:
+                        w['passthrough'] = dict(w['passthrough'], bitrate=measured, measured=True)
+                        ceiling = self._ticket_ceiling_locked(key)
+                        if ceiling and measured * 1.08 > ceiling:
+                            # Le remux depasse le plafond du mode : on repasse
+                            # a l'echelle encodee plutot que de laisser filer
+                            # le budget du spectateur.
+                            w['passthrough'], w['passthrough_denied'] = None, True
+                            self._restart_locked(key, w, None)
+                            continue
                 proc = w['proc']
                 stalled = time.time() - latest > int(self.cfg.get('stall_timeout_seconds', 20))
                 if not (stalled or (proc and proc.poll() is not None)):

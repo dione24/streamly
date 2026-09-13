@@ -86,6 +86,128 @@ class WorkerTests(unittest.TestCase):
         finally:
             t.close()
 
+class PassthroughTests(unittest.TestCase):
+    """Remux : une source deja conforme ne doit plus passer par x264."""
+    H264 = {'height':720, 'width':1280, 'fps':25, 'codec':'h264', 'pix_fmt':'yuv420p',
+            'video_bitrate':1400000, 'bitrate':1500000, 'audio_codec':'aac',
+            'audio_bitrate_src':96000, 'streams':[{'codec_type':'video'},{'codec_type':'audio'}]}
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.t = Transcoder(CFG, self.tmp.name + '/hls', self.tmp.name + '/logs', monitor=False)
+        self.spawn = patch.object(self.t, '_spawn').start()
+    def tearDown(self):
+        self.t.close(); patch.stopall(); self.tmp.cleanup()
+
+    def test_compatible_source_is_copied_not_encoded(self):
+        plan = self.t.passthrough_plan(self.H264)
+        self.assertTrue(plan['copy_audio'])
+        cmd = self.t._command('http://source', self.H264, 3, passthrough=plan)
+        self.assertEqual(cmd[cmd.index('-c:v')+1], 'copy')
+        self.assertEqual(cmd[cmd.index('-c:a')+1], 'copy')
+        self.assertNotIn('libx264', cmd); self.assertNotIn('-filter_complex', cmd)
+        # Le routage des segments ne change pas : une variante, niveau 0.
+        self.assertIn('g3_%v_%09d.ts', cmd)
+        self.assertEqual(cmd[cmd.index('-var_stream_map')+1], 'v:0,a:0')
+
+    def test_non_aac_audio_is_reencoded_but_video_stays_copied(self):
+        plan = self.t.passthrough_plan(dict(self.H264, audio_codec='ac3', audio_bitrate_src=384000))
+        self.assertFalse(plan['copy_audio'])
+        cmd = self.t._command('http://source', self.H264, 0, passthrough=plan)
+        self.assertEqual(cmd[cmd.index('-c:v')+1], 'copy')
+        self.assertEqual(cmd[cmd.index('-c:a')+1], 'aac')
+
+    def test_incompatible_sources_fall_back_to_encoding(self):
+        for media in (dict(self.H264, codec='hevc'),
+                      dict(self.H264, pix_fmt='yuv420p10le'),
+                      {'height':720, 'width':1280, 'fps':25, 'unverified':True, 'streams':[]}):
+            self.assertIsNone(self.t.passthrough_plan(media))
+        off = Transcoder(dict(CFG, passthrough=False), self.tmp.name+'/h3', self.tmp.name+'/l3', monitor=False)
+        try:
+            self.assertIsNone(off.passthrough_plan(self.H264))
+        finally:
+            off.close()
+
+    def test_ceiling_is_never_exceeded_by_a_remux(self):
+        # 1,5 Mb/s ne tient pas sous le plafond Eco (650 kb/s) : on reencode.
+        self.assertIsNone(self.t.passthrough_plan(self.H264, ceiling=650000))
+        self.assertIsNotNone(self.t.passthrough_plan(self.H264, ceiling=2000000))
+        # Debit inconnu (cas courant d'un TS en HTTP) : remux optimiste,
+        # marque non mesure, plafond verifie plus tard sur les segments.
+        blind = dict(self.H264, video_bitrate=0, bitrate=0)
+        plan = self.t.passthrough_plan(blind, ceiling=2000000)
+        self.assertFalse(plan['measured'])
+
+    def test_remuxed_worker_exposes_one_level_and_source_resolution(self):
+        ticket = self.t.open('a', 'one', [{'provider':'p','url':'http://s'}], ceiling=0)
+        w = next(iter(self.t.workers.values()))
+        w['media'] = dict(self.H264, height=1080, width=1920)
+        w['passthrough'] = self.t.passthrough_plan(w['media'])
+        self.assertEqual(self.t.allowed_levels(self.t.ticket(ticket)), [0])
+        playlist = self.t.master_playlist(ticket)
+        self.assertIn('RESOLUTION=1920x1080', playlist)
+        self.assertIn('g0_s_0.m3u8', playlist)
+        self.assertNotIn('g0_s_1.m3u8', playlist)
+        self.assertTrue(self.t.status(ticket)['passthrough'])
+
+    def test_joining_viewer_below_the_source_bitrate_is_told_why(self):
+        self.t.open('a', 'one', [{'provider':'p','url':'http://s'}], ceiling=0)
+        w = next(iter(self.t.workers.values()))
+        w['media'] = self.H264
+        w['passthrough'] = self.t.passthrough_plan(self.H264)
+        with self.assertRaises(CapacityError):
+            self.t.open('b', 'one', [{'provider':'p','url':'http://s'}], ceiling=650000)
+        # Un plafond suffisant partage le meme worker, sans reencodage.
+        self.t.open('c', 'one', [{'provider':'p','url':'http://s'}], ceiling=3000000)
+        self.assertEqual(len(self.t.workers), 1)
+
+
+class PassthroughDowngradeTests(unittest.TestCase):
+    """Un remux dont le debit reel depasse le plafond doit rendre la main."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.t = Transcoder(CFG, self.tmp.name + '/hls', self.tmp.name + '/logs', monitor=False)
+        self.spawn = patch.object(self.t, '_spawn').start()
+        self.ticket = self.t.open('a', 'one', [{'provider':'p','url':'http://s'}], ceiling=650000)
+        self.w = next(iter(self.t.workers.values()))
+        self.w['state'] = 'playing'
+        self.w['passthrough'] = {'audio':True, 'copy_audio':True, 'bitrate':1200000, 'measured':False}
+        self.dir = pathlib.Path(self.tmp.name) / 'hls' / self.w['key']
+        self.dir.mkdir(parents=True)
+    def tearDown(self):
+        self.t.close(); patch.stopall(); self.tmp.cleanup()
+    def write_segments(self, size):
+        names = []
+        for i in range(5):
+            name = 'g0_0_%09d.ts' % i
+            (self.dir / name).write_bytes(b'x' * size)
+            names.append('#EXTINF:2.000,\n' + name)
+        (self.dir / 'g0_s_0.m3u8').write_text('#EXTM3U\n' + '\n'.join(names) + '\n')
+
+    def test_source_above_the_ceiling_falls_back_to_the_ladder(self):
+        self.write_segments(500000)  # 500 ko / 2 s = 2 Mb/s, au-dessus de 650 kb/s
+        self.t._tick()
+        self.assertIsNone(self.w['passthrough'])
+        self.assertTrue(self.w['passthrough_denied'])
+        self.assertEqual(self.w['generation'], 1)
+        # Le spectateur retrouve les barreaux compatibles avec son plafond.
+        self.assertEqual(self.t.allowed_levels(self.t.ticket(self.ticket)), [2, 3])
+
+    def test_source_under_the_ceiling_keeps_the_remux_and_records_the_rate(self):
+        self.write_segments(120000)  # 120 ko / 2 s = 480 kb/s
+        self.t._tick()
+        self.assertTrue(self.w['passthrough']['measured'])
+        self.assertEqual(self.w['passthrough']['bitrate'], 480000)
+        self.assertEqual(self.w['generation'], 0)
+        self.assertEqual(self.t.allowed_levels(self.t.ticket(self.ticket)), [0])
+
+    def test_measurement_waits_for_enough_segments(self):
+        (self.dir / 'g0_0_000000000.ts').write_bytes(b'x' * 500000)
+        (self.dir / 'g0_s_0.m3u8').write_text('#EXTM3U\n#EXTINF:2.000,\ng0_0_000000000.ts\n')
+        self.t._tick()
+        self.assertIsNotNone(self.w['passthrough'])
+        self.assertFalse(self.w['passthrough']['measured'])
+
+
 class CatalogTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.cat = Catalog(self.tmp.name + '/catalog.db')

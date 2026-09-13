@@ -61,6 +61,9 @@
   "_comment_fps": "En dessous de cette hauteur, une source a plus de 30 i/s est encodee a la moitie de sa cadence : invisible en basse definition, 31 % de CPU economise. 0 desactive le plafonnement.",
   "high_fps_min_height": 480,
 
+  "_comment_passthrough": "Remux au lieu de reencoder quand la source est deja du H264 8 bits 4:2:0 et que son debit tient sous le plafond du mode : ~5 % de CPU au lieu de ~75 %, et la definition source. Sans debit annonce par la source, le remux n'est retenu que pour le mode Sport (sans plafond). false force le reencodage.",
+  "passthrough": true,
+
   "x264_preset": "veryfast",
   "audio_bitrate": "96k",
   "max_concurrent_streams": 2,

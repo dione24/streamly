@@ -45,6 +45,23 @@ with tempfile.TemporaryDirectory() as root:
     for other in durations[1:]:
         assert len(other) == len(ref), (ref, other)
         assert all(abs(a-b) < 0.15 for a, b in zip(ref, other)), (ref, other)
+    # --- Remux : la source synthetique est deja du H264/AAC 4:2:0.
+    plan = t.passthrough_plan(media)
+    assert plan and plan['copy_audio'], plan
+    remux = root/'copy'; remux.mkdir()
+    r = subprocess.run(t._command(source, media, 0, passthrough=plan), cwd=remux, capture_output=True, timeout=45)
+    assert r.returncode == 0, r.stderr.decode()[-2000:]
+    assert not (remux/'g0_s_1.m3u8').exists(), 'le remux ne doit produire qu une variante'
+    copy_durations = [float(x) for x in re.findall(r'#EXTINF:([\d.]+)', (remux/'g0_s_0.m3u8').read_text())]
+    assert copy_durations, 'aucun segment remuxe'
+    segments = sorted(remux.glob('g0_0_*.ts'))
+    assert segments, 'aucun segment remuxe sur disque'
+    copied = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(segments[0])]))
+    cv = next(s for s in copied['streams'] if s['codec_type']=='video')
+    # Definition source conservee : aucun barreau de l echelle n a ete applique.
+    assert cv['codec_name']=='h264' and (cv['width'],cv['height'])==(320,180), cv
+    assert any(s['codec_type']=='audio' and s['codec_name']=='aac' for s in copied['streams']), copied
+
     catalog = Catalog(str(root/'catalog.db'))
     movies = Movies(cfg,str(root/'movies'),catalog,t)
     job = movies.start({'provider_id':'provider-1','stream_id':1,'title':'Synthetic fixture'},source,480)
@@ -56,6 +73,6 @@ with tempfile.TemporaryDirectory() as root:
     download = root/'movies'/j['id']/j['download']
     video = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(download)]))
     assert next(s for s in video['streams'] if s['codec_type']=='video')['codec_name']=='h264'
-    print(json.dumps({'live_50fps_segments':durations,'prepared_qualities':j['qualities'],'download_bytes':j['size_bytes'],'provider_reservation_released':not t.reservations}))
+    print(json.dumps({'live_50fps_segments':durations,'remux_segments':copy_durations,'prepared_qualities':j['qualities'],'download_bytes':j['size_bytes'],'provider_reservation_released':not t.reservations}))
     assert not t.reservations
     t.close();http.shutdown();http.server_close()
