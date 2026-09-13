@@ -27,6 +27,12 @@ class State:
     def __init__(self):
         self.cfg = cfgmod.load()
         self.catalog = Catalog(os.path.join(cfgmod.DATA_DIR, "catalog.db"))
+        # Un abonnement retire de la configuration laissait ses chaines dans le
+        # catalogue : elles restaient proposees alors qu'aucune source ne
+        # pouvait plus les servir. On repart toujours d'un catalogue coherent.
+        dropped = self.catalog.purge_absent([p["id"] for p in self.cfg.get("providers", [])])
+        if dropped:
+            print("catalogue purge des providers absents : %s" % dropped, flush=True)
         self.transcoder = Transcoder(self.cfg, cfgmod.HLS_DIR, cfgmod.LOG_DIR)
         self.sessions = Sessions(self.cfg)
         self.movies = Movies(self.cfg, os.path.join(cfgmod.DATA_DIR, "movies"), self.catalog, self.transcoder)
@@ -390,14 +396,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(ACCESS_LOG[-120:])
 
         if path == "/api/languages":
-            return self._json(cat.languages())
+            return self._json(cat.languages(provider=one("provider")))
 
         if path == "/api/categories":
-            return self._json(cat.categories(one("lang")))
+            return self._json(cat.categories(one("lang"), provider=one("provider")))
 
         if path == "/api/channels":
             return self._json(cat.browse(
                 lang=one("lang"), category=one("category"), query=one("q"),
+                provider=one("provider"),
                 limit=max(1, min(int(one("limit", 200)), 1000)),
                 offset=max(0, int(one("offset", 0)))))
 
@@ -522,7 +529,10 @@ class Handler(BaseHTTPRequestHandler):
                          if p.get("id") != pid]
             STATE.cfg["providers"] = providers
             cfgmod.save({"providers": providers})
-            return self._json({"ok": True})
+            # Sans cette purge, les chaines de l'abonnement supprime restent
+            # listees et ne peuvent plus rien jouer.
+            dropped = cat.purge_absent([p["id"] for p in providers])
+            return self._json({"ok": True, "purged": dropped})
 
         if path == "/api/sync":
             if STATE.sync_lock.locked():

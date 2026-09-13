@@ -6,9 +6,9 @@ const store = {
   remove(k) { try { localStorage.removeItem('streamly_' + k); } catch (_) {} },
   json(k, fallback) { try { return JSON.parse(this.get(k)) || fallback; } catch (_) { return fallback; } },
 };
-const state = {mode: 'live', lang: store.get('lang'), category: '', query: '', favorites: [],
+const state = {mode: 'live', lang: store.get('lang'), provider: store.get('provider'), category: '', query: '', favorites: [],
   page: 0, pageSize: 48, request: 0, controller: null, hls: null, ticket: null, current: null,
-  generation: null, retries: 0, recoveryTimer: null, playback: 0, stalls: 0, started: 0,
+  generation: null, retries: 0, statusMisses: 0, recoveryTimer: null, playback: 0, stalls: 0, started: 0,
   frames: false, movie: null, job: null, role: 'viewer', configTimer: null, jobTimer: null};
 function message(text) { $('#notice').textContent = text; $('#notice').hidden = !text; }
 function tokenForApi() { return (store.get('token') || '').trim(); }
@@ -117,10 +117,16 @@ async function stop() {
   ++state.playback;
   const ticket = state.ticket; state.ticket = null;
   destroyPlayer(); state.current = null; state.job = null; $('#player-wrap').hidden = true;
+  $('#preferences').hidden = false;
+  renderRecents();
   if (ticket) await post('/stop', {ticket}, {skipAuthRedirect: true}).catch(failure);
 }
 function playbackUI(title, live) {
   $('#player-wrap').hidden = false; $('#now-playing').textContent = title;
+  // Pendant la lecture, on replie ce qui ne sert qu'avant de lancer : le bloc
+  // de preferences et la reprise. Le reglage de qualite reste dans le lecteur.
+  $('#preferences').hidden = true;
+  const recent = $('#recent-wrap'); if (recent) recent.hidden = true;
   $('#live-badge').textContent = live ? '● DIRECT' : '● FILM PRÊT';
   $('#back-live').hidden = !live; $('#player-status').textContent = 'Préparation de la lecture…';
   $('#usage').textContent = live ? '0 Mo de vidéo' : 'Version préparée';
@@ -215,7 +221,22 @@ setInterval(async () => {
       attach(state.url + '?generation=' + st.generation, true, state.playback);
     }
     state.generation = st.generation;
-  } catch (err) { if (ticket === state.ticket) $('#player-status').textContent = err.message; }
+    // La lecture va bien : on efface toute alerte laissee par un sondage rate.
+    state.statusMisses = 0;
+    if (!video.paused && video.readyState >= 3) {
+      $('#player-status').textContent = state.job ? 'Lecture en cours' : 'Direct en cours';
+    }
+  } catch (err) {
+    // Le premier sondage arrive parfois avant l'enregistrement du ticket, et
+    // une liaison irreguliere en fait echouer d'autres. Un echec isole ne
+    // signifie pas que la lecture est perdue : on n'alerte qu'apres plusieurs
+    // echecs consecutifs, sinon un simple hoquet affichait une panne.
+    if (ticket !== state.ticket) return;
+    state.statusMisses = (state.statusMisses || 0) + 1;
+    if (state.statusMisses >= 3 && (video.paused || video.readyState < 3)) {
+      $('#player-status').textContent = err.message;
+    }
+  }
   finally { statusBusy = false; }
 }, 4000);
 setInterval(() => {
@@ -256,6 +277,7 @@ async function renderChannels(more = false) {
     else {
       const q = new URLSearchParams({limit: String(state.pageSize + 1), offset: String(state.page * state.pageSize)});
       if (state.lang) q.set('lang', state.lang); if (state.category) q.set('category', state.category); if (state.query) q.set('q', state.query);
+      if (state.provider) q.set('provider', state.provider);
       items = await api((state.mode === 'vod' ? '/vod?' : '/channels?') + q, {signal: controller.signal});
     }
     if (serial !== state.request) return;
@@ -271,18 +293,43 @@ async function renderChannels(more = false) {
 $('#load-more').onclick = () => { state.page++; renderChannels(true); };
 let filterGeneration = 0;
 async function loadFilters() {
-  const langs = await api('/languages'); const sel = $('#lang'); sel.replaceChildren(new Option('Toutes les langues', ''));
+  await loadProviders();
+  const langs = await api('/languages' + (state.provider ? '?provider=' + encodeURIComponent(state.provider) : '')); const sel = $('#lang'); sel.replaceChildren(new Option('Toutes les langues', ''));
   langs.forEach(l => sel.add(new Option(l.lang, l.lang))); sel.value = state.lang;
   if (sel.selectedIndex < 0) { state.lang = ''; sel.value = ''; }
   await loadCategories();
 }
 async function loadCategories() {
   const serial = ++filterGeneration;
-  const cats = await api((state.mode === 'vod' ? '/vod/categories' : '/categories') + (state.lang ? '?lang=' + encodeURIComponent(state.lang) : ''));
+  const params = new URLSearchParams();
+  if (state.lang) params.set('lang', state.lang);
+  if (state.provider) params.set('provider', state.provider);
+  const suffix = params.toString() ? '?' + params : '';
+  const cats = await api((state.mode === 'vod' ? '/vod/categories' : '/categories') + suffix);
   if (serial !== filterGeneration) return;
   const sel = $('#category'); sel.replaceChildren(new Option('Toutes les catégories', ''));
   cats.forEach(c => sel.add(new Option(c.name, c.name))); sel.value = state.category;
 }
+/* Plusieurs abonnements peuvent couvrir la meme chaine. Le selecteur permet
+   d'explorer le catalogue d'un abonnement precis plutot que le melange. */
+async function loadProviders() {
+  const st = await api('/status');
+  const sel = $('#provider');
+  if (!sel) return;
+  sel.replaceChildren(new Option('Tous les abonnements', ''));
+  (st.providers || []).forEach(p => sel.add(new Option(p.name || p.id, p.id)));
+  sel.value = state.provider;
+  if (sel.selectedIndex < 0) { state.provider = ''; sel.value = ''; store.set('provider', ''); }
+}
+
+$('#provider').onchange = async e => {
+  state.provider = e.target.value;
+  state.lang = ''; state.category = '';
+  store.set('provider', state.provider);
+  await loadFilters();
+  await renderChannels();
+};
+
 $('#lang').onchange = async e => { state.lang = e.target.value; state.category = ''; store.set('lang', state.lang); await loadCategories(); await renderChannels(); };
 $('#category').onchange = e => { state.category = e.target.value; renderChannels(); };
 let searchTimer;

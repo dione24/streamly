@@ -10,11 +10,16 @@ Deux particularites constatees sur des panels reels et traitees ici :
 """
 import json
 import re
+import unicodedata
 import urllib.parse
 import urllib.request
 
 # Tokens de qualite rencontres dans les noms de chaines, du moins bon au meilleur.
-QUALITY_TOKENS = r"\b(4K|UHD|FHD|FULLHD|1080P?|720P?|576P|480P|360P|HD|SD|HEVC|H265|LQ|MQ|HQ)\b"
+QUALITY_TOKENS = r"\b(4K|UHD|FHD|FULLHD|1080P?|720P?|576P|480P|360P|HD|SD|HEVC|H265|LQ|MQ|HQ|RAW)\b"
+
+# Decorations purement typographiques ajoutees par certains panels autour des
+# noms : « ####### CANAL+ LIVE ####### ».
+_DECORATION_RE = re.compile(r"[#*=~_·•▬═■□◆♦]+")
 
 QUALITY_HEIGHT = {
     "SD": 480, "LQ": 360, "MQ": 480, "HQ": 720,
@@ -119,7 +124,13 @@ def parse_name(name):
 
     'FR| CANAL+ SPORT FHD' -> ('FR', 'CANAL SPORT', 'FHD')
     """
-    upper = (name or "").upper()
+    # Certains panels ecrivent la qualite en exposants Unicode : « FRANCE 2 ᴴᴰ ».
+    # Sans normalisation, ces caracteres ne sont pas reconnus comme des tokens
+    # de qualite : la chaine forme un groupe a part, ne peut plus servir de
+    # source de secours a sa jumelle, et apparait en double dans la liste.
+    # NFKC ramene ᴴᴰ a HD, ʰᵉᵛᶜ a hevc, ᴿᴬᵂ a RAW.
+    upper = unicodedata.normalize("NFKC", name or "").upper()
+    upper = _DECORATION_RE.sub(" ", upper)
     m = _PREFIX_RE.match(upper)
     lang = m.group(1) if m else None
 

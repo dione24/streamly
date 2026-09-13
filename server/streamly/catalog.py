@@ -111,6 +111,28 @@ class Catalog:
     def close(self):
         self._db.close()
 
+    def purge_absent(self, active_ids):
+        """Efface les entrees des providers qui ne sont plus configures.
+
+        Sans cela, supprimer un abonnement laisse ses chaines et ses films dans
+        le catalogue : l'interface continue de les proposer alors qu'aucune
+        source ne peut plus les servir, et la lecture reste noire.
+        """
+        active = tuple(active_ids)
+        removed = {}
+        with self._db:
+            for table in ("channels", "vod", "sync_state"):
+                if active:
+                    holes = ",".join("?" * len(active))
+                    cur = self._db.execute(
+                        "DELETE FROM %s WHERE provider_id NOT IN (%s)" % (table, holes),
+                        active)
+                else:
+                    cur = self._db.execute("DELETE FROM %s" % table)
+                if cur.rowcount > 0:
+                    removed[table] = cur.rowcount
+        return removed
+
     # ------------------------------------------------------------ synchro
 
     def sync_provider(self, provider, client, log=print):
@@ -298,33 +320,49 @@ class Catalog:
             "SELECT s.provider_id, s.last_sync, s.channels, s.note FROM sync_state s")
         return [dict(r) for r in cur.fetchall()]
 
-    def categories(self, lang=None):
+    def categories(self, lang=None, provider=None):
         sql = ("SELECT category_name AS name, COUNT(*) AS n FROM channels "
                "WHERE category_name IS NOT NULL AND category_name<>'' AND is_backup=0")
         args = []
+        if provider:
+            sql += " AND provider_id=?"
+            args.append(provider)
         if lang:
             sql += " AND lang=?"
             args.append(lang)
         sql += " GROUP BY category_name ORDER BY n DESC"
         return [dict(r) for r in self._db.execute(sql, args).fetchall()]
 
-    def languages(self):
-        cur = self._db.execute(
-            "SELECT lang, COUNT(*) AS n FROM channels "
-            "WHERE lang IS NOT NULL AND is_backup=0 "
-            "GROUP BY lang ORDER BY n DESC")
+    def languages(self, provider=None):
+        sql = ("SELECT lang, COUNT(*) AS n FROM channels "
+               "WHERE lang IS NOT NULL AND is_backup=0")
+        args = []
+        if provider:
+            sql += " AND provider_id=?"
+            args.append(provider)
+        sql += " GROUP BY lang ORDER BY n DESC"
+        cur = self._db.execute(sql, args)
         return [dict(r) for r in cur.fetchall()]
 
-    def browse(self, lang=None, category=None, query=None, limit=200, offset=0):
-        """Une ligne par chaine distincte : on masque les doublons de qualite."""
+    def browse(self, lang=None, category=None, query=None, limit=200, offset=0,
+               provider=None):
+        """Une ligne par chaine distincte : on masque les doublons de qualite.
+
+        `provider` restreint a un abonnement : utile quand plusieurs comptes
+        sont configures et que l'on veut explorer le catalogue de l'un d'eux.
+        """
         sql = ["SELECT lang, canonical,",
                "  MIN(name) AS label,",
                "  MAX(icon) AS icon,",
                "  MAX(category_name) AS category,",
                "  COUNT(*) AS sources,",
-               "  MAX(height) AS best_height",
+               "  MAX(height) AS best_height,",
+               "  GROUP_CONCAT(DISTINCT provider_id) AS providers",
                "FROM channels WHERE canonical<>'' AND is_backup=0"]
         args = []
+        if provider:
+            sql.append("AND provider_id=?")
+            args.append(provider)
         if lang:
             sql.append("AND lang=?")
             args.append(lang)
