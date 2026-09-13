@@ -46,10 +46,23 @@ class Sessions:
                             and verify_password(password, u.get('salt'), u.get('password_hash'))):
                         role = u.get('role', 'admin')
                         break
+                # Fallback : premier demarrage ou instance sans comptes 'users' definis
+                if not role and not self.cfg.get('users', []):
+                    candidate = password or username
+                    if candidate and secrets.compare_digest(str(candidate), str(self.cfg.get('token', ''))):
+                        role = 'admin'
+                    elif candidate and secrets.compare_digest(str(candidate), str(self.cfg.get('viewer_token', ''))):
+                        role = 'viewer'
             elif token and secrets.compare_digest(str(token), str(self.cfg.get('token', ''))):
                 role = 'admin'
             elif token and secrets.compare_digest(str(token), str(self.cfg.get('viewer_token', ''))):
                 role = 'viewer'
+            elif password and not self.cfg.get('users', []):
+                if secrets.compare_digest(str(password), str(self.cfg.get('token', ''))):
+                    role = 'admin'
+                elif secrets.compare_digest(str(password), str(self.cfg.get('viewer_token', ''))):
+                    role = 'viewer'
+
             if not role:
                 self.attempts[address] = (count + 1, since)
                 raise ValueError('Identifiants refusés.' if username else 'Jeton refusé.')

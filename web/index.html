@@ -2,10 +2,10 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#101411"><meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0e120f"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="style.css?v=20260913-v8">
-<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260913-v8"></script>
+<link rel="stylesheet" href="style.css?v=20260913-v12">
+<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260913-v12"></script>
 </head>
 <body>
 <section id="login" class="screen">
@@ -14,12 +14,18 @@
   <p class="eyebrow">VOTRE TÉLÉ, VOTRE RYTHME</p>
   <h1>Le direct.<br>La liberté en plus.</h1>
   <p class="intro">Moins de données. Plus de moments à regarder.</p>
-  <label for="user-input">Identifiant</label><input id="user-input" type="text" required autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Votre identifiant">
-  <label for="token-input">Mot de passe</label><input id="token-input" type="password" required autocomplete="current-password" placeholder="Votre mot de passe">
-  <label class="remember-token"><input id="remember-token" type="checkbox" checked> Rester connecté sur cet appareil</label>
-  <button id="token-go" class="primary" type="submit">Se connecter <span aria-hidden="true">↗</span></button>
+  <label for="user-input">Identifiant <span class="label-hint">(optionnel si vous utilisez votre jeton)</span></label>
+  <input id="user-input" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Votre identifiant">
+  <label for="token-input">Mot de passe ou jeton d’accès</label>
+  <input id="token-input" type="password" required autocomplete="current-password" placeholder="Mot de passe ou jeton d'accès">
+  <label class="remember-token" for="remember-token">
+   <input id="remember-token" type="checkbox" checked>
+   <span class="custom-checkbox" aria-hidden="true"></span>
+   <span class="remember-text">Rester connecté sur cet appareil</span>
+  </label>
+  <button id="token-go" class="primary" type="submit">Se connecter <span class="go-arrow" aria-hidden="true">↗</span></button>
   <p id="login-error" class="error" role="alert"></p>
-  <span class="muted small">Votre bibliothèque reste sur votre serveur.</span>
+  <span class="muted small">Votre bibliothèque reste hébergée sur votre propre serveur.</span>
  </form>
  <div class="login-art" aria-hidden="true"><div class="orbit"></div><span>LE PLAISIR<br>DU DIRECT<span class="accent">.</span></span><p>CONÇU POUR LES CONNEXIONS QUI BOUGENT.</p></div>
 </section>
@@ -27,48 +33,161 @@
  <header class="topbar">
   <a class="wordmark" href="/" aria-label="Accueil Streamly"><span class="brand-icon">S</span> streamly<span class="brand-dot">.</span></a>
   <nav class="tabs" aria-label="Bibliothèque">
-   <button id="tab-live" class="tab active">Direct</button><button id="tab-vod" class="tab">Films</button><button id="tab-fav" class="tab">Favoris</button><button id="tab-prepared" class="tab">Mes films prêts</button>
+   <button id="tab-live" class="tab active" data-nav="tab">Direct</button><button id="tab-vod" class="tab" data-nav="tab">Films</button><button id="tab-fav" class="tab" data-nav="tab">Favoris</button><button id="tab-prepared" class="tab" data-nav="tab">Mes films prêts</button>
   </nav>
-  <div class="account-actions"><button id="tab-conf" class="quiet">Réglages</button><button id="logout" class="quiet" title="Déconnexion">Quitter</button></div>
+  <div class="account-actions">
+   <button id="tab-conf" class="quiet" data-nav="tab">Réglages</button>
+   <button id="logout" class="quiet" title="Déconnexion">Quitter</button>
+  </div>
  </header>
  <div id="notice" class="notice" role="status" hidden></div>
  <section class="workspace">
   <section id="player-wrap" class="player" hidden aria-label="Lecteur vidéo">
    <div class="video-stage"><video id="video" controls playsinline preload="metadata"></video></div>
-   <div class="player-heading"><div><span id="live-badge" class="live-badge">● DIRECT</span><h1 id="now-playing"></h1></div><button id="stop" class="quiet">Fermer ✕</button></div>
+   <div class="player-heading">
+    <div class="player-title-box">
+     <span id="live-badge" class="live-badge"><span class="pulse-dot" aria-hidden="true"></span> DIRECT</span>
+     <h1 id="now-playing"></h1>
+    </div>
+    <div class="player-header-actions">
+     <button id="toggle-sidebar" class="quiet toggle-sidebar-btn" title="Afficher ou masquer la liste des chaînes">
+      <span class="sidebar-icon" aria-hidden="true">☷</span> <span id="toggle-sidebar-text">Masquer les chaînes</span>
+     </button>
+     <button id="stop" class="quiet stop-btn" title="Fermer le lecteur (Échap)">✕ Fermer</button>
+    </div>
+   </div>
    <div class="player-tools">
-    <label>Qualité<select id="quality"><option value="-1">Automatique</option></select></label>
-    <button id="back-live" class="quiet">↻ Revenir au direct</button><button id="pip" class="quiet" hidden>Mini-lecteur</button><button id="fullscreen" class="quiet">Plein écran</button>
+    <label class="quality-picker">Qualité<select id="quality"><option value="-1">Automatique</option></select></label>
+    <button id="back-live" class="quiet">↺ Direct</button>
+    <button id="pip" class="quiet" hidden title="Mini-lecteur flottant (P)">Mini-lecteur</button>
+    <button id="fullscreen" class="quiet" title="Plein écran (F)">Plein écran</button>
+    <button id="toggle-telemetry" class="quiet telem-toggle-btn" aria-expanded="false" title="Afficher les détails de consommation et débit">ℹ Données</button>
     <span id="player-status" role="status">Préparation…</span>
    </div>
-   <div class="telemetry"><span id="bitrate">Qualité automatique</span><span id="usage">0 Mo de vidéo</span><span id="buffer">Tampon : —</span><span id="stalls">0 interruption</span></div>
-   <div id="budget-meter" hidden><progress id="budget-progress" max="100" value="0"></progress><p class="small muted">Budget appliqué aux données vidéo servies, avec 3 % de réserve. Le compteur opérateur peut différer.</p></div>
+   <div id="telemetry" class="telemetry" hidden>
+    <div class="telem-chip"><span class="telem-label">DÉBIT</span><span id="bitrate" class="telem-val">Qualité automatique</span></div>
+    <div class="telem-chip"><span class="telem-label">VOLUME</span><span id="usage" class="telem-val">0 Mo de vidéo</span></div>
+    <div class="telem-chip"><span class="telem-label">TAMPON</span><span id="buffer" class="telem-val">Réserve : —</span></div>
+    <div class="telem-chip"><span class="telem-label">COUPURES</span><span id="stalls" class="telem-val">0 interruption</span></div>
+   </div>
+   <div id="budget-meter" hidden>
+    <progress id="budget-progress" max="100" value="0"></progress>
+    <p class="small muted">Budget appliqué aux données vidéo servies. La consommation opérateur peut différer légèrement.</p>
+   </div>
   </section>
   <section id="preferences" class="preferences" aria-label="Préférences de lecture">
    <div class="preference-intro"><span class="eyebrow">À VOTRE MESURE</span><strong>Gardez la main sur votre forfait.</strong></div>
-   <label>Mode de lecture<select id="play-mode"><option value="eco">Économie</option><option value="balanced" selected>Équilibré</option><option value="sport">Sport · qualité libre</option><option value="budget">Budget de séance</option></select></label>
-   <label>Connexion<select id="connection"><option value="stable">Direct réactif</option><option value="unstable">Instable · plus de réserve</option></select></label>
-   <div id="budget-fields" class="budget-fields" hidden><label>Volume (Mo)<input id="budget-mb" type="number" min="20" max="50000" value="800"></label><label>Durée (min)<input id="budget-minutes" type="number" min="5" max="1440" value="120"></label></div>
+   <label>Mode de lecture
+    <select id="play-mode">
+     <option value="eco">Économie</option>
+     <option value="balanced" selected>Équilibré</option>
+     <option value="sport">Sport · cadence fluide</option>
+     <option value="budget">Budget de séance</option>
+    </select>
+   </label>
+   <label>Connexion
+    <select id="connection">
+     <option value="stable">Direct réactif</option>
+     <option value="unstable">Instable · plus de réserve</option>
+    </select>
+   </label>
+   <div id="budget-fields" class="budget-fields" hidden>
+    <label>Volume (Mo)<input id="budget-mb" type="number" min="20" max="50000" value="800"></label>
+    <label>Durée (min)<input id="budget-minutes" type="number" min="5" max="1440" value="120"></label>
+    <div class="budget-presets" aria-label="Raccourcis de budget">
+     <button type="button" class="budget-preset-btn" data-mb="500" data-min="90">500 Mo</button>
+     <button type="button" class="budget-preset-btn" data-mb="1000" data-min="120">1 Go</button>
+     <button type="button" class="budget-preset-btn" data-mb="2000" data-min="180">2 Go</button>
+    </div>
+   </div>
    <span id="mode-hint" class="small muted"></span>
   </section>
   <section id="recent-wrap" hidden><div class="section-label">REPRENDRE LE DIRECT</div><div id="recents" class="recents"></div></section>
   <section id="catalogue">
-   <div class="catalogue-heading"><div><p class="eyebrow" id="catalogue-kicker">VOTRE BIBLIOTHÈQUE</p><h2 id="catalogue-title">À l’antenne<span class="accent">.</span></h2></div><label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Rechercher une chaîne…" aria-label="Rechercher dans la bibliothèque"></label></div>
-   <div id="filters" class="filters"><label>Abonnement<select id="provider"><option value="">Tous les abonnements</option></select></label><label>Langue<select id="lang"><option value="">Toutes les langues</option></select></label><label>Catégorie<select id="category"><option value="">Toutes les catégories</option></select></label><span id="count" class="small muted"></span></div>
-   <ul id="channels" class="channels"></ul><p id="empty" class="empty" hidden>Aucun résultat pour ces filtres.</p>
+   <div class="catalogue-heading">
+    <div>
+     <p class="eyebrow" id="catalogue-kicker">VOTRE BIBLIOTHÈQUE</p>
+     <h2 id="catalogue-title">À l’antenne<span class="accent">.</span></h2>
+    </div>
+    <div class="search-box">
+     <span class="search-icon" aria-hidden="true">⌕</span>
+     <input id="search" type="search" placeholder="Rechercher une chaîne…" aria-label="Rechercher dans la bibliothèque">
+     <button id="search-clear" type="button" class="search-clear" aria-label="Effacer la recherche" hidden>✕</button>
+    </div>
+   </div>
+   <div id="filters" class="filters">
+    <label>Abonnement<select id="provider"><option value="">Tous les abonnements</option></select></label>
+    <label>Langue<select id="lang"><option value="">Toutes les langues</option></select></label>
+    <label>Catégorie<select id="category"><option value="">Toutes les catégories</option></select></label>
+    <span id="count" class="small muted"></span>
+   </div>
+   <ul id="channels" class="channels" tabindex="0" aria-label="Liste des chaînes (utilisez les flèches pour naviguer)"></ul>
+   <p id="empty" class="empty" hidden>Aucun résultat pour ces critères.</p>
    <button id="load-more" class="load-more" hidden>Afficher la suite ↓</button>
   </section>
-  <section id="preparations" hidden><p class="eyebrow">PRÊTS POUR VOTRE CONNEXION</p><h2>Vos films, plus légers<span class="accent">.</span></h2><p class="muted">Préparés sur le serveur. Lecture adaptative ou téléchargement reprenable. Conservation : 7 jours.</p><div id="jobs" class="jobs"></div></section>
+  <section id="preparations" hidden>
+   <p class="eyebrow">PRÊTS POUR VOTRE CONNEXION</p>
+   <h2>Vos films, plus légers<span class="accent">.</span></h2>
+   <p class="muted">Préparés sur le serveur. Lecture adaptative ou téléchargement reprenable. Conservation : 7 jours.</p>
+   <div id="jobs" class="jobs"></div>
+  </section>
   <section id="config" class="settings" hidden>
-   <div class="catalogue-heading"><h2>Votre serveur<span class="accent">.</span><button id="close-config" class="quiet">Fermer ✕</button></div>
-   <h3>Abonnements Xtream</h3><ul id="provider-list"></ul>
-   <form id="provider-form" class="settings-form"><label>Nom<input id="p-name" placeholder="Mon abonnement" required></label><label>Adresse<input id="p-host" type="url" placeholder="http://serveur:80" required></label><label>Identifiant<input id="p-user" autocomplete="off" required></label><label>Mot de passe<input id="p-pass" type="password" autocomplete="new-password" required></label><label>Connexions autorisées<input id="p-connections" type="number" min="1" max="10" value="1" required></label><button id="p-add" class="primary">Ajouter et vérifier</button></form><p id="p-msg" role="status"></p>
-   <div class="settings-actions"><button id="sync-all" class="quiet">Synchroniser les catalogues</button><button id="viewer-token" class="quiet">Afficher le jeton lecture seule</button></div><p id="viewer-value" class="token-value" hidden></p>
-   <h3>Lectures et charge du serveur</h3><pre id="status"></pre><details><summary>Journal de synchronisation</summary><pre id="sync-log"></pre></details>
+   <div class="catalogue-heading">
+    <h2>Votre serveur<span class="accent">.</span></h2>
+    <button id="close-config" class="quiet">Fermer ✕</button>
+   </div>
+   <h3>Abonnements Xtream</h3>
+   <ul id="provider-list"></ul>
+   <form id="provider-form" class="settings-form">
+    <label>Nom<input id="p-name" placeholder="Mon abonnement" required></label>
+    <label>Adresse<input id="p-host" type="url" placeholder="http://serveur:80" required></label>
+    <label>Identifiant<input id="p-user" autocomplete="off" required></label>
+    <label>Mot de passe<input id="p-pass" type="password" autocomplete="new-password" required></label>
+    <label>Connexions autorisées<input id="p-connections" type="number" min="1" max="10" value="1" required></label>
+    <button id="p-add" class="primary">Ajouter et vérifier</button>
+   </form>
+   <p id="p-msg" role="status"></p>
+   <div class="settings-actions">
+    <button id="sync-all" class="quiet">Synchroniser les catalogues</button>
+    <button id="viewer-token" class="quiet">Afficher le jeton lecture seule</button>
+   </div>
+   <p id="viewer-value" class="token-value" hidden></p>
+   <h3>Lectures et charge du serveur</h3>
+   <pre id="status"></pre>
+   <details><summary>Journal de synchronisation</summary><pre id="sync-log"></pre></details>
   </section>
  </section>
- <footer><span>streamly.</span><span>Le direct, à votre rythme.</span></footer>
+ <footer>
+  <span>streamly.</span>
+  <div class="footer-meta">
+   <span class="keyboard-hints"><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd><kbd>←</kbd> Naviguer &bull; <kbd>Entrée</kbd> Lire &bull; <kbd>F</kbd> Plein écran</span>
+   <span>Le direct, à votre rythme.</span>
+  </div>
+ </footer>
 </main>
-<dialog id="movie-dialog"><form method="dialog"><button class="dialog-close quiet" aria-label="Fermer">✕</button></form><span class="eyebrow">UNE VERSION ADAPTÉE À VOTRE FORFAIT</span><h2 id="movie-title"></h2><p id="movie-details" class="muted"></p><p id="movie-plot"></p><label>Qualité à préparer<select id="movie-height"><option value="240">240p · minimum de données</option><option value="360">360p · économique</option><option value="480" selected>480p · équilibré</option><option value="720">720p · plus net</option></select></label><p id="movie-estimate" class="small muted"></p><button id="check-tracks" class="quiet">Choisir l’audio et les sous-titres</button><div id="track-fields" hidden><label>Audio<select id="movie-audio"></select></label><label>Sous-titres texte<select id="movie-subtitle"><option value="">Sans sous-titres</option></select></label></div><p class="small muted">La préparation utilise le serveur et peut prendre du temps. Le film apparaîtra dans « Mes films prêts ».</p><button id="prepare-movie" class="primary">Préparer ce film</button><p id="movie-message" role="status"></p></dialog>
+<dialog id="movie-dialog">
+ <form method="dialog"><button class="dialog-close quiet" aria-label="Fermer">✕</button></form>
+ <span class="eyebrow">UNE VERSION ADAPTÉE À VOTRE FORFAIT</span>
+ <h2 id="movie-title"></h2>
+ <p id="movie-details" class="muted"></p>
+ <p id="movie-plot"></p>
+ <label>Qualité à préparer
+  <select id="movie-height">
+   <option value="240">240p · minimum de données</option>
+   <option value="360">360p · économique</option>
+   <option value="480" selected>480p · équilibré</option>
+   <option value="720">720p · plus net</option>
+  </select>
+ </label>
+ <p id="movie-estimate" class="small muted"></p>
+ <button id="check-tracks" class="quiet">Choisir l’audio et les sous-titres</button>
+ <div id="track-fields" hidden>
+  <label>Audio<select id="movie-audio"></select></label>
+  <label>Sous-titres texte<select id="movie-subtitle"><option value="">Sans sous-titres</option></select></label>
+ </div>
+ <p class="small muted">La préparation utilise le serveur et peut prendre du temps. Le film apparaîtra dans « Mes films prêts ».</p>
+ <button id="prepare-movie" class="primary">Préparer ce film</button>
+ <p id="movie-message" role="status"></p>
+</dialog>
 <noscript><p>Activez JavaScript pour utiliser Streamly.</p></noscript>
 </body></html>
