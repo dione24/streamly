@@ -976,9 +976,14 @@ async function seriesDialog(show) {
       button.type = 'button';
       const numero = (ep.season ? 'S' + String(ep.season).padStart(2, '0') : '')
         + (ep.episode ? 'E' + String(ep.episode).padStart(2, '0') : '');
+      // Certains panels remplissent le titre avec « S01E01 », deja affiche
+      // dans la colonne de gauche : on evite de le repeter.
+      const raw = (ep.title || '').trim();
+      const redundant = !raw || raw.toUpperCase() === numero
+        || /^S\s*\d+\s*E\s*\d+$/i.test(raw) || /^(episode|épisode)\s*\d+$/i.test(raw);
       button.append(
         el('span', 'ep-num', numero || '—'),
-        el('span', 'ep-title', ep.title || 'Épisode ' + (ep.episode || '')),
+        el('span', 'ep-title', redundant ? 'Épisode ' + (ep.episode || '?') : raw),
         el('span', 'ep-dur', ep.duration || '')
       );
       button.onclick = () => {
