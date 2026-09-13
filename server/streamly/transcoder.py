@@ -125,6 +125,12 @@ class Transcoder:
         self._closed = threading.Event()
         os.makedirs(hls_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
+        # Les segments sont purement transitoires : aucun ne doit survivre a un
+        # redemarrage. Le menage de fin de flux ne s'execute pas quand le
+        # service est arrete ou qu'un processus est tue, si bien que les
+        # segments s'accumulaient a chaque redemarrage.
+        for name in os.listdir(hls_dir):
+            shutil.rmtree(os.path.join(hls_dir, name), ignore_errors=True)
         if monitor:
             threading.Thread(target=self._watchdog, daemon=True).start()
 
