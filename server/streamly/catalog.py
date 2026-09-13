@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import time
+import threading
 
 from . import xtream
 
@@ -89,11 +90,23 @@ class Catalog:
     def __init__(self, path):
         self.path = path
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self._db = sqlite3.connect(path, check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
+        self._local = threading.local()
         self._db.executescript(SCHEMA)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.commit()
+        if self._db.execute('PRAGMA user_version').fetchone()[0] < 1:
+            rows = self._db.execute('SELECT provider_id, stream_id, name FROM channels').fetchall()
+            with self._db:
+                self._db.executemany('UPDATE channels SET lang=?, canonical=? WHERE provider_id=? AND stream_id=?',
+                    [(xtream.parse_name(r['name'])[0], xtream.parse_name(r['name'])[1], r['provider_id'], r['stream_id']) for r in rows])
+                self._db.execute('PRAGMA user_version=1')
+
+    @property
+    def _db(self):
+        if not hasattr(self._local, 'db'):
+            self._local.db = sqlite3.connect(self.path, timeout=15)
+            self._local.db.row_factory = sqlite3.Row
+        return self._local.db
 
     def close(self):
         self._db.close()
@@ -221,11 +234,17 @@ class Catalog:
             ))
 
         with self._db:
-            self._db.execute("DELETE FROM vod WHERE provider_id=?", (pid,))
+            self._db.execute('CREATE TEMP TABLE IF NOT EXISTS incoming_vod (id INTEGER PRIMARY KEY)')
+            self._db.execute('DELETE FROM incoming_vod')
+            self._db.executemany('INSERT OR IGNORE INTO incoming_vod VALUES (?)', [(r[1],) for r in rows])
+            self._db.execute('DELETE FROM vod WHERE provider_id=? AND stream_id NOT IN (SELECT id FROM incoming_vod)', (pid,))
             self._db.executemany(
-                "INSERT OR REPLACE INTO vod "
+                "INSERT INTO vod "
                 "(provider_id,stream_id,name,lang,title,category_id,"
-                " category_name,icon,rating,added) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " category_name,icon,rating,added) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(provider_id,stream_id) DO UPDATE SET name=excluded.name, lang=excluded.lang, "
+                "title=excluded.title, category_id=excluded.category_id, category_name=excluded.category_name, "
+                "icon=excluded.icon, rating=excluded.rating, added=excluded.added",
                 rows)
         return len(rows)
 

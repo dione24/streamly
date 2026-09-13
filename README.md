@@ -1,127 +1,121 @@
 # Streamly
 
-Lecteur IPTV auto-hébergé qui transcode les flux Xtream Codes en **HLS
-multi-débits**, pour les rendre regardables sur des connexions lentes,
-instables ou facturées au volume.
+Un lecteur IPTV auto-hébergé pour les connexions irrégulières et les forfaits
+facturés au volume. Le VPS transforme les sources Xtream en HLS multi-débits ;
+le navigateur choisit une qualité compatible avec le réseau **et** le mode choisi.
 
-Le problème de départ : un flux IPTV est servi à **débit fixe**. Contrairement
-à YouTube ou Netflix, aucun lecteur ne peut en réduire la qualité quand le
-réseau faiblit — l'adaptation se décide à l'encodage, côté serveur. Streamly
-remet cet encodeur entre vos mains.
+## Lecture
 
-## Ce que ça change, concrètement
+- **Économie / Équilibré / Sport / Budget** : plafonds servis dans la playlist,
+  y compris sur Safari natif. Le mode Budget réserve un volume pour une séance
+  et refuse les nouveaux segments lorsque ce volume est atteint.
+- **Direct réactif / Connexion instable** : objectifs de retard de 6 / 30 secondes,
+  réserve client de 18 / 45 secondes et fenêtre serveur d'au moins 72 secondes.
+  Ce sont des réglages, pas une garantie de continuité pendant toute coupure.
+- Comptage des octets vidéo servis, estimation Mo/h, réserve et interruptions.
+  Le compteur opérateur inclut d'autres données et peut différer ; le budget
+  réserve 3 % de marge et compte conservativement les envois commencés.
+- Cadence source sondée et conservée jusqu'à 60 images/s, images clés alignées
+  dans le temps, pas d'agrandissement artificiel de la définition.
+- Surveillance des nouveaux segments, même si FFmpeg est encore vivant.
+  Une bascule crée une génération de fichiers distincte ; le lecteur la recharge.
+  Les sources récemment défaillantes sont dépriorisées pendant deux minutes.
 
-Mesures réelles sur une chaîne sport 1080p (`ffmpeg`, preset `veryfast`) :
+## Plusieurs appareils
 
-| Barreau | Débit | 1 h | Un match de 2 h |
-|---|---|---|---|
-| Source, sans Streamly | 6,81 Mbps | 3,07 Go | **6,13 Go** |
-| 720p | 1,50 Mbps | 0,68 Go | 1,35 Go |
-| 480p | 0,89 Mbps | 0,40 Go | **0,80 Go** |
-| 360p | 0,55 Mbps | 0,25 Go | 0,49 Go |
-| 240p | 0,25 Mbps | 0,11 Go | 0,22 Go |
+Une même chaîne partage son encodage. Chaque lecture a son ticket, son budget
+et son arrêt indépendant. Des chaînes différentes peuvent tourner dans les
+limites `max_concurrent_streams` et `providers[].max_connections`.
+Les préparations de films utilisent ces mêmes réservations.
 
-Le lecteur bascule automatiquement entre ces barreaux selon la bande passante
-réelle, et l'utilisateur peut aussi **forcer** un barreau bas pour économiser
-son forfait.
+Ne déclarez pas plus de connexions que votre abonnement n'en autorise.
+Le défaut est deux traitements globaux et une connexion par provider ; ajustez
+la capacité après mesure sur votre VPS. Les sessions de lecture sans requête
+vidéo pendant trois minutes sont libérées.
 
-Coût : **≈ 0,94 vCPU** par flux sur un Xeon 3,1 GHz. Un VPS 4 vCPU suffit.
+## Films
 
-## Fonctionnalités
+Choisir un film ouvre une fiche avec poids source estimé et qualité à préparer.
+Le VPS prépare des MP4 H.264/AAC et des variantes HLS ; aucun téléchargement
+complet du film source n'est nécessaire sur le téléphone.
 
-- Transcodage ABR **à la demande** : rien ne tourne tant que personne ne regarde
-- **Plusieurs providers** Xtream simultanément, ajoutés depuis l'interface
-- Catalogue **synchronisé une fois** puis servi en local (un panel dépasse
-  couramment 90 000 entrées et 60 Mo de JSON à chaque rechargement)
-- **Reconstruction des catégories** quand le panel renvoie des listes vides
-- Détection des **échelles de qualité** et des **flux de secours** d'une chaîne
-- **Bascule automatique de source** : variantes de qualité, flux de secours du
-  panel puis autres providers, essayés dans l'ordre quand un flux lâche
-- **Films** : catalogue synchronisé, poids estimé affiché **avant** lecture,
-  MP4 relayé tel quel et MKV remultiplexé à la volée pour le navigateur
-- Filtre de langue **mémorisé**, recherche, favoris
-- Interface web unique pour tous les appareils, `hls.js` là où c'est nécessaire
-  et HLS natif sur Safari
+- Préparation explicite en arrière-plan, progression et résultat persistants.
+- Choix de l'audio et des sous-titres **texte** disponibles (les sous-titres image
+  ne sont pas convertis).
+- Lecture adaptative lorsque la préparation est terminée ; reprise locale de
+  la dernière position.
+- Téléchargement MP4 avec HTTP Range : un client compatible peut reprendre
+  son téléchargement. La reprise dépend du navigateur/gestionnaire utilisé.
+- Cache plafonné à 8 Go par défaut, garde de disque libre et limite de quatre
+  heures par commande. Les anciens résultats sont nettoyés lors d'une nouvelle
+  préparation après sept jours sans accès (les accès sont mémorisés en RAM).
+
+La préparation peut être longue sur un petit VPS. La lecture VOD directe de la
+version précédente est remplacée par ce parcours pour garantir un format léger
+et compatible. Les séries ne font pas encore partie du catalogue.
+
+## Bibliothèque et interface
+
+Interface responsive, commandes vidéo natives, plein écran et mini-lecteur si
+le navigateur le propose, favoris, récents, recherche annulable et pagination
+par 48 éléments. Le catalogue reste en SQLite sur le serveur. Les métadonnées
+VOD survivent aux synchronisations. Une migration conserve les caractères non
+latins dans l'identification des chaînes ; d'anciens favoris devenus ambigus
+peuvent devoir être recréés.
+
+hls.js 1.5.17 est distribué localement dans `web/vendor`, avec sa licence Apache
+2.0. L'ouverture de l'app ne dépend plus d'un CDN JavaScript.
 
 ## Installation
 
-```bash
-git clone https://github.com/dione24/streamly.git
-cd streamly
-sudo ./deploy/install.sh
-```
+Python **3.10+**, FFmpeg et ffprobe sont requis. Bibliothèque standard Python,
+sans service de base de données externe.
 
-Le script installe `ffmpeg`, copie le projet dans `/opt/streamly`, crée le
-service systemd et affiche l'URL et le jeton d'accès.
-
-### Lancement manuel
-
-```bash
+```sh
 cd server
-cp config.example.json config.json   # puis renseignez vos providers
+cp config.example.json config.json
+# Renseigner les providers, puis :
 python3 run.py
 ```
 
-Aucune dépendance Python externe : bibliothèque standard uniquement
-(Python 3.8+). Seul `ffmpeg` est requis.
+L'installation historique dans `/opt/streamly` utilise un service systemd.
+Ne remplacez jamais `server/config.json` ou `server/data` lors d'une mise à jour.
+Le script `deploy/install.sh` est destiné à une première installation.
 
-## Configuration
+## Accès et HTTPS
 
-Tout est dans `server/config.json`, créé au premier lancement depuis
-`config.example.json`. **Ce fichier contient vos identifiants et n'est jamais
-versionné.**
+Le jeton principal ouvre une session **administrateur**. Le jeton lecture seule
+est accessible dans Réglages et ne peut pas modifier les abonnements.
+Les sessions utilisent un cookie HttpOnly / SameSite=Strict, expirent après
+sept jours et sont invalidées au redémarrage du serveur. Les URLs live portent
+un ticket de lecture, jamais le jeton administrateur. Les journaux HTTP masquent
+les tickets. `config.json` est privé et exclu du dépôt.
 
-| Clé | Rôle |
-|---|---|
-| `token` | Jeton d'accès, généré automatiquement s'il est vide |
-| `providers` | Liste des abonnements Xtream |
-| `ladder` | Barreaux de l'échelle ABR |
-| `preferred_source_height` | Définition de source à ingérer (720 par défaut) |
-| `idle_timeout_seconds` | Extinction du flux après inactivité |
+**Sans domaine, l'installation actuelle reste en HTTP et les échanges ne sont
+pas chiffrés.** Le modèle Apache `deploy/apache-streamly.conf.example` prépare
+l'ajout de HTTPS sans remplacer les autres virtual hosts. Ne l'activez qu'après
+configuration du domaine et d'un certificat valide ; activez alors
+`secure_cookies` et limitez l'écoute du backend à `127.0.0.1`.
 
-## Notes techniques
+Le passage par un VPS ne garantit pas de supprimer les blocages opérateur.
 
-**Tous les barreaux sont ré-encodés**, y compris le plus haut. Recopier le flux
-source (`-c:v copy`) ne coûte rien en CPU, mais produit des segments calqués
-sur les keyframes de la source, donc irréguliers (mesuré : de 0,68 à 4,96 s).
-Les frontières ne coïncident alors plus entre barreaux et la bascule ABR
-hoquète — précisément quand le réseau faiblit. Avec `-g` forcé, les segments
-font exactement 2,000 s. Bonus inattendu : c'est aussi **moins cher**
-(0,94 vCPU contre 1,30), puisqu'on décode alors une source 720p et non 1080p.
+## Vérification
 
-**La source ingérée est choisie automatiquement.** Prendre le barreau 720p du
-panel plutôt que son 1080p fait passer le coût de 2,77 à 0,94 vCPU, pour un
-rendu final identique après transcodage.
+```sh
+python3 -m unittest discover -s tests -v
+python3 tests/media_smoke.py
+node --check web/app.js
+```
 
-**La playlist maîtresse est générée par Streamly**, pas par ffmpeg : ce dernier
-annonce mal la bande passante des barreaux, ce qui fait choisir le mauvais
-niveau au lecteur.
+Le test média génère une vidéo synthétique à 50 images/s et vérifie les quatre
+variantes HLS, l'alignement des segments et la préparation VOD H.264/AAC.
+`tests/preview.py` lance une interface locale avec un catalogue fictif, sans
+accès aux abonnements (jeton `preview-only`, usage local uniquement).
 
-**Les films MKV ne sont pas lisibles en navigateur.** Plutôt que de les
-transcoder, Streamly les remultiplexe en MP4 fragmenté : la vidéo est recopiée
-(`-c:v copy`, coût nul) et seul l'audio est réencodé, les pistes E-AC3
-fréquentes sur ces fichiers n'étant pas décodables par les navigateurs. Un MP4
-est, lui, simplement relayé avec les requêtes Range, ce qui préserve le
-déplacement natif dans la vidéo.
-
-**Le poids d'un film est estimé, pas mesuré** : `bitrate x durée`. La taille
-réelle demanderait une requête HEAD par film, et `get_vod_streams` ne fournit
-ni le conteneur ni le débit — seul `get_vod_info` les donne, à raison d'un
-appel par film. Streamly ne le fait donc qu'à l'ouverture d'une fiche, puis
-conserve le résultat.
-
-**Le jeton est placé dans le chemin** des URLs de lecture (`/s/<jeton>/...`) :
-les playlists HLS référencent leurs segments en relatif, qui héritent donc du
-jeton sans réécriture.
-
-## Sécurité
-
-Le serveur écoute en **HTTP simple**. Exposé à Internet, placez-le derrière un
-reverse proxy avec TLS (Caddy ou nginx). Le jeton protège l'API et les flux,
-mais ne chiffre rien.
-
-`config.json` est écrit en `0600` et exclu du dépôt.
+Les anciennes mesures de Claude sont conservées dans `docs/mesures.md` à titre
+historique : elles ne prouvent pas les performances de cette version. Mesurer
+sur les sources et appareils réels avant d'annoncer une économie ou un délai.
 
 ## Licence
 
-MIT — voir [LICENSE](LICENSE).
+MIT, voir [LICENSE](LICENSE). hls.js conserve sa propre licence.

@@ -30,6 +30,10 @@ def load():
         save(cfg)
         print("Jeton d'acces genere : %s" % cfg["token"])
 
+    if not cfg.get("viewer_token"):
+        cfg["viewer_token"] = secrets.token_urlsafe(24)
+        save({"viewer_token": cfg["viewer_token"]})
+
     for d in (DATA_DIR, HLS_DIR, LOG_DIR):
         os.makedirs(d, exist_ok=True)
 

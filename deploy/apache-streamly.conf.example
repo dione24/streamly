@@ -1,0 +1,18 @@
+# Template only. Replace the hostname and certificate paths before enabling.
+# Keep existing Apache virtual hosts. Enable proxy and proxy_http modules.
+<VirtualHost *:443>
+    ServerName streamly.example.com
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/streamly.example.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/streamly.example.com/privkey.pem
+    ProxyPreserveHost On
+    ProxyTimeout 60
+    ProxyPass / http://127.0.0.1:8088/ connectiontimeout=5 timeout=60
+    ProxyPassReverse / http://127.0.0.1:8088/
+    # Do not log bearer playback tickets from URL paths.
+    CustomLog /var/log/apache2/streamly-access.log "%h %t %m %>s %b"
+    ErrorLog /var/log/apache2/streamly-error.log
+</VirtualHost>
+# After testing HTTPS, set secure_cookies=true and listen_host=127.0.0.1
+# in Streamly config.json, then restart streamly. Do not enable this template
+# with example.com or without a valid certificate.

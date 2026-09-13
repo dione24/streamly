@@ -1,472 +1,413 @@
-/* Streamly — client web.
- *
- * Lecture HLS : Safari lit le HLS nativement (meilleure batterie, AirPlay et
- * PiP gratuits), on ne charge donc hls.js que sur les navigateurs qui en ont
- * besoin. Le selecteur de qualite manuel compte autant que l'ABR automatique :
- * sur une connexion facturee au volume, on veut pouvoir forcer le barreau bas.
- */
 'use strict';
-
-const $ = (s) => document.querySelector(s);
-
-/* localStorage leve une exception en navigation privee sur Safari : une
-   preference qu'on ne peut pas enregistrer ne doit pas bloquer l'application. */
+const $ = s => document.querySelector(s);
 const store = {
-  get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } },
+  get(k, fallback = '') { try { return localStorage.getItem('streamly_' + k) || fallback; } catch (_) { return fallback; } },
+  set(k, v) { try { localStorage.setItem('streamly_' + k, v); } catch (_) {} },
+  remove(k) { try { localStorage.removeItem('streamly_' + k); } catch (_) {} },
+  json(k, fallback) { try { return JSON.parse(this.get(k)) || fallback; } catch (_) { return fallback; } },
 };
-
-/* Une erreur JavaScript non rattrapee laisserait l'interface muette : on la
-   rend visible plutot que de laisser l'utilisateur devant un bouton inerte. */
-function showFatal(msg) {
-  const box = $('#login-error');
-  if (box) box.textContent = String(msg).slice(0, 300);
+const state = {mode: 'live', lang: store.get('lang'), category: '', query: '', favorites: [],
+  page: 0, pageSize: 48, request: 0, controller: null, hls: null, ticket: null, current: null,
+  generation: null, retries: 0, recoveryTimer: null, playback: 0, stalls: 0, started: 0,
+  frames: false, movie: null, job: null, role: 'viewer', configTimer: null, jobTimer: null};
+function message(text) { $('#notice').textContent = text; $('#notice').hidden = !text; }
+function tokenForApi() { return (store.get('token') || '').trim(); }
+function requestHeaders(extra = {}, includeToken = true) {
+  const headers = {'Content-Type': 'application/json', ...(extra || {})};
+  if (includeToken) {
+    const token = tokenForApi();
+    if (token && !headers.Authorization && !headers.authorization) headers.Authorization = 'Bearer ' + token;
+  }
+  return headers;
 }
-window.addEventListener('error', (e) => showFatal('Erreur : ' + e.message));
-window.addEventListener('unhandledrejection', (e) => showFatal('Erreur : ' + (e.reason && e.reason.message || e.reason)));
-
-const state = {
-  token: store.get('streamly_token'),
-  lang: store.get('streamly_lang'),
-  category: '',
-  query: '',
-  favorites: [],
-  favoritesOnly: false,
-  mode: 'live',            // 'live' | 'vod'
-  hls: null,
-  current: null,
-};
-
-/* ------------------------------------------------------------------ API */
-
+function requireLogin(message = '') {
+  state.role = 'viewer';
+  state.ticket = null; state.current = null; state.job = null; ++state.playback;
+  state.favorites = [];
+  if (state.controller) state.controller.abort(); state.controller = null;
+  destroyPlayer(); $('#player-wrap').hidden = true;
+  clearInterval(state.jobTimer); clearInterval(state.configTimer); state.jobTimer = null; state.configTimer = null;
+  $('#login').hidden = false; $('#app').hidden = true;
+  $('#tab-conf').hidden = true;
+  $('#login-error').textContent = message || '';
+  $('#token-input').value = '';
+}
+function failure(err) { if (err.name !== 'AbortError') message(err.message || 'Une erreur est survenue.'); }
+window.addEventListener('unhandledrejection', e => failure(e.reason || {}));
+window.addEventListener('error', e => { if (e.message) message('Erreur : ' + e.message); });
 async function api(path, options = {}) {
-  const res = await fetch('/api' + path, {
-    ...options,
-    headers: {
-      'X-Token': state.token,
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(options.headers || {}),
-    },
-  });
-  if (res.status === 401) throw new Error('unauthorized');
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-  return data;
-}
-
-const post = (path, body) =>
-  api(path, { method: 'POST', body: JSON.stringify(body || {}) });
-
-/* ------------------------------------------------------------ connexion */
-
-async function signIn(token) {
-  state.token = token;
-  await api('/status');                       // leve si le jeton est mauvais
-  store.set('streamly_token', token);
-  $('#login').hidden = true;
-  $('#app').hidden = false;
-  await boot();
-}
-
-$('#token-go').onclick = async () => {
-  const btn = $('#token-go');
-  btn.disabled = true;
-  btn.textContent = 'Connexion...';
-  $('#login-error').textContent = '';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25000);
+  const forward = () => controller.abort();
+  if (options.signal) { if (options.signal.aborted) controller.abort(); else options.signal.addEventListener('abort', forward, {once: true}); }
   try {
-    await signIn($('#token-input').value.trim());
-  } catch (e) {
-    $('#login-error').textContent =
-      e.message === 'unauthorized' ? 'Jeton refusé.' : e.message;
+    const res = await fetch('/api' + path, {...options, signal: controller.signal,
+      credentials: 'same-origin', headers: requestHeaders(options.headers, options.sendToken !== false)});
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || 'Erreur serveur ' + res.status);
+      if (res.status === 401 && path !== '/login' && !options.skipAuthRedirect) {
+        store.remove('token');
+        requireLogin(err.message);
+      }
+      throw err;
+    }
+    return data;
+  } catch (err) {
+    if (err.name === 'AbortError' && !(options.signal && options.signal.aborted)) throw new Error('Le serveur met trop de temps à répondre. Réessayez.');
+    throw err;
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Se connecter';
+    clearTimeout(timer);
+    if (options.signal) options.signal.removeEventListener('abort', forward);
+  }
+}
+const post = (path, data = {}, options = {}) => api(path, {method: 'POST', body: JSON.stringify(data), ...options});
+function el(tag, className, text) { const e = document.createElement(tag); if (className) e.className = className; if (text !== undefined) e.textContent = text; return e; }
+function size(n) { return n >= 1e9 ? (n / 1e9).toFixed(2) + ' Go' : Math.round(n / 1e6) + ' Mo'; }
+function favKey(c) { return (c.lang || '') + '|' + c.canonical; }
+function isFav(c) { return state.favorites.some(f => favKey(f) === favKey(c)); }
+async function connected(role) {
+  state.role = role;
+  $('#login').hidden = true; $('#app').hidden = false; $('#tab-conf').hidden = role !== 'admin';
+  state.favorites = await api('/favorites');
+  await loadFilters(); await renderChannels(); renderRecents();
+}
+$('#login-form').onsubmit = async e => {
+  e.preventDefault(); $('#token-go').disabled = true; $('#login-error').textContent = '';
+  const token = $('#token-input').value.trim();
+  const remember = $('#remember-token').checked;
+  try {
+    const r = await post('/login', {token});
+    if (remember) store.set('token', token); else store.remove('token');
+    $('#token-input').value = '';
+    await connected(r.role);
+  } catch (err) {
+    $('#login-error').textContent = err.message;
+  } finally {
+    $('#token-go').disabled = false;
   }
 };
+$('#logout').onclick = async () => { await stop().catch(failure); await post('/logout', {}, {skipAuthRedirect: true}); store.remove('token'); location.reload(); };
 
-$('#token-input').onkeydown = (e) => { if (e.key === 'Enter') $('#token-go').click(); };
-
-/* -------------------------------------------------------------- lecture */
+// Preferences apply to each newly opened session, including native HLS.
+$('#play-mode').value = store.get('playmode', 'balanced');
+$('#connection').value = store.get('connection', 'stable');
+function modeHint() {
+  const mode = $('#play-mode').value;
+  $('#budget-fields').hidden = mode !== 'budget';
+  $('#mode-hint').textContent = {eco: 'Qualité plafonnée pour économiser les données.', balanced: 'Un équilibre entre netteté et consommation.', sport: 'Cadence source préservée, qualité selon le réseau.', budget: 'Un volume réservé à cette séance de direct.'}[mode];
+}
+async function changePreferences() {
+  store.set('playmode', $('#play-mode').value); store.set('connection', $('#connection').value); modeHint();
+  if (state.current && !state.job) { const c = state.current; await play(c); }
+}
+$('#play-mode').onchange = () => changePreferences().catch(failure);
+$('#connection').onchange = () => changePreferences().catch(failure);
+$('#budget-mb').onchange = $('#budget-minutes').onchange = () => {
+  if (state.ticket) message('Le nouveau budget sera appliqué à la prochaine séance.');
+};
+modeHint();
 
 function destroyPlayer() {
-  if (state.hls) { state.hls.destroy(); state.hls = null; }
-  const v = $('#video');
-  v.removeAttribute('src');
-  v.load();
+  clearTimeout(state.recoveryTimer); state.recoveryTimer = null;
+  if (state.hls) state.hls.destroy(); state.hls = null;
+  const v = $('#video'); v.pause(); v.removeAttribute('src'); v.querySelectorAll('track').forEach(t => t.remove()); v.load();
 }
-
-function fillQualityMenu(levels, current) {
-  const sel = $('#quality');
-  sel.innerHTML = '<option value="-1">Auto</option>';
-  levels.forEach((lvl, i) => {
-    const opt = document.createElement('option');
-    opt.value = i;
-    opt.textContent = (lvl.height ? lvl.height + 'p' : 'niveau ' + i) +
-      ' — ' + Math.round((lvl.bitrate || 0) / 1000) + ' kbps';
-    sel.appendChild(opt);
-  });
-  sel.value = String(current === undefined || current === null ? -1 : current);
+async function stop() {
+  ++state.playback;
+  const ticket = state.ticket; state.ticket = null;
+  destroyPlayer(); state.current = null; state.job = null; $('#player-wrap').hidden = true;
+  if (ticket) await post('/stop', {ticket}, {skipAuthRedirect: true}).catch(failure);
 }
-
+function playbackUI(title, live) {
+  $('#player-wrap').hidden = false; $('#now-playing').textContent = title;
+  $('#live-badge').textContent = live ? '● DIRECT' : '● FILM PRÊT';
+  $('#back-live').hidden = !live; $('#player-status').textContent = 'Préparation de la lecture…';
+  $('#usage').textContent = live ? '0 Mo de vidéo' : 'Version préparée';
+  $('#bitrate').textContent = 'Qualité automatique'; $('#budget-meter').hidden = true;
+  state.stalls = 0; state.frames = false; state.started = performance.now(); state.retries = 0;
+  $('#player-wrap').scrollIntoView({behavior: 'smooth', block: 'start'});
+}
 async function play(channel) {
-  const q = new URLSearchParams({ lang: channel.lang || '', canonical: channel.canonical });
-  const info = await api('/resolve?' + q.toString());
-
-  destroyPlayer();
-  state.current = channel;
-  $('#player-wrap').hidden = false;
-  $('#now-playing').textContent = channel.label;
-  $('#bitrate').textContent = '';
-
-  const url = info.play_url;
-  const video = $('#video');
-
-  // Safari (iOS/macOS) : HLS natif, ABR gere par le systeme.
-  const native = video.canPlayType('application/vnd.apple.mpegurl');
-  const hlsjs = window.Hls && window.Hls.isSupported();
-  if (native && !hlsjs) {
-    video.src = url;
-    video.play().catch(() => {});
-    $('#quality').innerHTML = '<option value="-1">Auto (natif)</option>';
-  } else if (hlsjs) {
-    const hls = new Hls({
-      lowLatencyMode: false,
-      maxBufferLength: 30,          // marge confortable sur reseau instable
-      manifestLoadingRetryDelay: 1000,
-      fragLoadingMaxRetry: 6,
-    });
+  const stopping = stop(); const attempt = state.playback; await stopping;
+  if (attempt !== state.playback) return;
+  state.current = channel; state.generation = null;
+  playbackUI(channel.label, true); message('');
+  try {
+    const info = await post('/play', {lang: channel.lang, canonical: channel.canonical,
+      mode: $('#play-mode').value, budget_mb: Number($('#budget-mb').value), minutes: Number($('#budget-minutes').value)});
+    if (attempt !== state.playback) { await post('/stop', {ticket: info.ticket}); return; }
+    state.ticket = info.ticket; state.url = info.play_url;
+    $('#budget-meter').hidden = !info.budget;
+    attach(info.play_url, true, attempt); remember(channel);
+  } catch (err) { if (attempt === state.playback) { $('#player-status').textContent = err.message; message(err.message); } }
+}
+function attach(url, live, attempt) {
+  if (attempt !== state.playback) return;
+  if (state.hls) state.hls.destroy();
+  state.hls = null;
+  const v = $('#video');
+  const startPlaying = () => v.play().catch(() => { $('#player-status').textContent = 'Appuyez sur ▶ pour démarrer.'; });
+  if (window.Hls && Hls.isSupported()) {
+    const unstable = $('#connection').value === 'unstable';
+    const hls = new Hls({enableWorker: true, lowLatencyMode: false, maxBufferLength: unstable && live ? 45 : 18,
+      maxMaxBufferLength: 90, backBufferLength: live ? 15 : 30, maxBufferSize: 40 * 1000 * 1000,
+      liveSyncDuration: unstable ? 30 : 6, liveMaxLatencyDuration: unstable ? 65 : 25,
+      maxLiveSyncPlaybackRate: 1, abrEwmaDefaultEstimate: 450000, capLevelToPlayerSize: true});
     state.hls = hls;
-    hls.loadSource(url);
-    hls.attachMedia(video);
+    hls.attachMedia(v); hls.loadSource(url);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      fillQualityMenu(hls.levels, hls.currentLevel);
-      video.play().catch(() => {});
+      const select = $('#quality'); select.replaceChildren(new Option('Automatique', '-1'));
+      hls.levels.forEach((level, i) => select.add(new Option((level.height ? level.height + 'p' : 'Qualité ' + (i + 1)) + ' · ≈ ' + size(level.bitrate * 3600 / 8) + '/h', String(i))));
+      startPlaying();
     });
-    hls.on(Hls.Events.LEVEL_SWITCHED, (_e, d) => {
-      const lvl = hls.levels[d.level];
-      if (lvl) {
-        $('#bitrate').textContent =
-          lvl.height + 'p · ' + Math.round(lvl.bitrate / 1000) + ' kbps';
-      }
-      if ($('#quality').value === '-1') return;
-      $('#quality').value = String(hls.currentLevel);
+    hls.on(Hls.Events.LEVEL_SWITCHED, (_, d) => {
+      const level = hls.levels[d.level];
+      if (level) $('#bitrate').textContent = (level.height ? level.height + 'p · ' : '') + '≈ ' + size(level.bitrate * 3600 / 8) + '/h';
     });
-    hls.on(Hls.Events.ERROR, (_e, d) => {
+    hls.on(Hls.Events.ERROR, (_, d) => {
+      if (attempt !== state.playback) return;
+      if (d.response && d.response.code === 402) { destroyPlayer(); $('#player-status').textContent = 'Budget vidéo atteint. Séance arrêtée.'; return; }
       if (!d.fatal) return;
-      // Sur reseau instable, on retente plutot que d'abandonner.
-      if (d.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-      else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-      else destroyPlayer();
+      if (++state.retries > 4) { hls.stopLoad(); $('#player-status').textContent = 'Lecture interrompue. Relancez la chaîne pour réessayer.'; return; }
+      $('#player-status').textContent = navigator.onLine ? 'Reconnexion en cours…' : 'Connexion Internet interrompue…';
+      clearTimeout(state.recoveryTimer);
+      state.recoveryTimer = setTimeout(() => {
+        if (attempt !== state.playback) return;
+        if (d.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+        else hls.startLoad();
+      }, Math.min(12000, 1000 * 2 ** state.retries));
     });
+  } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+    v.src = url; $('#quality').replaceChildren(new Option('Auto · plafond respecté', '-1')); startPlaying();
   } else {
-    video.src = url;
-    video.play().catch(() => {});
+    $('#player-status').textContent = 'Ce navigateur ne peut pas lire ce flux. Essayez un navigateur récent.';
   }
-
-  $('#player-wrap').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
+$('#stop').onclick = () => stop().catch(failure);
+$('#quality').onchange = e => { if (state.hls) state.hls.currentLevel = Number(e.target.value); };
+$('#back-live').onclick = () => { const v = $('#video'); if (state.hls && state.hls.liveSyncPosition) v.currentTime = state.hls.liveSyncPosition; else if (v.seekable.length) v.currentTime = Math.max(0, v.seekable.end(v.seekable.length - 1) - 6); };
+$('#fullscreen').onclick = async () => { const v = $('#video'); try { if (v.requestFullscreen) await v.requestFullscreen(); else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen(); } catch (err) { failure(err); } };
+$('#pip').hidden = !document.pictureInPictureEnabled;
+$('#pip').onclick = () => $('#video').requestPictureInPicture().catch(failure);
+const video = $('#video');
+video.addEventListener('waiting', () => { if (state.frames) state.stalls++; $('#player-status').textContent = 'Mise en réserve…'; });
+video.addEventListener('playing', () => { $('#player-status').textContent = state.frames ? 'Lecture en cours' : 'Image en ' + ((performance.now() - state.started) / 1000).toFixed(1) + ' s'; state.frames = true; });
+video.addEventListener('error', () => { if (!state.hls && state.current) $('#player-status').textContent = 'Flux interrompu. Vérification de la source en cours…'; });
+video.addEventListener('timeupdate', () => { if (state.job && video.currentTime > 5) store.set('position_' + state.job.id, String(video.currentTime)); });
+video.addEventListener('loadedmetadata', () => { if (state.job) { const pos = Number(store.get('position_' + state.job.id)); if (pos && pos < video.duration - 20) video.currentTime = pos; } });
+let statusBusy = false;
+setInterval(async () => {
+  if (!state.ticket || statusBusy) return;
+  statusBusy = true; const ticket = state.ticket;
+  try {
+    const st = await api('/playback?ticket=' + encodeURIComponent(ticket));
+    if (ticket !== state.ticket) return;
+    $('#usage').textContent = size(st.bytes) + (st.budget ? ' / ' + size(st.budget) : ' de vidéo');
+    if (st.budget) $('#budget-progress').value = st.bytes / st.budget * 100;
+    if (st.state === 'failed') {
+      destroyPlayer();
+      $('#player-status').textContent = st.error ? ('Aucune source disponible : ' + st.error) : 'Aucune source disponible. Réessayez plus tard.';
+      return;
+    }
+    if ((state.generation === null && st.generation > 0) || (state.generation !== null && state.generation !== st.generation)) {
+      $('#player-status').textContent = 'Passage à une source de secours…'; state.retries = 0;
+      attach(state.url + '?generation=' + st.generation, true, state.playback);
+    }
+    state.generation = st.generation;
+  } catch (err) { if (ticket === state.ticket) $('#player-status').textContent = err.message; }
+  finally { statusBusy = false; }
+}, 4000);
+setInterval(() => {
+  if ($('#player-wrap').hidden) return;
+  let ahead = 0;
+  for (let i = 0; i < video.buffered.length; i++) if (video.buffered.start(i) <= video.currentTime && video.buffered.end(i) >= video.currentTime) ahead = video.buffered.end(i) - video.currentTime;
+  $('#buffer').textContent = 'Réserve : ' + Math.round(ahead) + ' s'; $('#stalls').textContent = state.stalls + ' interruption' + (state.stalls > 1 ? 's' : '');
+}, 1000);
+window.addEventListener('pagehide', () => { if (state.ticket) navigator.sendBeacon('/api/stop', new Blob([JSON.stringify({ticket: state.ticket})], {type: 'application/json'})); });
+window.addEventListener('offline', () => message('Vous êtes hors connexion. La lecture reprend tant que la réserve le permet.'));
+window.addEventListener('online', () => message('Connexion rétablie.'));
 
-function humanSize(bytes) {
-  if (!bytes) return '';
-  return (bytes / 1e9).toFixed(2) + ' Go';
-}
-
-async function playMovie(movie) {
-  const info = await api('/vod/info?provider=' + encodeURIComponent(movie.provider_id) +
-    '&id=' + movie.stream_id);
-
-  // Sur une connexion facturee au volume, on previent avant d'engager
-  // plusieurs gigaoctets.
-  const size = humanSize(info.size_bytes);
-  if (info.size_bytes > 2e9 &&
-      !confirm(info.title + '\n\nCe film pèse environ ' + size +
-               '.\nLancer la lecture ?')) return;
-
-  destroyPlayer();
-  $('#player-wrap').hidden = false;
-  $('#now-playing').textContent = info.title;
-  $('#bitrate').textContent = [size, info.duration,
-    info.container ? info.container.toUpperCase() : ''].filter(Boolean).join(' · ');
-  $('#quality').innerHTML = '<option value="-1">Source</option>';
-
-  const video = $('#video');
-  video.src = info.play_url;
-  video.play().catch(() => {});
-  $('#player-wrap').scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
-$('#quality').onchange = (e) => {
-  if (!state.hls) return;
-  state.hls.currentLevel = parseInt(e.target.value, 10);
-};
-
-$('#stop').onclick = async () => {
-  destroyPlayer();
-  $('#player-wrap').hidden = true;
-  state.current = null;
-  try { await post('/stop'); } catch (_) { /* sans consequence */ }
-};
-
-/* ------------------------------------------------------------- catalogue */
-
-function favKey(c) { return (c.lang || '') + '|' + c.canonical; }
-
-function isFavorite(c) {
-  return state.favorites.some((f) => favKey(f) === favKey(c));
-}
-
-async function toggleFavorite(c, button) {
-  if (isFavorite(c)) {
-    await post('/favorites/delete', { lang: c.lang, canonical: c.canonical });
-  } else {
-    await post('/favorites', { lang: c.lang, canonical: c.canonical, label: c.label });
+// Catalogue: bounded pages and cancellation prevent stale results.
+function row(c, movie = false) {
+  const li = el('li', 'channel-card' + (movie ? ' movie-card' : ''));
+  const button = el('button', 'channel-main'); button.type = 'button';
+  const placeholder = el('span', 'logo-placeholder', (c.label || c.title || '?').slice(0, 1));
+  if (c.icon && /^https?:\/\//.test(c.icon)) {
+    const img = el('img'); img.src = c.icon; img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
+    img.onerror = () => img.replaceWith(placeholder); button.append(img);
+  } else button.append(placeholder);
+  const meta = el('span', 'meta'); meta.append(el('div', 'name', movie ? c.title : c.label), el('div', 'sub', movie ? (c.category_name || 'Film') : [c.category || 'Direct', c.lang].filter(Boolean).join(' · '))); button.append(meta);
+  button.onclick = () => (movie ? movieDialog(c) : play(c)).catch(failure); li.append(button);
+  if (!movie) {
+    const star = el('button', 'star' + (isFav(c) ? ' on' : ''), '★'); star.setAttribute('aria-label', 'Favori : ' + c.label); star.setAttribute('aria-pressed', String(isFav(c)));
+    star.onclick = async () => { star.disabled = true; try { await post(isFav(c) ? '/favorites/delete' : '/favorites', {lang: c.lang, canonical: c.canonical, label: c.label}); state.favorites = await api('/favorites'); star.classList.toggle('on', isFav(c)); star.setAttribute('aria-pressed', String(isFav(c))); if (state.mode === 'favorites') await renderChannels(); } catch (err) { failure(err); } finally { star.disabled = false; } }; li.append(star);
   }
-  state.favorites = await api('/favorites');
-  button.classList.toggle('on', isFavorite(c));
-  if (state.favoritesOnly) renderChannels();
-}
-
-function channelRow(c) {
-  const li = document.createElement('li');
-
-  if (c.icon) {
-    const img = document.createElement('img');
-    img.src = c.icon;
-    img.loading = 'lazy';
-    img.onerror = () => img.remove();
-    li.appendChild(img);
-  }
-
-  const meta = document.createElement('div');
-  meta.className = 'meta';
-  const name = document.createElement('div');
-  name.className = 'name';
-  name.textContent = c.label;
-  const sub = document.createElement('div');
-  sub.className = 'sub';
-  sub.textContent = [c.category, c.sources > 1 ? c.sources + ' sources' : null]
-    .filter(Boolean).join(' · ');
-  meta.append(name, sub);
-  li.appendChild(meta);
-
-  const star = document.createElement('button');
-  star.className = 'star' + (isFavorite(c) ? ' on' : '');
-  star.textContent = '★';
-  star.onclick = (e) => { e.stopPropagation(); toggleFavorite(c, star); };
-  li.appendChild(star);
-
-  li.onclick = () => play(c).catch((err) => alert('Lecture impossible : ' + err.message));
   return li;
 }
-
-function movieRow(m) {
-  const li = document.createElement('li');
-  if (m.icon) {
-    const img = document.createElement('img');
-    img.src = m.icon; img.loading = 'lazy';
-    img.onerror = () => img.remove();
-    li.appendChild(img);
-  }
-  const meta = document.createElement('div');
-  meta.className = 'meta';
-  const name = document.createElement('div');
-  name.className = 'name';
-  name.textContent = m.title || m.name;
-  const sub = document.createElement('div');
-  sub.className = 'sub';
-  sub.textContent = [m.category_name, m.rating ? '★ ' + m.rating : null,
-    m.bitrate ? Math.round(m.bitrate / 1000) + ' Mbps' : null]
-    .filter(Boolean).join(' · ');
-  meta.append(name, sub);
-  li.appendChild(meta);
-  li.onclick = () => playMovie(m).catch((e) => alert('Lecture impossible : ' + e.message));
-  return li;
+async function renderChannels(more = false) {
+  if (state.controller) state.controller.abort();
+  const controller = new AbortController(); state.controller = controller; const serial = ++state.request;
+  if (!more) state.page = 0;
+  $('#load-more').disabled = true; $('#channels').classList.toggle('loading', !more);
+  try {
+    let items;
+    if (state.mode === 'favorites') items = state.favorites.filter(c => !state.query || c.label.toLowerCase().includes(state.query.toLowerCase()));
+    else {
+      const q = new URLSearchParams({limit: String(state.pageSize + 1), offset: String(state.page * state.pageSize)});
+      if (state.lang) q.set('lang', state.lang); if (state.category) q.set('category', state.category); if (state.query) q.set('q', state.query);
+      items = await api((state.mode === 'vod' ? '/vod?' : '/channels?') + q, {signal: controller.signal});
+    }
+    if (serial !== state.request) return;
+    const hasMore = state.mode !== 'favorites' && items.length > state.pageSize;
+    if (hasMore) items.pop();
+    if (!more) $('#channels').replaceChildren();
+    const fragment = document.createDocumentFragment(); items.forEach(c => fragment.append(row(c, state.mode === 'vod'))); $('#channels').append(fragment);
+    $('#load-more').hidden = !hasMore; $('#empty').hidden = $('#channels').children.length > 0;
+    $('#count').textContent = $('#channels').children.length + ' éléments affichés' + (hasMore ? ' · suite disponible' : '');
+  } catch (err) { if (serial === state.request) { if (more) state.page = Math.max(0, state.page - 1); failure(err); } }
+  finally { if (serial === state.request) { $('#channels').classList.remove('loading'); $('#load-more').disabled = false; } }
 }
-
-async function renderChannels() {
-  const list = $('#channels');
-  list.innerHTML = '';
-
-  let items;
-  if (state.mode === 'vod' && !state.favoritesOnly) {
-    const q = new URLSearchParams();
-    if (state.lang) q.set('lang', state.lang);
-    if (state.category) q.set('category', state.category);
-    if (state.query) q.set('q', state.query);
-    q.set('limit', '150');
-    items = await api('/vod?' + q.toString());
-    items.forEach((m) => list.appendChild(movieRow(m)));
-    $('#count').textContent = items.length + ' film(s)';
-    $('#empty').hidden = items.length > 0;
-    return;
-  }
-  if (state.favoritesOnly) {
-    items = state.favorites.map((f) => ({ ...f, sources: 0, category: '' }));
-  } else {
-    const q = new URLSearchParams();
-    if (state.lang) q.set('lang', state.lang);
-    if (state.category) q.set('category', state.category);
-    if (state.query) q.set('q', state.query);
-    q.set('limit', '300');
-    items = await api('/channels?' + q.toString());
-  }
-
-  items.forEach((c) => list.appendChild(channelRow(c)));
-  $('#count').textContent = items.length + ' chaine(s)';
-  $('#empty').hidden = items.length > 0;
-}
-
+$('#load-more').onclick = () => { state.page++; renderChannels(true); };
+let filterGeneration = 0;
 async function loadFilters() {
-  const langs = await api('/languages');
-  const sel = $('#lang');
-  sel.innerHTML = '<option value="">Toutes les langues</option>';
-  langs.forEach((l) => {
-    const o = document.createElement('option');
-    o.value = l.lang;
-    o.textContent = l.lang + ' (' + l.n + ')';
-    sel.appendChild(o);
-  });
-  sel.value = state.lang;
+  const langs = await api('/languages'); const sel = $('#lang'); sel.replaceChildren(new Option('Toutes les langues', ''));
+  langs.forEach(l => sel.add(new Option(l.lang, l.lang))); sel.value = state.lang;
+  if (sel.selectedIndex < 0) { state.lang = ''; sel.value = ''; }
   await loadCategories();
 }
-
 async function loadCategories() {
-  const base = state.mode === 'vod' ? '/vod/categories' : '/categories';
-  const cats = await api(base + (state.lang ? '?lang=' + encodeURIComponent(state.lang) : ''));
-  const sel = $('#category');
-  sel.innerHTML = '<option value="">Toutes les catégories</option>';
-  cats.forEach((c) => {
-    const o = document.createElement('option');
-    o.value = c.name;
-    o.textContent = c.name + ' (' + c.n + ')';
-    sel.appendChild(o);
-  });
-  sel.value = state.category;
+  const serial = ++filterGeneration;
+  const cats = await api((state.mode === 'vod' ? '/vod/categories' : '/categories') + (state.lang ? '?lang=' + encodeURIComponent(state.lang) : ''));
+  if (serial !== filterGeneration) return;
+  const sel = $('#category'); sel.replaceChildren(new Option('Toutes les catégories', ''));
+  cats.forEach(c => sel.add(new Option(c.name, c.name))); sel.value = state.category;
 }
-
-$('#lang').onchange = async (e) => {
-  state.lang = e.target.value;
-  state.category = '';
-  store.set('streamly_lang', state.lang);   // la langue est memorisee
-  await loadCategories();
-  await renderChannels();
-};
-
-$('#category').onchange = async (e) => {
-  state.category = e.target.value;
-  await renderChannels();
-};
-
+$('#lang').onchange = async e => { state.lang = e.target.value; state.category = ''; store.set('lang', state.lang); await loadCategories(); await renderChannels(); };
+$('#category').onchange = e => { state.category = e.target.value; renderChannels(); };
 let searchTimer;
-$('#search').oninput = (e) => {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => {
-    state.query = e.target.value.trim();
-    state.favoritesOnly = false;
-    renderChannels();
-  }, 250);
-};
+$('#search').oninput = e => { clearTimeout(searchTimer); const value = e.target.value; searchTimer = setTimeout(() => { state.query = value.trim(); renderChannels(); }, 250); };
+async function setMode(mode) {
+  state.mode = mode; state.category = ''; state.query = ''; $('#search').value = '';
+  $('#config').hidden = true; $('#preparations').hidden = mode !== 'prepared'; $('#catalogue').hidden = mode === 'prepared';
+  $('#filters').hidden = mode === 'favorites'; $('#recent-wrap').hidden = mode !== 'live' || !store.json('recents', []).length;
+  ['live', 'vod', 'fav', 'prepared'].forEach(k => $('#tab-' + k).classList.toggle('active', (k === 'fav' ? 'favorites' : k) === mode));
+  $('#catalogue-title').textContent = {live: 'À l’antenne.', vod: 'Une soirée cinéma.', favorites: 'Vos incontournables.'}[mode] || '';
+  $('#search').placeholder = mode === 'vod' ? 'Rechercher un film…' : 'Rechercher une chaîne…';
+  clearInterval(state.jobTimer);
+  if (mode === 'prepared') { await refreshJobs(); state.jobTimer = setInterval(() => refreshJobs().catch(failure), 5000); }
+  else { await loadCategories(); await renderChannels(); }
+}
+$('#tab-live').onclick = () => setMode('live').catch(failure); $('#tab-vod').onclick = () => setMode('vod').catch(failure); $('#tab-fav').onclick = () => setMode('favorites').catch(failure); $('#tab-prepared').onclick = () => setMode('prepared').catch(failure);
+function remember(c) { const list = store.json('recents', []).filter(x => favKey(x) !== favKey(c)); list.unshift(c); store.set('recents', JSON.stringify(list.slice(0, 6))); renderRecents(); }
+function renderRecents() { const list = store.json('recents', []); $('#recent-wrap').hidden = !list.length || state.mode !== 'live'; $('#recents').replaceChildren(); list.forEach(c => { const b = el('button', '', c.label); b.onclick = () => play(c).catch(failure); $('#recents').append(b); }); }
 
-function setMode(mode) {
-  state.mode = mode;
-  state.favoritesOnly = false;
-  state.category = '';
-  $('#tab-live').style.borderColor = mode === 'live' ? '#4da3ff' : '';
-  $('#tab-vod').style.borderColor = mode === 'vod' ? '#4da3ff' : '';
-  $('#tab-fav').style.borderColor = '';
-  $('#search').placeholder = mode === 'vod' ? 'Rechercher un film...' : 'Rechercher une chaine...';
-  loadCategories().then(renderChannels);
+// Films are prepared explicitly on the VPS; downloads support HTTP Range.
+async function movieDialog(c) {
+  $('#movie-title').textContent = c.title; $('#movie-message').textContent = 'Chargement des informations…'; $('#movie-details').textContent = ''; $('#movie-plot').textContent = ''; $('#track-fields').hidden = true; $('#prepare-movie').disabled = true; $('#movie-dialog').showModal();
+  try {
+    const info = await api('/vod/info?provider=' + encodeURIComponent(c.provider_id) + '&id=' + c.stream_id);
+    state.movie = info; $('#movie-title').textContent = info.title; $('#movie-details').textContent = [info.duration, info.size_bytes ? 'Source : ≈ ' + size(info.size_bytes) : 'Taille source inconnue'].filter(Boolean).join(' · '); $('#movie-plot').textContent = info.plot || ''; $('#movie-message').textContent = ''; movieEstimate();
+  } catch (err) { $('#movie-message').textContent = err.message; return; }
+  $('#prepare-movie').disabled = false;
+}
+function movieEstimate() { const rates = {240:346000,360:496000,480:896000,720:1596000}; $('#movie-estimate').textContent = 'Environ ' + size(rates[$('#movie-height').value] * 3600 / 8) + '/h après préparation. Taille réelle affichée une fois le film prêt.'; }
+$('#movie-height').onchange = movieEstimate;
+$('#check-tracks').onclick = async () => {
+  if (!state.movie) return; $('#check-tracks').disabled = true;
+  try {
+    const tracks = await api('/vod/tracks?provider=' + encodeURIComponent(state.movie.provider_id) + '&id=' + state.movie.stream_id);
+    if (!tracks.verified) throw new Error('Impossible de vérifier les pistes de cette source.');
+    $('#movie-audio').replaceChildren(new Option('Piste par défaut', '')); tracks.audio.forEach(t => $('#movie-audio').add(new Option(t.label + ' · ' + t.codec, String(t.index))));
+    $('#movie-subtitle').replaceChildren(new Option('Sans sous-titres', '')); tracks.subtitles.filter(t => t.supported).forEach(t => $('#movie-subtitle').add(new Option(t.label, String(t.index)))); $('#track-fields').hidden = false;
+  } catch (err) { $('#movie-message').textContent = err.message; }
+  finally { $('#check-tracks').disabled = false; }
+};
+$('#prepare-movie').onclick = async () => {
+  if (!state.movie) return; $('#prepare-movie').disabled = true;
+  try {
+    await post('/prepare', {provider: state.movie.provider_id, id: state.movie.stream_id, height: Number($('#movie-height').value),
+      audio: $('#track-fields').hidden || $('#movie-audio').value === '' ? null : Number($('#movie-audio').value),
+      subtitle: $('#track-fields').hidden || $('#movie-subtitle').value === '' ? null : Number($('#movie-subtitle').value)});
+    $('#movie-dialog').close(); await setMode('prepared');
+  } catch (err) { $('#movie-message').textContent = err.message; }
+  finally { $('#prepare-movie').disabled = false; }
+};
+async function refreshJobs() {
+  const jobs = await api('/preparations'); $('#jobs').replaceChildren();
+  if (!jobs.length) $('#jobs').append(el('p', 'empty', 'Choisissez un film dans la bibliothèque pour préparer une version plus légère.'));
+  jobs.forEach(job => {
+    const card = el('article', 'job');
+    const status = (job.state === 'ready' ? size(job.size_bytes) + ' · prêt à regarder' :
+      job.state === 'failed' ? (job.error || 'Échec de la préparation.') : 'Préparation sur le serveur · ' + job.progress + ' %');
+    card.append(el('h3', '', job.title), el('p', 'muted small', job.height + 'p · ' + status));
+    if (job.state === 'preparing') {
+      const p = el('progress'); p.max = 100; p.value = job.progress; p.setAttribute('aria-label', 'Progression de la préparation'); card.append(p);
+    }
+    const actions = el('div', 'job-actions');
+    if (job.state === 'ready') {
+      const playButton = el('button', 'primary', store.get('position_' + job.id) ? 'Reprendre ▶' : 'Regarder ▶');
+      playButton.onclick = () => playJob(job).catch(failure);
+      const download = el('a', '', 'Télécharger ↓'); download.href = '/media/' + job.id + '/' + job.download + '?download=1'; download.setAttribute('download', '');
+      actions.append(playButton, download);
+    }
+    if (job.state === 'failed') {
+      const retry = el('button', '', 'Relancer'); retry.onclick = () => retryPreparation(job, retry).catch(failure); actions.append(retry);
+    }
+    if (actions.children.length) card.append(actions);
+    $('#jobs').append(card);
+  });
+}
+async function retryPreparation(job, button) {
+  const attempt = state.playback; state.job = job;
+  if (button) button.disabled = true;
+  try {
+    await post('/prepare/retry', {id: job.id});
+    await refreshJobs();
+    message('Relance demandée. Reprenez le statut dans quelques instants.');
+  } catch (err) {
+    failure(err);
+  } finally {
+    if (button) button.disabled = false;
+    if (state.playback === attempt) state.job = null;
+  }
+}
+async function playJob(job) {
+  const stopping = stop(); const attempt = state.playback; await stopping;
+  if (attempt !== state.playback) return;
+  state.job = job; state.current = {label: job.title};
+  playbackUI(job.title, false); attach('/media/' + job.id + '/master.m3u8', false, attempt);
+  $('#usage').textContent = 'Téléchargement complet : ' + size(job.size_bytes);
+  if (job.subtitles) { const track = el('track'); track.kind = 'subtitles'; track.label = 'Sous-titres sélectionnés'; track.srclang = 'und'; track.src = '/media/' + job.id + '/subtitles.vtt'; track.default = true; video.append(track); }
 }
 
-$('#tab-live').onclick = () => setMode('live');
-$('#tab-vod').onclick = () => setMode('vod');
-
-$('#tab-fav').onclick = () => {
-  state.favoritesOnly = !state.favoritesOnly;
-  $('#tab-fav').style.borderColor = state.favoritesOnly ? '#ffc53d' : '';
-  renderChannels();
-};
-
-/* -------------------------------------------------------------- reglages */
-
-$('#tab-conf').onclick = async () => {
-  const panel = $('#config');
-  panel.hidden = !panel.hidden;
-  if (!panel.hidden) await refreshConfig();
-};
-
+// Administration is enforced by the API, not only by hidden buttons.
 async function refreshConfig() {
   const st = await api('/status');
-  $('#status').textContent = JSON.stringify(st.stream, null, 1) +
-    '\n\nSynchro :\n' + JSON.stringify(st.sync, null, 1);
-  $('#sync-log').textContent = (st.sync_log || []).join('\n') || '(aucune synchro)';
-
-  const list = $('#provider-list');
-  list.innerHTML = '';
-  st.providers.forEach((p) => {
-    const li = document.createElement('li');
-    const span = document.createElement('span');
-    span.textContent = p.name + '  (' + p.id + ')';
-    span.style.flex = '1';
-    const sync = document.createElement('button');
-    sync.className = 'chip';
-    sync.textContent = 'Synchroniser';
-    sync.onclick = async () => {
-      sync.textContent = '...';
-      await post('/sync', { id: p.id });
-      setTimeout(refreshConfig, 1500);
-    };
-    const del = document.createElement('button');
-    del.className = 'chip';
-    del.textContent = 'Supprimer';
-    del.onclick = async () => {
-      if (!confirm('Supprimer ' + p.name + ' ?')) return;
-      await post('/providers/delete', { id: p.id });
-      await refreshConfig();
-    };
-    li.append(span, sync, del);
-    list.appendChild(li);
+  $('#status').textContent = 'Charge système (1 / 5 / 15 min) : ' + (st.load || []).map(n => n.toFixed(2)).join(' / ') + '\nCapacité : ' + st.stream.capacity + ' chaîne(s) distincte(s)\n' + (st.stream.workers || []).map(w => w.label + ' · ' + w.state + ' · ' + w.viewers + ' appareil(s) · ' + w.failovers + ' bascule(s)').join('\n');
+  $('#sync-log').textContent = (st.sync_log || []).join('\n') || 'Aucune synchronisation en cours.';
+  $('#provider-list').replaceChildren();
+  st.providers.forEach(p => {
+    const li = el('li'); li.append(el('span', '', p.name)); const sync = el('button', 'quiet', 'Synchroniser'); sync.onclick = async () => { await post('/sync', {id: p.id}); message('Synchronisation démarrée.'); };
+    const del = el('button', 'quiet', 'Supprimer'); del.onclick = async () => { if (confirm('Supprimer cet abonnement ?')) { await post('/providers/delete', {id: p.id}); await refreshConfig(); } }; li.append(sync, del); $('#provider-list').append(li);
   });
 }
-
-$('#p-add').onclick = async () => {
-  const msg = $('#p-msg');
-  msg.textContent = 'Vérification des identifiants...';
-  try {
-    await post('/providers', {
-      name: $('#p-name').value.trim(),
-      host: $('#p-host').value.trim(),
-      username: $('#p-user').value.trim(),
-      password: $('#p-pass').value,
-    });
-    msg.textContent = 'Provider ajouté. Lancez une synchronisation.';
-    ['#p-name', '#p-host', '#p-user', '#p-pass'].forEach((s) => ($(s).value = ''));
-    await refreshConfig();
-  } catch (e) {
-    msg.textContent = 'Échec : ' + e.message;
+$('#tab-conf').onclick = async () => { $('#config').hidden = !$('#config').hidden; clearInterval(state.configTimer); if (!$('#config').hidden) { await refreshConfig(); $('#config').scrollIntoView({behavior: 'smooth'}); state.configTimer = setInterval(() => refreshConfig().catch(failure), 8000); } };
+$('#close-config').onclick = () => { $('#config').hidden = true; clearInterval(state.configTimer); };
+$('#provider-form').onsubmit = async e => {
+  e.preventDefault(); $('#p-add').disabled = true; $('#p-msg').textContent = 'Vérification…';
+  try { await post('/providers', {name: $('#p-name').value.trim(), host: $('#p-host').value.trim(), username: $('#p-user').value.trim(), password: $('#p-pass').value, max_connections: Number($('#p-connections').value)}); $('#provider-form').reset(); $('#p-msg').textContent = 'Abonnement ajouté. Vous pouvez synchroniser son catalogue.'; await refreshConfig(); }
+  catch (err) { $('#p-msg').textContent = err.message; } finally { $('#p-add').disabled = false; }
+};
+$('#sync-all').onclick = async () => { await post('/sync'); message('Synchronisation démarrée sur le serveur.'); };
+$('#viewer-token').onclick = async () => { const data = await post('/viewer-token'); $('#viewer-value').textContent = data.token; $('#viewer-value').hidden = false; };
+(async () => {
+  try { const me = await api('/me', {skipAuthRedirect: true}); await connected(me.role); }
+  catch (_) {
+    const legacy = store.get('token');
+    if (legacy) { try { const me = await post('/login', {token: legacy}); await connected(me.role); } catch (_) { store.remove('token'); requireLogin('La session a expiré, reconnectez-vous.'); } }
+    else {
+      requireLogin();
+    }
   }
-};
-
-$('#sync-all').onclick = async () => {
-  await post('/sync', {});
-  $('#sync-log').textContent = 'Synchronisation démarrée...';
-  const timer = setInterval(refreshConfig, 3000);
-  setTimeout(() => clearInterval(timer), 180000);
-};
-
-/* ----------------------------------------------------------- demarrage */
-
-async function boot() {
-  state.favorites = await api('/favorites');
-  await loadFilters();
-  await renderChannels();
-}
-
-if (state.token) {
-  signIn(state.token).catch(() => {
-    $('#login').hidden = false;
-    $('#app').hidden = true;
-  });
-} else {
-  $('#login').hidden = false;
-}
+})();

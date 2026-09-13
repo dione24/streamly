@@ -1,10 +1,4 @@
-"""API HTTP et service des flux.
-
-Le jeton d'acces est place dans le *chemin* des URLs de lecture
-(`/s/<jeton>/...`) et non en parametre : les playlists HLS referencent leurs
-sous-playlists et leurs segments en relatif, qui heritent donc du jeton sans
-qu'on ait a reecrire quoi que ce soit.
-"""
+"""HTTP API, device cookies and short-lived media tickets. Admin-only writes."""
 import json
 import mimetypes
 import os
@@ -20,7 +14,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config as cfgmod
 from .catalog import Catalog
-from .transcoder import Transcoder
+from .transcoder import Transcoder, CapacityError
+from .auth import Sessions
+from .vod import Movies
 from .xtream import XtreamClient
 
 STARTUP_TIMEOUT = 25      # secondes d'attente de la premiere playlist
@@ -32,6 +28,8 @@ class State:
         self.cfg = cfgmod.load()
         self.catalog = Catalog(os.path.join(cfgmod.DATA_DIR, "catalog.db"))
         self.transcoder = Transcoder(self.cfg, cfgmod.HLS_DIR, cfgmod.LOG_DIR)
+        self.sessions = Sessions(self.cfg)
+        self.movies = Movies(self.cfg, os.path.join(cfgmod.DATA_DIR, "movies"), self.catalog, self.transcoder)
         self.sync_lock = threading.Lock()
         self.sync_log = []
 
@@ -58,10 +56,10 @@ class State:
 
         def add(pid, sid):
             provider = self.provider(pid)
-            if not provider or (pid, sid) in seen:
+            if not provider or not provider.get("enabled", True) or (pid, sid) in seen:
                 return
             seen.add((pid, sid))
-            urls.append(self.client(provider).live_url(sid))
+            urls.append({"provider": pid, "url": self.client(provider).live_url(sid)})
 
         add(provider_id, int(stream_id))
 
@@ -87,7 +85,7 @@ class Handler(BaseHTTPRequestHandler):
         # Journal d'acces minimal : indispensable pour distinguer « la requete
         # n'arrive pas » de « le serveur repond mal ».
         line = "%s  %s  %s" % (time.strftime("%H:%M:%S"),
-                               self.client_address[0], fmt % args)
+                               self.client_address[0], re.sub(r"(/(?:s|v|media)/)[^/ ?]+", r"\1[redacted]", fmt % args))
         ACCESS_LOG.append(line)
         del ACCESS_LOG[:-400]
 
@@ -99,30 +97,73 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        cookie = getattr(self, "_cookie", None)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _json(self, obj, code=200):
+    def _json(self, obj, code=200, extra=None):
+        headers = {"Cache-Control": "no-store"}
+        if extra:
+            headers.update(extra)
         self._raw(code, json.dumps(obj, ensure_ascii=False, indent=1),
-                  "application/json; charset=utf-8",
-                  {"Cache-Control": "no-store"})
+                  "application/json; charset=utf-8", headers)
 
     def _err(self, code, msg):
         self._json({"error": msg}, code)
 
     # -------------------------------------------------------------- jeton
 
-    def _token_ok(self, given):
-        return bool(given) and secrets.compare_digest(
-            str(given), str(STATE.cfg.get("token", "")))
+    def _session_cookie(self, sid):
+        secure = '; Secure' if STATE.cfg.get('secure_cookies') else ''
+        return 'streamly_session=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800%s' % (sid, secure)
+
+    def _clear_cookie(self):
+        return 'streamly_session=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/'
+
+    def _api_token(self):
+        token = self.headers.get('X-Streamly-Token')
+        if token:
+            return token.strip()
+        auth = self.headers.get('Authorization') or ''
+        if auth.lower().startswith('bearer '):
+            return auth[7:].strip()
+        return None
+
+    def _session(self):
+        session = getattr(self, "_request_session", None)
+        if session is not None:
+            return session
+        return STATE.sessions.get(self.headers.get('Cookie'))
 
     def _api_authed(self, params):
-        given = self.headers.get("X-Token") or (params.get("t") or [None])[0]
-        return self._token_ok(given)
+        session = self._session() or None
+        if session is not None:
+            self._request_session = session
+            return session
+        token = self._api_token()
+        if not token:
+            self._request_session = None
+            return None
+        try:
+            sid, role = STATE.sessions.login(token, self.client_address[0])
+        except ValueError:
+            self._request_session = None
+            return None
+        self._cookie = self._session_cookie(sid)
+        session = dict(id=sid, role=role)
+        self._request_session = session
+        return session
+
+    def _admin(self):
+        return (self._api_authed(None) or {}).get('role') == 'admin'
 
     # ------------------------------------------------------------ routage
 
@@ -134,6 +175,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(parsed.path)
         params = urllib.parse.parse_qs(parsed.query)
 
+        if path.startswith("/media/"):
+            return self._serve_prepared(path, params)
         if path.startswith("/s/"):
             return self._serve_stream(path)
         if path.startswith("/v/"):
@@ -141,24 +184,50 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             if not self._api_authed(params):
                 return self._err(401, "jeton invalide ou absent")
-            return self._api_get(path, params)
+            try:
+                return self._api_get(path, params)
+            except (ValueError, TypeError):
+                return self._err(400, "paramètres invalides")
         return self._serve_web(path)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
         params = urllib.parse.parse_qs(parsed.query)
-        if not path.startswith("/api/"):
-            return self._err(404, "introuvable")
-        if not self._api_authed(params):
-            return self._err(401, "jeton invalide ou absent")
-
-        length = int(self.headers.get("Content-Length") or 0)
+        origin = self.headers.get('Origin')
+        if origin and urllib.parse.urlparse(origin).netloc != self.headers.get('Host'):
+            return self._err(403, 'origine refusée')
         try:
-            body = json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
-            return self._err(400, "corps JSON invalide")
-        return self._api_post(path, params, body)
+            length = int(self.headers.get('Content-Length') or 0)
+            if length < 0 or length > 16384:
+                return self._err(413, 'requête trop grande')
+            body = json.loads(self.rfile.read(length) or b'{}')
+            if not isinstance(body, dict):
+                raise ValueError()
+        except (ValueError, json.JSONDecodeError):
+            return self._err(400, 'corps JSON invalide')
+        if path == '/api/login':
+            try:
+                sid, role = STATE.sessions.login(body.get('token'), self.client_address[0])
+            except ValueError as exc:
+                return self._err(401, str(exc))
+            self._cookie = self._session_cookie(sid)
+            return self._json({'role': role}, extra={'Cache-Control': 'no-store'})
+        if not self._api_authed(params):
+            return self._err(401, 'connexion requise')
+        if path == '/api/logout':
+            sid = self._api_authed(None)['id']
+            STATE.transcoder.release_owner(sid)
+            STATE.sessions.logout(sid)
+            self._cookie = self._clear_cookie()
+            return self._raw(200, '{}', 'application/json', {'Cache-Control': 'no-store'})
+        if path.startswith('/api/providers') or path in ('/api/sync', '/api/viewer-token'):
+            if not self._admin():
+                return self._err(403, 'accès administrateur requis')
+        try:
+            return self._api_post(path, params, body)
+        except (ValueError, TypeError):
+            return self._err(400, 'paramètres invalides')
 
     # -------------------------------------------------------- fichiers web
 
@@ -179,148 +248,116 @@ class Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------------------- flux
 
     def _serve_stream(self, path):
-        # /s/<jeton>/<provider>/<stream_id>/<fichier>
-        parts = path.strip("/").split("/")
-        if len(parts) != 5:
-            return self._err(404, "chemin de flux invalide")
-        _, token, provider_id, stream_id, fname = parts
-
-        if not self._token_ok(token):
-            return self._err(401, "jeton invalide")
-
-        provider = STATE.provider(provider_id)
-        if not provider:
-            return self._err(404, "provider inconnu")
-        if not re.fullmatch(r"\d+", stream_id):
-            return self._err(400, "identifiant de flux invalide")
-        fname = os.path.basename(fname)
-
-        key = "%s-%s" % (provider_id, stream_id)
-        if STATE.transcoder.is_alive(key):
-            # Cas courant : une requete de segment sur un flux deja lance.
-            # On evite de recalculer la liste des candidats a chaque segment.
-            STATE.transcoder.touch(key)
-        else:
-            STATE.transcoder.start(key, STATE.candidate_urls(provider_id, stream_id),
-                                   meta={"provider": provider_id,
-                                         "stream_id": int(stream_id)})
-
-        if fname == "master.m3u8":
-            return self._raw(200, STATE.transcoder.master_playlist(),
-                             "application/vnd.apple.mpegurl",
-                             {"Cache-Control": "no-store"})
-
-        target = os.path.join(cfgmod.HLS_DIR, key, fname)
+        parts = path.strip('/').split('/')
+        if len(parts) != 3:
+            return self._err(404, 'flux introuvable')
+        _, ticket, fname = parts
+        t = STATE.transcoder.ticket(ticket)
+        if not t:
+            return self._err(401, 'session de lecture expirée')
+        status = STATE.transcoder.status(ticket)
+        if not status or status['state'] == 'failed':
+            return self._err(502, 'sources indisponibles')
+        if fname == 'master.m3u8':
+            deadline = time.time() + 10
+            while status['state'] == 'starting' and time.time() < deadline:
+                time.sleep(.1)
+                status = STATE.transcoder.status(ticket)
+                if not status:
+                    return self._err(410, 'lecture arrêtée')
+            return self._raw(200, STATE.transcoder.master_playlist(ticket), 'application/vnd.apple.mpegurl', {'Cache-Control': 'no-store'})
+        match = re.fullmatch(r'g(\d+)_(?:s_(\d+)\.m3u8|(\d+)_\d+\.ts)', fname)
+        if not match:
+            return self._err(404, 'segment invalide')
+        level = int(match[2] if match[2] is not None else match[3])
+        if level not in STATE.transcoder.allowed_levels(t):
+            return self._err(403, 'qualité supérieure au budget sélectionné')
+        target = os.path.join(cfgmod.HLS_DIR, t['key'], fname)
         deadline = time.time() + STARTUP_TIMEOUT
-        while not os.path.exists(target) and time.time() < deadline:
-            if not STATE.transcoder.is_alive(key):
-                return self._err(502, "le transcodage s'est arrete")
-            time.sleep(0.2)
-        if not os.path.exists(target):
-            return self._err(504, "delai depasse au demarrage du flux")
-
-        ctype = ("application/vnd.apple.mpegurl" if fname.endswith(".m3u8")
-                 else "video/mp2t")
+        while not os.path.isfile(target) and time.time() < deadline:
+            current = STATE.transcoder.status(ticket)
+            if not current or current['state'] == 'failed' or current['generation'] != int(match[1]):
+                return self._err(410, 'source renouvelée')
+            time.sleep(.15)
         try:
-            with open(target, "rb") as fh:
-                self._raw(200, fh.read(), ctype, {"Cache-Control": "no-store"})
+            with open(target, 'rb') as fh:
+                data = fh.read()
         except OSError:
-            self._err(404, "segment expire")
+            return self._err(504, 'source trop lente')
+        if self.command != 'HEAD' and not STATE.transcoder.charge(ticket, len(data)):
+            return self._err(402, 'budget vidéo atteint')
+        self._raw(200, data, 'application/vnd.apple.mpegurl' if fname.endswith('.m3u8') else 'video/mp2t', {'Cache-Control': 'no-store'})
 
     # ---------------------------------------------------------------- VOD
 
     def _serve_vod(self, path):
-        """Sert un film. Deux strategies selon le conteneur.
+        return self._err(410, 'Préparez une version adaptée depuis la fiche du film.')
 
-        Un MP4 est relaye tel quel, en repercutant les requetes Range : le
-        navigateur lit et se deplace nativement, sans aucun transcodage.
-
-        Un MKV n'est pas lisible en navigateur ; on le remultiplexe a la volee
-        en MP4 fragmente. La video est recopiee (`-c:v copy`, cout nul) et
-        seul l'audio est reencode, car les pistes E-AC3 frequentes sur ces
-        fichiers ne sont pas decodables par les navigateurs.
-        """
-        parts = path.strip("/").split("/")
-        if len(parts) != 4:
-            return self._err(404, "chemin invalide")
-        _, token, provider_id, stream_id = parts
-        if not self._token_ok(token):
-            return self._err(401, "jeton invalide")
-        if not re.fullmatch(r"\d+", stream_id):
-            return self._err(400, "identifiant invalide")
-
-        provider = STATE.provider(provider_id)
-        movie = STATE.catalog.vod_get(provider_id, stream_id)
-        if not provider or not movie:
-            return self._err(404, "film introuvable")
-
-        container = (movie.get("container") or "mp4").lstrip(".")
+    def _movie_source(self, pid, sid):
+        provider = STATE.provider(pid)
+        movie = STATE.catalog.vod_get(pid, sid)
+        if not provider or not provider.get('enabled', True) or not movie:
+            raise ValueError('film indisponible')
         client = STATE.client(provider)
-        source = "%s/movie/%s/%s/%s.%s" % (
-            client.host, client.username, client.password, stream_id, container)
+        container = (movie.get('container') or 'mp4').lstrip('.')
+        if not re.fullmatch(r'[a-zA-Z0-9]+', container):
+            raise ValueError('conteneur invalide')
+        source = '%s/movie/%s/%s/%s.%s' % (client.host, client.username, client.password, int(sid), container)
+        return movie, source
 
-        if container.lower() in ("mp4", "m4v"):
-            return self._proxy_range(source, client.user_agent)
-        return self._remux(source, client.user_agent)
-
-    def _proxy_range(self, source, user_agent):
-        headers = {"User-Agent": user_agent}
-        rng = self.headers.get("Range")
-        if rng:
-            headers["Range"] = rng
-        req = urllib.request.Request(source, headers=headers)
+    def _serve_prepared(self, path, params):
+        if not self._session():
+            return self._err(401, 'connexion requise')
+        parts = path.strip('/').split('/')
+        if len(parts) != 3:
+            return self._err(404, 'fichier introuvable')
+        _, jid, name = parts
+        job = STATE.movies.jobs.get(jid)
+        if not job or job['state'] != 'ready' or not re.fullmatch(r'(master|q\d+)\.m3u8|q\d+\.mp4|q\d+_\d+\.ts|subtitles\.vtt', name):
+            return self._err(404, 'préparation indisponible')
+        job['last_access'] = time.time()
+        target = os.path.join(STATE.movies.root, jid, name)
         try:
-            upstream = urllib.request.urlopen(req, timeout=30)
-        except Exception as exc:
-            return self._err(502, "source indisponible : %s" % exc)
-
-        with upstream:
-            code = upstream.status
+            fh = open(target, 'rb')
+        except OSError:
+            return self._err(404, 'fichier introuvable')
+        with fh:
+            size = os.fstat(fh.fileno()).st_size
+            start, end, code = 0, size - 1, 200
+            rng = self.headers.get('Range')
+            if rng:
+                match = re.fullmatch(r'bytes=(\d*)-(\d*)', rng)
+                if not match or not any(match.groups()):
+                    return self._raw(416, b'', 'application/octet-stream', {'Content-Range': 'bytes */%d' % size})
+                if match[1]:
+                    start = int(match[1]); end = min(size - 1, int(match[2])) if match[2] else size - 1
+                else:
+                    start = max(0, size - int(match[2]))
+                if start > end or start >= size:
+                    return self._raw(416, b'', 'application/octet-stream', {'Content-Range': 'bytes */%d' % size})
+                code = 206
             self.send_response(code)
-            for name in ("Content-Type", "Content-Length", "Content-Range"):
-                value = upstream.headers.get(name)
-                if value:
-                    self.send_header(name, value)
-            self.send_header("Accept-Ranges", "bytes")
+            self.send_header('Content-Type', {'m3u8': 'application/vnd.apple.mpegurl', 'ts': 'video/mp2t', 'vtt': 'text/vtt', 'mp4': 'video/mp4'}[name.rsplit('.', 1)[-1]])
+            self.send_header('Content-Length', str(end - start + 1))
+            self.send_header('Accept-Ranges', 'bytes')
+            self.send_header('Cache-Control', 'private, max-age=3600')
+            if code == 206:
+                self.send_header('Content-Range', 'bytes %d-%d/%d' % (start, end, size))
+            if 'download' in params and name.endswith('.mp4'):
+                self.send_header('Content-Disposition', 'attachment; filename="streamly-%sp.mp4"' % job['height'])
             self.end_headers()
-            if self.command == "HEAD":
+            if self.command == 'HEAD':
                 return
+            fh.seek(start)
+            left = end - start + 1
             try:
-                while True:
-                    chunk = upstream.read(262144)
-                    if not chunk:
-                        break
+                while left:
+                    chunk = fh.read(min(65536, left))
+                    if not chunk: break
                     self.wfile.write(chunk)
+                    left -= len(chunk)
             except (BrokenPipeError, ConnectionResetError):
-                pass    # le lecteur a change de position ou ferme l'onglet
-
-    def _remux(self, source, user_agent):
-        cmd = [
-            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-user_agent", user_agent, "-i", source,
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-            "-f", "mp4", "pipe:1",
-        ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL)
-        # Flux de longueur inconnue : on ferme la connexion en fin d'envoi.
-        self.send_response(200)
-        self.send_header("Content-Type", "video/mp4")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.close_connection = True
-        try:
-            while True:
-                chunk = proc.stdout.read(262144)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        finally:
-            if proc.poll() is None:
-                proc.kill()
+                pass
 
     # --------------------------------------------------------------- API
 
@@ -328,6 +365,13 @@ class Handler(BaseHTTPRequestHandler):
         one = lambda k, d=None: (params.get(k) or [d])[0]
         cat = STATE.catalog
 
+        if path == '/api/me':
+            return self._json({'role': self._session()['role']})
+        if path == '/api/playback':
+            ticket = one('ticket')
+            if not STATE.transcoder.ticket(ticket, self._session()['id'], touch=False):
+                return self._err(404, 'lecture expirée')
+            return self._json(STATE.transcoder.status(ticket))
         if path == "/api/status":
             return self._json({
                 "stream": STATE.transcoder.status(),
@@ -336,10 +380,13 @@ class Handler(BaseHTTPRequestHandler):
                      "enabled": p.get("enabled", True)}
                     for p in STATE.cfg.get("providers", [])],
                 "sync": cat.stats(),
-                "sync_log": STATE.sync_log[-30:],
+                "sync_log": STATE.sync_log[-30:] if self._admin() else [],
+                "load": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
             })
 
         if path == "/api/access":
+            if not self._admin():
+                return self._err(403, "accès administrateur requis")
             return self._json(ACCESS_LOG[-120:])
 
         if path == "/api/languages":
@@ -351,17 +398,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/channels":
             return self._json(cat.browse(
                 lang=one("lang"), category=one("category"), query=one("q"),
-                limit=min(int(one("limit", 200)), 1000),
-                offset=int(one("offset", 0))))
+                limit=max(1, min(int(one("limit", 200)), 1000)),
+                offset=max(0, int(one("offset", 0)))))
 
         if path == "/api/favorites":
             return self._json(cat.favorites())
 
+        if path == '/api/preparations':
+            return self._json(STATE.movies.list())
+        if path == '/api/vod/tracks':
+            movie, source = self._movie_source(one('provider'), one('id'))
+            reservation = secrets.token_urlsafe(12)
+            try:
+                STATE.transcoder.reserve(reservation, movie['provider_id'])
+            except CapacityError as exc:
+                return self._err(409, str(exc))
+            try:
+                return self._json(STATE.movies.info(source))
+            finally:
+                STATE.transcoder.unreserve(reservation)
         if path == "/api/vod":
             return self._json(cat.vod_browse(
                 lang=one("lang"), category=one("category"), query=one("q"),
-                limit=min(int(one("limit", 120)), 500),
-                offset=int(one("offset", 0))))
+                limit=max(1, min(int(one("limit", 120)), 500)),
+                offset=max(0, int(one("offset", 0)))))
 
         if path == "/api/vod/categories":
             return self._json(cat.vod_categories(one("lang")))
@@ -392,7 +452,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self._err(502, "metadonnees indisponibles : %s" % exc)
 
             movie["size_bytes"] = _estimated_size(movie)
-            movie["play_url"] = "/v/%s/%s/%s" % (STATE.cfg["token"], pid, sid)
+            movie["play_url"] = "/v/session/%s/%s" % (pid, sid)
             return self._json(movie)
 
         if path == "/api/resolve":
@@ -405,8 +465,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({
                 "chosen": best,
                 "alternatives": cat.sources(lang, canonical),
-                "play_url": "/s/%s/%s/%s/master.m3u8" % (
-                    STATE.cfg["token"], best["provider_id"], best["stream_id"]),
+                "requires_session": True,
             })
 
         return self._err(404, "endpoint inconnu")
@@ -414,8 +473,26 @@ class Handler(BaseHTTPRequestHandler):
     def _api_post(self, path, params, body):
         cat = STATE.catalog
 
+        if path == '/api/prepare':
+            movie, source = self._movie_source(body.get('provider'), body.get('id'))
+            try:
+                job = STATE.movies.start(movie, source, int(body.get('height', 480)),
+                    int(body['audio']) if body.get('audio') is not None else None,
+                    int(body['subtitle']) if body.get('subtitle') is not None else None)
+            except CapacityError as exc:
+                return self._err(409, str(exc))
+            return self._json(job)
+        if path == '/api/prepare/retry':
+            job = STATE.movies.retry(body.get('job_id') or body.get('id'))
+            if not job:
+                return self._err(404, 'Préparation introuvable.')
+            return self._json(job)
         if path == "/api/providers":
             pid = (body.get("id") or "").strip() or ("p%d" % int(time.time()))
+            if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", pid):
+                return self._err(400, "identifiant provider invalide")
+            if urllib.parse.urlparse(body.get("host", "")).scheme not in ("http", "https"):
+                return self._err(400, "adresse HTTP ou HTTPS requise")
             if not all(body.get(k) for k in ("host", "username", "password")):
                 return self._err(400, "host, username et password sont requis")
             provider = {
@@ -425,6 +502,7 @@ class Handler(BaseHTTPRequestHandler):
                 "username": body["username"],
                 "password": body["password"],
                 "enabled": True,
+                "max_connections": max(1, min(10, int(body.get("max_connections", 1)))),
             }
             try:
                 STATE.client(provider).account_info()
@@ -462,9 +540,33 @@ class Handler(BaseHTTPRequestHandler):
             cat.remove_favorite(body.get("lang") or "", body.get("canonical") or "")
             return self._json({"ok": True})
 
-        if path == "/api/stop":
-            STATE.transcoder.stop()
-            return self._json({"ok": True})
+        if path == '/api/play':
+            lang, canonical = body.get('lang') or None, body.get('canonical') or ''
+            best = cat.pick_source(lang, canonical, int(STATE.cfg.get('preferred_source_height', 720)))
+            if not best:
+                return self._err(404, 'chaîne introuvable')
+            mode = body.get('mode', 'balanced')
+            ceiling = {'eco': 650000, 'balanced': 1150000, 'sport': 0}.get(mode, 1150000)
+            budget = 0
+            if mode == 'budget':
+                mb, minutes = float(body.get('budget_mb', 800)), float(body.get('minutes', 120))
+                if not (20 <= mb <= 50000 and 5 <= minutes <= 1440):
+                    return self._err(400, 'budget ou durée hors limites')
+                budget = int(mb * 1000000 * .97)
+                ceiling = int(budget * 8 / (minutes * 60))
+            if not STATE.transcoder.allowed_levels({'ceiling': ceiling}):
+                return self._err(400, 'Budget insuffisant pour la durée choisie. Augmentez le volume ou réduisez la durée.')
+            try:
+                ticket = STATE.transcoder.open(self._session()['id'], (lang or '') + '|' + canonical,
+                    STATE.candidate_urls(best['provider_id'], best['stream_id']), canonical, ceiling, budget)
+            except CapacityError as exc:
+                return self._err(409, str(exc))
+            return self._json({'ticket': ticket, 'play_url': '/s/%s/master.m3u8' % ticket, 'ceiling': ceiling, 'budget': budget})
+        if path == '/api/stop':
+            STATE.transcoder.release(body.get('ticket'), self._session()['id'])
+            return self._json({'ok': True})
+        if path == '/api/viewer-token':
+            return self._json({'token': STATE.cfg.get('viewer_token')})
 
         return self._err(404, "endpoint inconnu")
 
@@ -518,7 +620,7 @@ def main():
     cfg = STATE.cfg
     host = cfg.get("listen_host", "0.0.0.0")
     port = int(cfg.get("listen_port", 8088))
-    print("Streamly sur http://%s:%d/  (jeton : %s)" % (host, port, cfg["token"]))
+    print("Streamly sur http://%s:%d/" % (host, port))
     ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 

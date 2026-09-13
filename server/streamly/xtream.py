@@ -63,7 +63,7 @@ class XtreamClient:
 
     def account_info(self):
         info = self._api()
-        if not isinstance(info, dict) or "user_info" not in info:
+        if not isinstance(info, dict) or str((info.get("user_info") or {}).get("auth")) != "1":
             raise XtreamError("authentification refusee")
         return info
 
@@ -129,7 +129,7 @@ def parse_name(name):
 
     canonical = re.sub(QUALITY_TOKENS, "", body)
     canonical = re.sub(r"\[[^\]]*\]", "", canonical)      # tags [BK], [4K]...
-    canonical = re.sub(r"[^A-Z0-9]+", " ", canonical).strip()
+    canonical = " ".join("".join(c if c.isalnum() else " " for c in canonical).split())
 
     return lang, canonical, quality
 
