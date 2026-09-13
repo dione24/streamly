@@ -23,6 +23,40 @@ STARTUP_TIMEOUT = 25      # secondes d'attente de la premiere playlist
 ACCESS_LOG = []           # journal d'acces circulaire, expose via /api/access
 
 
+def _as_bool(value):
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ("1", "true", "yes", "on")
+
+
+def _parse_epg_time(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            try:
+                return int(text)
+            except ValueError:
+                return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return int(time.mktime(time.strptime(text[:19], fmt)))
+            except (ValueError, OverflowError):
+                continue
+        try:
+            return int(value.replace("Z", "")[:10])
+        except (AttributeError, ValueError, TypeError):
+            return None
+    return None
+
+
 class State:
     def __init__(self):
         self.cfg = cfgmod.load()
@@ -274,10 +308,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not status:
                     return self._err(410, 'lecture arrêtée')
             return self._raw(200, STATE.transcoder.master_playlist(ticket), 'application/vnd.apple.mpegurl', {'Cache-Control': 'no-store'})
-        match = re.fullmatch(r'g(\d+)_(?:s_(\d+)\.m3u8|(\d+)_\d+\.ts)', fname)
+        match = re.fullmatch(r'g(\d+)_(?:s_(\d+)\.m3u8|a\.m3u8|(\d+)_\d+\.ts|a_\d+\.ts)', fname)
         if not match:
             return self._err(404, 'segment invalide')
-        level = int(match[2] if match[2] is not None else match[3])
+        if fname.endswith('a.m3u8') or fname.endswith('a_') or '_a_' in fname:
+            level = 0
+        else:
+            level = int(match[2] if match[2] is not None else match[3])
         if level not in STATE.transcoder.allowed_levels(t):
             return self._err(403, 'qualité supérieure au budget sélectionné')
         target = os.path.join(cfgmod.HLS_DIR, t['key'], fname)
@@ -380,6 +417,63 @@ class Handler(BaseHTTPRequestHandler):
             if not STATE.transcoder.ticket(ticket, self._session()['id'], touch=False):
                 return self._err(404, 'lecture expirée')
             return self._json(STATE.transcoder.status(ticket))
+        if path == '/api/epg':
+            pid = one("provider")
+            sid = one("stream_id")
+            if not pid or not sid:
+                return self._err(400, 'provider et stream_id requis')
+            try:
+                sid = int(sid)
+            except (TypeError, ValueError):
+                return self._err(400, 'stream_id invalide')
+            provider = STATE.provider(pid)
+            if not provider:
+                return self._err(404, 'provider introuvable')
+            channel = cat.channel(pid, sid)
+            if not channel:
+                return self._err(404, 'chaîne introuvable')
+            try:
+                entries = STATE.client(provider).live_epg(sid, epg_channel_id=channel.get('epg_id'))
+            except Exception:
+                return self._json({'has_epg': False, 'stream_id': sid, 'provider': pid})
+            now = time.time()
+            current = None
+            upcoming = None
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                def pick(key_candidates):
+                    for key in key_candidates:
+                        value = entry.get(key)
+                        parsed = _parse_epg_time(value)
+                        if parsed is not None:
+                            return parsed
+                    return None
+                start = pick(('start', 'start_time', 'start_timestamp', 'start_ts'))
+                end = pick(('end', 'end_time', 'end_timestamp', 'end_ts'))
+                if start is None or end is None:
+                    continue
+                if start <= now < end:
+                    current = entry.copy()
+                    current.update({
+                        'start_ts': start,
+                        'end_ts': end,
+                        'progress': max(0.0, min(1.0, (now - start) / max(1, end - start))),
+                        'remaining': int(end - now),
+                    })
+                    break
+                if start > now and upcoming is None:
+                    upcoming = entry.copy()
+                    upcoming.update({'start_ts': start, 'end_ts': end})
+            if not current and upcoming:
+                upcoming.update({'remaining': int(upcoming['start_ts'] - now)})
+            return self._json({
+                'provider': pid,
+                'stream_id': sid,
+                'has_epg': bool(current or upcoming),
+                'current': current,
+                'next': upcoming,
+            })
         if path == "/api/status":
             return self._json({
                 "stream": STATE.transcoder.status(),
@@ -557,6 +651,7 @@ class Handler(BaseHTTPRequestHandler):
             best = cat.pick_source(lang, canonical, int(STATE.cfg.get('preferred_source_height', 720)))
             if not best:
                 return self._err(404, 'chaîne introuvable')
+            audio_only = _as_bool(body.get('audio_only'))
             mode = body.get('mode', 'balanced')
             ceiling = {'eco': 650000, 'balanced': 1150000, 'sport': 0}.get(mode, 1150000)
             budget = 0
@@ -570,10 +665,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(400, 'Budget insuffisant pour la durée choisie. Augmentez le volume ou réduisez la durée.')
             try:
                 ticket = STATE.transcoder.open(self._session()['id'], (lang or '') + '|' + canonical,
-                    STATE.candidate_urls(best['provider_id'], best['stream_id']), canonical, ceiling, budget)
+                    STATE.candidate_urls(best['provider_id'], best['stream_id']), canonical, ceiling, budget, audio_only=audio_only)
             except CapacityError as exc:
                 return self._err(409, str(exc))
-            return self._json({'ticket': ticket, 'play_url': '/s/%s/master.m3u8' % ticket, 'ceiling': ceiling, 'budget': budget})
+            return self._json({
+                'ticket': ticket,
+                'play_url': '/s/%s/master.m3u8' % ticket,
+                'ceiling': ceiling,
+                'budget': budget,
+                'provider': best.get('provider_id'),
+                'stream_id': best.get('stream_id'),
+                'audio_only': audio_only,
+                'epg_id': best.get('epg_id'),
+            })
         if path == '/api/stop':
             STATE.transcoder.release(body.get('ticket'), self._session()['id'])
             return self._json({'ok': True})

@@ -12,7 +12,7 @@ import urllib.error
 from unittest.mock import patch, Mock
 from http.server import ThreadingHTTPServer
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server'))
-from streamly.transcoder import Transcoder, CapacityError
+from streamly.transcoder import Transcoder, CapacityError, _redact_credentials
 from streamly.auth import Sessions
 from streamly.catalog import Catalog
 from streamly.xtream import parse_name
@@ -69,6 +69,22 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index('-g:v:0')+1], '100')
         self.assertEqual(cmd[cmd.index('-r:v:0')+1], '50.0')
         self.assertIn('g2_%v_%09d.ts', cmd)
+    def test_ffmpeg_errors_never_leak_provider_credentials(self):
+        cfg = dict(CFG, providers=[dict(id='p', host='http://panel.invalid',
+            username='SECRETUSER', password='SECRETPASS', max_connections=1)])
+        t = Transcoder(cfg, self.tmp.name + '/h2', self.tmp.name + '/l2', monitor=False)
+        try:
+            line = '[http @ 0x1] HTTP error 403 Forbidden http://panel.invalid/SECRETUSER/SECRETPASS/1234: denied?token=ABCDEF123'
+            red = _redact_credentials(line, cfg)
+            self.assertNotIn('SECRETUSER', red); self.assertNotIn('SECRETPASS', red)
+            self.assertNotIn('ABCDEF123', red); self.assertIn('403', red)
+            os.makedirs(self.tmp.name + '/l2', exist_ok=True)
+            with open(self.tmp.name + '/l2/ffmpeg_k.log', 'w') as fh:
+                fh.write(line + '\n')
+            t.log_dir = self.tmp.name + '/l2'
+            self.assertNotIn('SECRETPASS', t.probe_last_error('k') or '')
+        finally:
+            t.close()
 
 class CatalogTests(unittest.TestCase):
     def setUp(self):

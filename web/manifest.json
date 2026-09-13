@@ -1,0 +1,19 @@
+{
+  "name": "Streamly — Le direct, à votre rythme",
+  "short_name": "Streamly",
+  "description": "Lecteur IPTV et direct vidéo optimisé pour économiser votre bande passante",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d120f",
+  "theme_color": "#0d120f",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["entertainment", "video", "multimedia"]
+}

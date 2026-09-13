@@ -100,6 +100,48 @@ class XtreamClient:
     def hls_url(self, stream_id):
         return "%s/live/%s/%s/%s.m3u8" % (self.host, self.username, self.password, stream_id)
 
+    def _coerce_epg_items(self, payload):
+        if not payload:
+            return []
+        candidates = payload
+        if isinstance(payload, dict):
+            for key in ("epg_listings", "epg", "programs", "data", "listings", "events", "result"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    candidates = value
+                    break
+        if isinstance(candidates, dict):
+            if isinstance(candidates.get("data"), list):
+                candidates = candidates["data"]
+            elif isinstance(candidates.get("programs"), list):
+                candidates = candidates["programs"]
+            else:
+                return []
+        if not isinstance(candidates, list):
+            return []
+        return [item for item in candidates if isinstance(item, dict)]
+
+    def live_epg(self, stream_id, epg_channel_id=None):
+        candidates = []
+        if epg_channel_id:
+            candidates.append(("get_short_epg", {"stream_id": str(epg_channel_id)}))
+            candidates.append(("get_simple_data_table", {"stream_id": str(epg_channel_id)}))
+        candidates.append(("get_short_epg", {"stream_id": str(stream_id)}))
+        candidates.append(("get_simple_data_table", {"stream_id": str(stream_id)}))
+        last_err = None
+        for action, args in candidates:
+            try:
+                payload = self._api(action, **args)
+            except Exception as exc:
+                last_err = exc
+                continue
+            items = self._coerce_epg_items(payload)
+            if items:
+                return items
+        if last_err is not None:
+            raise last_err
+        return []
+
     # ------------------------------------------------ reconstruction categories
 
     def category_names_from_m3u(self):

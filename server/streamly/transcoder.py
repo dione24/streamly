@@ -98,9 +98,38 @@ class CapacityError(RuntimeError):
     pass
 
 
+def _redact_credentials(text, cfg=None):
+    """Masque les identifiants provider dans les messages d'erreur.
+
+    Les URLs Xtream portent username/password en chemin
+    (/user/pass/id, /live/user/pass/id.m3u8) et FFmpeg les recopie
+    dans ses logs. On ne peut pas empêcher FFmpeg d'écrire l'URL
+    source, mais on ne doit jamais la renvoyer à l'UI ni dans /api/status.
+    """
+    if not text:
+        return text
+    redacted = text
+    secrets = []
+    try:
+        for p in (cfg or {}).get('providers', []):
+            for k in ('username', 'password'):
+                v = p.get(k)
+                if v and len(str(v)) >= 3:
+                    secrets.append(str(v))
+    except (AttributeError, TypeError):
+        pass
+    for s in secrets:
+        if s in redacted:
+            redacted = redacted.replace(s, '***')
+    # Jeton de redirection provider (?token=...) et chemins restants.
+    redacted = re.sub(r'(\?token=)[^&\s"\']+', r'\1***', redacted)
+    redacted = re.sub(r'(https?://[^\s/]+/)\S+/\S+/(\d+)', r'\1***/***/\2', redacted)
+    return redacted
+
+
 class Transcoder:
     def probe_last_error(self, key, max_lines=14):
-        """Retourne une erreur ffmpeg récente, lisible par l'UI."""
+        """Retourne une erreur ffmpeg récente, lisible par l'UI (sans credentials)."""
         path = os.path.join(self.log_dir, 'ffmpeg_%s.log' % key)
         try:
             with open(path, 'r', encoding='utf-8', errors='replace') as fh:
@@ -112,8 +141,8 @@ class Transcoder:
         for line in reversed(lines[-max_lines:]):
             lowered = line.lower()
             if 'error' in lowered or 'http error' in lowered:
-                return line[:240]
-        return lines[-1][:240]
+                return _redact_credentials(line[:240], self.cfg)
+        return _redact_credentials(lines[-1][:240], self.cfg)
 
     def __init__(self, cfg, hls_dir, log_dir, monitor=True):
         self.cfg, self.hls_dir, self.log_dir = cfg, hls_dir, log_dir
@@ -125,6 +154,19 @@ class Transcoder:
         self._closed = threading.Event()
         os.makedirs(hls_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
+        # Les logs FFmpeg recopient l'URL source avec les identifiants :
+        # accès restreint au propriétaire (migration VPS dans une semaine,
+        # le masquage complet du `ps` demande un proxy local, hors scope).
+        try:
+            os.chmod(log_dir, 0o700)
+        except OSError:
+            pass
+        for name in os.listdir(log_dir):
+            if name.startswith('ffmpeg_') and name.endswith('.log'):
+                try:
+                    os.chmod(os.path.join(log_dir, name), 0o600)
+                except OSError:
+                    pass
         # Les segments sont purement transitoires : aucun ne doit survivre a un
         # redemarrage. Le menage de fin de flux ne s'execute pas quand le
         # service est arrete ou qu'un processus est tue, si bien que les
@@ -147,10 +189,35 @@ class Transcoder:
             return source_fps / 2.0
         return source_fps
 
-    def _command(self, source, media, generation):
+    def _command(self, source, media, generation, audio_only=False):
         seg = int(self.cfg.get('segment_seconds', 2))
         fps = float(media['fps'])
         ua = self.cfg.get('user_agent', 'VLC/3.0.20')
+        # Mode audio-only : pas de transcodage vidéo.
+        if audio_only:
+            if not (any(s.get('codec_type') == 'audio' for s in media.get('streams', [])) or media.get('unverified')):
+                raise RuntimeError('Aucun flux audio détectable pour ce canal.')
+            cmd = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'warning',
+                   '-rw_timeout', '12000000', '-user_agent', ua,
+                   '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3',
+                   '-analyzeduration', '2000000', '-probesize', '2000000', '-i', source,
+                   '-map', '0:a:0', '-vn',
+                   '-c:a', 'aac', '-b:a', self.cfg.get('audio_bitrate', '96k'), '-ac', '2',
+                   '-f', 'hls', '-hls_time', str(seg), '-hls_list_size', str(max(36, int(self.cfg.get('playlist_size', 36))))]
+            if self._ffmpeg_caps.get('hls_flags'):
+                hls_flags = ['delete_segments', 'omit_endlist']
+                if self._ffmpeg_caps.get('hls_independent_segments'):
+                    hls_flags.append('independent_segments')
+                if self._ffmpeg_caps.get('hls_temp_file'):
+                    hls_flags.append('temp_file')
+                cmd += ['-hls_flags', '+'.join(hls_flags)]
+            if self._ffmpeg_caps.get('hls_delete_threshold'):
+                cmd += ['-hls_delete_threshold', '12']
+            cmd += ['-hls_segment_type', 'mpegts',
+                    '-hls_segment_filename', 'g%d_a_%%09d.ts' % generation,
+                    'g%d_a.m3u8' % generation]
+            return cmd
+
         # Never upscale. The manifest uses the same dimensions as the encoder.
         chains = []
         for i, r in enumerate(self.ladder):
@@ -230,7 +297,7 @@ class Transcoder:
         with self._lock:
             self.reservations.pop(job, None)
 
-    def open(self, owner, identity, sources, label='', ceiling=0, budget=0):
+    def open(self, owner, identity, sources, label='', ceiling=0, budget=0, audio_only=False):
         key = hashlib.sha256(identity.encode()).hexdigest()[:20]
         with self._lock:
             self._expire_locked()
@@ -252,14 +319,16 @@ class Transcoder:
                     raise CapacityError('Toutes les connexions de ces abonnements sont occupées.')
                 w = dict(key=key, sources=sources, index=0, provider=sources[0]['provider'],
                          generation=0, proc=None, state='starting', started=time.time(),
-                         last=time.time(), label=label, failovers=0, media=None, error=None)
+                         last=time.time(), label=label, failovers=0, media=None,
+                         audio_only=bool(audio_only), error=None)
                 self.workers[key] = w
                 threading.Thread(target=self._spawn, args=(key,), daemon=True).start()
             elif w['state'] == 'failed':
                 raise CapacityError('Les sources de cette chaîne sont indisponibles. Arrêtez la lecture puis réessayez.')
             ticket = secrets.token_urlsafe(24)
             self.tickets[ticket] = dict(owner=owner, key=key, last=time.time(), created=time.time(),
-                                        bytes=0, ceiling=max(0, int(ceiling)), budget=max(0, int(budget)))
+                                        bytes=0, ceiling=max(0, int(ceiling)), budget=max(0, int(budget)),
+                                        audio_only=bool(audio_only))
             return ticket
 
     def _spawn(self, key):
@@ -269,6 +338,7 @@ class Transcoder:
                 return
             generation = w['generation']
             source = w['sources'][w['index']]['url']
+            audio_only = w.get('audio_only')
         media = probe(source, self.cfg.get('user_agent', 'VLC/3.0.20'))
         with self._lock:
             if self.workers.get(key) is not w or w['generation'] != generation:
@@ -277,9 +347,16 @@ class Transcoder:
             os.makedirs(outdir, exist_ok=True)
             w['media'], w['started'], w['error'] = media, time.time(), None
             try:
-                # Keep FFmpeg's credential-bearing errors private; cap each generation log.
-                with open(os.path.join(self.log_dir, 'ffmpeg_%s.log' % key), 'wb') as log:
-                    w['proc'] = subprocess.Popen(self._command(source, media, generation), cwd=outdir, stdout=log, stderr=log)
+                # FFmpeg recopie l'URL source (avec identifiants) dans ses logs :
+                # fichier en 600, et jamais renvoyé tel quel à l'UI.
+                log_path = os.path.join(self.log_dir, 'ffmpeg_%s.log' % key)
+                with open(log_path, 'wb') as log:
+                    try:
+                        os.chmod(log_path, 0o600)
+                    except OSError:
+                        pass
+                    w['proc'] = subprocess.Popen(self._command(source, media, generation, audio_only=audio_only),
+                                                 cwd=outdir, stdout=log, stderr=log)
                 w['state'] = 'buffering'
             except OSError:
                 w['state'] = 'failed'
@@ -303,6 +380,8 @@ class Transcoder:
             return True
 
     def allowed_levels(self, t):
+        if t.get('audio_only'):
+            return [0]
         ceiling = t.get('ceiling', 0)
         audio = _bps(self.cfg.get('audio_bitrate', '96k'))
         levels = [i for i, r in enumerate(self.ladder) if not ceiling or (_bps(r['maxrate']) + audio) * 1.08 <= ceiling]
@@ -312,6 +391,16 @@ class Transcoder:
         with self._lock:
             t = self.tickets[ticket]
             w = self.workers[t['key']]
+            if t.get('audio_only'):
+                bw = int(_bps(self.cfg.get('audio_bitrate', '96k')) * 1.08)
+                return '\n'.join([
+                    '#EXTM3U',
+                    '#EXT-X-VERSION:3',
+                    '#EXT-X-INDEPENDENT-SEGMENTS',
+                    '#EXT-X-STREAM-INF:BANDWIDTH=%d,CODECS="mp4a.40.2"' % bw,
+                    'g%d_a.m3u8' % w['generation'],
+                ]) + '\n'
+
             media = w['media'] or {'width': 1280, 'height': 720, 'fps': 25}
             lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-INDEPENDENT-SEGMENTS']
             for i in self.allowed_levels(t):
@@ -336,7 +425,9 @@ class Transcoder:
                 t = self.tickets.get(ticket)
                 if not t or t['key'] not in self.workers:
                     return None
-                return dict(public(self.workers[t['key']]), bytes=t['bytes'], budget=t['budget'], ceiling=t['ceiling'])
+                return dict(public(self.workers[t['key']]),
+                            bytes=t['bytes'], budget=t['budget'], ceiling=t['ceiling'],
+                            audio_only=t.get('audio_only'))
             return {'running': bool(self.workers), 'workers': [public(w) for w in self.workers.values()],
                     'capacity': int(self.cfg.get('max_concurrent_streams', 1))}
 
