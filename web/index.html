@@ -4,8 +4,8 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0e120f"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="style.css?v=20260913-v12">
-<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260913-v12"></script>
+<link rel="stylesheet" href="style.css?v=20260913-v13">
+<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260913-v13"></script>
 </head>
 <body>
 <section id="login" class="screen">
@@ -43,7 +43,17 @@
  <div id="notice" class="notice" role="status" hidden></div>
  <section class="workspace">
   <section id="player-wrap" class="player" hidden aria-label="Lecteur vidéo">
-   <div class="video-stage"><video id="video" controls playsinline preload="metadata"></video></div>
+   <div class="video-stage">
+    <video id="video" controls playsinline preload="metadata"></video>
+    <div id="channel-zap-overlay" class="channel-zap-overlay" hidden aria-live="polite" role="status">
+      <button id="zap-prev" class="quiet zap-btn" title="Chaîne précédente (PageUp)" aria-label="Chaîne précédente">‹</button>
+      <div class="zap-meta">
+        <p id="zap-direction" class="small muted">Chaîne suivante</p>
+        <p id="zap-channel" class="name"></p>
+      </div>
+      <button id="zap-next" class="quiet zap-btn" title="Chaîne suivante (PageDown)" aria-label="Chaîne suivante">›</button>
+    </div>
+  </div>
    <div class="player-heading">
     <div class="player-title-box">
      <span id="live-badge" class="live-badge"><span class="pulse-dot" aria-hidden="true"></span> DIRECT</span>
@@ -118,7 +128,12 @@
    <div id="filters" class="filters">
     <label>Abonnement<select id="provider"><option value="">Tous les abonnements</option></select></label>
     <label>Langue<select id="lang"><option value="">Toutes les langues</option></select></label>
-    <label>Catégorie<select id="category"><option value="">Toutes les catégories</option></select></label>
+    <label class="category-filter">Catégorie
+      <select id="category" class="category-select" aria-label="Catégories">
+      <option value="">Toutes les catégories</option>
+      </select>
+      <div id="category-chips" class="category-chips" role="tablist" aria-label="Catégories"></div>
+    </label>
     <span id="count" class="small muted"></span>
    </div>
    <ul id="channels" class="channels" tabindex="0" aria-label="Liste des chaînes (utilisez les flèches pour naviguer)"></ul>
@@ -160,10 +175,10 @@
  <footer>
   <span>streamly.</span>
   <div class="footer-meta">
-   <span class="keyboard-hints"><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd><kbd>←</kbd> Naviguer &bull; <kbd>Entrée</kbd> Lire &bull; <kbd>F</kbd> Plein écran</span>
+   <span class="keyboard-hints"><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd><kbd>←</kbd> Naviguer &bull; <kbd>PageUp</kbd>/<kbd>PageDown</kbd> Changer chaîne &bull; <kbd>Entrée</kbd> Lire &bull; <kbd>F</kbd> Plein écran</span>
    <span>Le direct, à votre rythme.</span>
   </div>
- </footer>
+</footer>
 </main>
 <dialog id="movie-dialog">
  <form method="dialog"><button class="dialog-close quiet" aria-label="Fermer">✕</button></form>

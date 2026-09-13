@@ -14,6 +14,7 @@ const state = {
   generation: null, retries: 0, statusMisses: 0, recoveryTimer: null, playback: 0, stalls: 0, started: 0,
   frames: false, movie: null, job: null, role: 'viewer', configTimer: null, jobTimer: null,
   configOpen: false, configReturnMode: 'live', configSnapshot: null,
+  channelList: [], zapTimer: null,
   selectedChannelIndex: -1
 };
 
@@ -89,6 +90,11 @@ function el(tag, className, text) {
 function size(n) { return n >= 1e9 ? (n / 1e9).toFixed(2) + ' Go' : Math.round(n / 1e6) + ' Mo'; }
 function favKey(c) { return (c.lang || '') + '|' + (c.canonical || c.label || c.title); }
 function isFav(c) { return state.favorites.some(f => favKey(f) === favKey(c)); }
+function sameChannel(a, b) { return channelKey(a) === channelKey(b); }
+function channelKey(c) {
+  if (!c) return '';
+  return (c.lang || '') + '|' + (c.canonical || '') + '|' + (c.label || c.title || '');
+}
 
 function getChannelColor(str) {
   if (!str) return '#232b24';
@@ -185,6 +191,59 @@ function destroyPlayer() {
   v.load();
 }
 
+function clearZapOverlay() {
+  const overlay = $('#channel-zap-overlay');
+  if (!overlay) return;
+  clearTimeout(state.zapTimer);
+  state.zapTimer = null;
+  overlay.classList.remove('visible');
+  overlay.hidden = true;
+}
+
+function markNowPlaying(channel) {
+  const key = channelKey(channel);
+  const cards = Array.from($$('#channels li[data-channel-key]'));
+  cards.forEach(card => card.classList.toggle('now-playing', card.dataset.channelKey === key));
+  if (!channel) return;
+  const idx = state.channelList.findIndex(item => sameChannel(item, channel));
+  state.selectedChannelIndex = idx >= 0 ? idx : state.selectedChannelIndex;
+}
+
+function nextChannelFromCurrent(offset) {
+  if (!state.current) return null;
+  if (state.mode !== 'live') return null;
+  const list = state.channelList;
+  if (!list.length) return null;
+  const idx = list.findIndex(item => sameChannel(item, state.current));
+  if (idx < 0) return null;
+  return list[(idx + offset + list.length) % list.length];
+}
+
+function showZapOverlay(channel, direction) {
+  const overlay = $('#channel-zap-overlay');
+  if (!overlay) return;
+  const directionLabel = $('#zap-direction');
+  const title = $('#zap-channel');
+  if (directionLabel) directionLabel.textContent = direction < 0 ? 'Chaîne précédente' : 'Chaîne suivante';
+  if (title) title.textContent = channel.label || channel.title || '';
+  overlay.hidden = false;
+  overlay.classList.add('visible');
+  clearTimeout(state.zapTimer);
+  state.zapTimer = setTimeout(() => {
+    state.zapTimer = null;
+    overlay.classList.remove('visible');
+    overlay.hidden = true;
+  }, 900);
+}
+
+function zapChannel(offset) {
+  if (!state.current || state.mode !== 'live' || $('#player-wrap').hidden) return;
+  const target = nextChannelFromCurrent(offset);
+  if (!target) return;
+  showZapOverlay(target, offset);
+  play(target).catch(failure);
+}
+
 async function stop() {
   ++state.playback;
   const ticket = state.ticket;
@@ -192,6 +251,7 @@ async function stop() {
   destroyPlayer();
   state.current = null;
   state.job = null;
+  clearZapOverlay();
   $('#player-wrap').hidden = true;
   document.body.classList.remove('is-playing', 'reader-focus', 'catalogue-collapsed');
   $('#preferences').hidden = false;
@@ -289,12 +349,7 @@ async function play(channel) {
   playbackUI(channel.label, true);
   message('');
   
-  // Repérer la chaîne en cours dans la liste
-  $$('#channels li.now-playing').forEach(n => n.classList.remove('now-playing'));
-  $$('#channels li').forEach(li => {
-    const name = li.querySelector('.name');
-    if (name && name.textContent === channel.label) li.classList.add('now-playing');
-  });
+  markNowPlaying(channel);
 
   try {
     const info = await post('/play', {
@@ -312,6 +367,7 @@ async function play(channel) {
     state.url = info.play_url;
     $('#budget-meter').hidden = !info.budget;
     attach(info.play_url, true, attempt);
+    markNowPlaying(channel);
     remember(channel);
   } catch (err) {
     if (attempt === state.playback) {
@@ -392,6 +448,8 @@ function attach(url, live, attempt) {
 
 $('#stop').onclick = () => stop().catch(failure);
 $('#quality').onchange = e => { if (state.hls) state.hls.currentLevel = Number(e.target.value); };
+$('#zap-prev').onclick = () => zapChannel(-1);
+$('#zap-next').onclick = () => zapChannel(1);
 $('#back-live').onclick = () => {
   const v = $('#video');
   if (state.hls && state.hls.liveSyncPosition) v.currentTime = state.hls.liveSyncPosition;
@@ -507,6 +565,7 @@ function renderSkeletons(count = 6) {
 // Catalogue row
 function row(c, movie = false) {
   const li = el('li', 'channel-card' + (movie ? ' movie-card' : ''));
+  li.dataset.channelKey = channelKey(c);
   const button = el('button', 'channel-main');
   button.type = 'button';
   const nameLabel = movie ? c.title : c.label;
@@ -514,7 +573,8 @@ function row(c, movie = false) {
   const iconSlot = el('span', 'logo-slot');
   iconSlot.style.backgroundColor = getChannelColor(nameLabel);
   const placeholder = el('span', 'logo-placeholder', fallback);
-  iconSlot.append(placeholder);
+  const loader = el('span', 'logo-loader');
+  iconSlot.append(placeholder, loader);
 
   if (c.icon && /^https?:\/\//.test(c.icon)) {
     const img = el('img', 'channel-logo');
@@ -522,9 +582,18 @@ function row(c, movie = false) {
     img.alt = '';
     img.loading = 'lazy';
     img.referrerPolicy = 'no-referrer';
-    img.onload = () => { placeholder.hidden = true; };
-    img.onerror = () => { img.remove(); placeholder.hidden = false; };
+    img.onload = () => {
+      placeholder.hidden = true;
+      if (loader.isConnected) loader.remove();
+    };
+    img.onerror = () => {
+      img.remove();
+      placeholder.hidden = false;
+      if (loader.isConnected) loader.remove();
+    };
     iconSlot.append(img);
+  } else if (loader.isConnected) {
+    loader.remove();
   }
 
   button.append(iconSlot);
@@ -586,6 +655,11 @@ async function renderChannels(more = false) {
     if (serial !== state.request) return;
     const hasMore = state.mode !== 'favorites' && items.length > state.pageSize;
     if (hasMore) items.pop();
+    if (state.mode === 'live') {
+      state.channelList = more ? state.channelList.concat(items) : [...items];
+    } else {
+      state.channelList = [];
+    }
     if (!more) $('#channels').replaceChildren();
     const fragment = document.createDocumentFragment();
     items.forEach(c => fragment.append(row(c, state.mode === 'vod')));
@@ -594,7 +668,8 @@ async function renderChannels(more = false) {
     $('#empty').hidden = $('#channels').children.length > 0;
     const totalRendered = $('#channels').children.length;
     $('#count').textContent = totalRendered + (state.mode === 'vod' ? ' films affichés' : ' chaînes affichées') + (hasMore ? ' · suite disponible' : '');
-    state.selectedChannelIndex = -1;
+    markNowPlaying(state.current);
+    if (!state.current) state.selectedChannelIndex = -1;
   } catch (err) {
     if (serial === state.request) {
       if (more) state.page = Math.max(0, state.page - 1);
@@ -634,6 +709,38 @@ async function loadFilters() {
   await loadCategories();
 }
 
+function normalizeCategoryValue(value) {
+  if (!value) return '';
+  return typeof value === 'string' ? value : (value.name || value.slug || '');
+}
+
+function renderCategoryChips(items = []) {
+  const chips = $('#category-chips');
+  if (!chips) return;
+
+  const values = [...new Set(items.map(normalizeCategoryValue).filter(Boolean))];
+  chips.replaceChildren();
+
+  const makeChip = (value, label) => {
+    const chip = el('button', 'category-chip', label);
+    chip.type = 'button';
+    chip.setAttribute('role', 'tab');
+    chip.setAttribute('aria-selected', String(state.category === value));
+    chip.classList.toggle('active', state.category === value);
+    chip.onclick = () => {
+      state.category = value;
+      const sel = $('#category');
+      if (sel) sel.value = value;
+      renderCategoryChips(values);
+      renderChannels();
+    };
+    return chip;
+  };
+
+  chips.append(makeChip('', 'Toutes les catégories'));
+  values.forEach(value => chips.append(makeChip(value, value)));
+}
+
 async function loadCategories() {
   const serial = ++filterGeneration;
   const params = new URLSearchParams();
@@ -643,9 +750,20 @@ async function loadCategories() {
   const cats = await api((state.mode === 'vod' ? '/vod/categories' : '/categories') + suffix).catch(() => []);
   if (serial !== filterGeneration) return;
   const sel = $('#category');
+  const rawValues = cats.map(normalizeCategoryValue).filter(Boolean);
+  const values = [...new Set(rawValues)];
+  const selected = normalizeCategoryValue(state.category);
+
   sel.replaceChildren(new Option('Toutes les catégories', ''));
-  cats.forEach(c => sel.add(new Option(c.name, c.name)));
-  sel.value = state.category;
+  values.forEach(v => sel.add(new Option(v, v)));
+  if (values.includes(selected)) {
+    state.category = selected;
+    sel.value = selected;
+  } else {
+    state.category = '';
+    sel.value = '';
+  }
+  renderCategoryChips(values);
 }
 
 async function loadProviders() {
@@ -677,6 +795,7 @@ $('#lang').onchange = async e => {
 
 $('#category').onchange = e => {
   state.category = e.target.value;
+  renderCategoryChips($('#category option').length ? Array.from($('#category').options).slice(1).map(opt => opt.value) : []);
   renderChannels();
 };
 
@@ -1006,6 +1125,16 @@ window.addEventListener('keydown', e => {
 
   // Raccourcis globaux si non en cours de saisie
   if (!isInput) {
+    if (e.key === 'PageUp') {
+      zapChannel(-1);
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'PageDown') {
+      zapChannel(1);
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Escape') {
       if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
