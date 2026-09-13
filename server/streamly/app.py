@@ -214,7 +214,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, 'corps JSON invalide')
         if path == '/api/login':
             try:
-                sid, role = STATE.sessions.login(body.get('token'), self.client_address[0])
+                sid, role = STATE.sessions.login(
+                    body.get('token'), self.client_address[0],
+                    username=body.get('username'), password=body.get('password'))
             except ValueError as exc:
                 return self._err(401, str(exc))
             self._cookie = self._session_cookie(sid)

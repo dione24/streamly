@@ -31,6 +31,7 @@ function requireLogin(message = '') {
   $('#tab-conf').hidden = true;
   $('#login-error').textContent = message || '';
   $('#token-input').value = '';
+  const u = $('#user-input'); if (u) u.value = '';
 }
 function failure(err) { if (err.name !== 'AbortError') message(err.message || 'Une erreur est survenue.'); }
 window.addEventListener('unhandledrejection', e => failure(e.reason || {}));
@@ -74,11 +75,13 @@ async function connected(role) {
 }
 $('#login-form').onsubmit = async e => {
   e.preventDefault(); $('#token-go').disabled = true; $('#login-error').textContent = '';
-  const token = $('#token-input').value.trim();
-  const remember = $('#remember-token').checked;
+  const username = $('#user-input').value.trim();
+  const password = $('#token-input').value;
   try {
-    const r = await post('/login', {token});
-    if (remember) store.set('token', token); else store.remove('token');
+    // La session vit dans un cookie HttpOnly : aucun secret n'est conserve
+    // en localStorage, contrairement a l'ancien jeton.
+    const r = await post('/login', {username, password});
+    store.remove('token');
     $('#token-input').value = '';
     await connected(r.role);
   } catch (err) {
