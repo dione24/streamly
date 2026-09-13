@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS channels (
     icon          TEXT,
     epg_id        TEXT,
     is_backup     INTEGER DEFAULT 0,
+    -- URL de lecture. Vide pour un panel Xtream, ou elle se reconstruit a
+    -- partir des identifiants ; renseignee pour une playlist M3U, ou elle est
+    -- la seule chose qui permette de jouer l'entree.
+    url           TEXT,
     PRIMARY KEY (provider_id, stream_id)
 );
 CREATE INDEX IF NOT EXISTS idx_canon ON channels(lang, canonical);
@@ -94,6 +98,9 @@ class Catalog:
         self._db.executescript(SCHEMA)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.commit()
+        if 'url' not in {r['name'] for r in self._db.execute('PRAGMA table_info(channels)')}:
+            with self._db:
+                self._db.execute('ALTER TABLE channels ADD COLUMN url TEXT')
         if self._db.execute('PRAGMA user_version').fetchone()[0] < 1:
             rows = self._db.execute('SELECT provider_id, stream_id, name FROM channels').fetchall()
             with self._db:
@@ -181,7 +188,7 @@ class Catalog:
                 pid, int(s.get("stream_id") or 0), name, lang, canonical, quality,
                 xtream.quality_height(quality), cid, cat_names.get(cid),
                 s.get("stream_icon") or "", s.get("epg_channel_id") or "",
-                1 if xtream.is_backup(name) else 0,
+                1 if xtream.is_backup(name) else 0, s.get("url") or None,
             ))
 
         with self._db:
@@ -189,8 +196,8 @@ class Catalog:
             self._db.executemany(
                 "INSERT OR REPLACE INTO channels "
                 "(provider_id,stream_id,name,lang,canonical,quality,height,"
-                " category_id,category_name,icon,epg_id,is_backup) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                " category_id,category_name,icon,epg_id,is_backup,url) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
             self._db.execute(
                 "INSERT OR REPLACE INTO sync_state VALUES (?,?,?,?)",
                 (pid, int(time.time()), len(rows), note))
@@ -394,7 +401,7 @@ class Catalog:
         les flux principaux avant les flux de secours.
         """
         cur = self._db.execute(
-            "SELECT provider_id, stream_id, name, quality, height, is_backup "
+            "SELECT provider_id, stream_id, name, quality, height, is_backup, url "
             "FROM channels WHERE lang IS ? AND canonical=? "
             "ORDER BY is_backup, height",
             (lang, canonical))

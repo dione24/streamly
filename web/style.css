@@ -1734,3 +1734,17 @@ kbd {
     animation: none !important;
   }
 }
+
+/* Choix du type de source dans les reglages */
+.source-kind { display: flex; gap: .75rem; flex-wrap: wrap; margin-bottom: .25rem; }
+.source-kind label {
+  display: inline-flex; align-items: center; gap: .45rem; margin: 0;
+  padding: .45rem .8rem; border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px; cursor: pointer; font-size: .92rem;
+}
+.source-kind label:has(input:checked) { border-color: var(--accent, #cdf564); color: var(--accent, #cdf564); }
+.source-kind input { width: auto; margin: 0; accent-color: var(--accent, #cdf564); }
+.kind-badge {
+  font-size: .72rem; letter-spacing: .06em; padding: .12rem .45rem;
+  border: 1px solid rgba(255,255,255,.18); border-radius: 999px; opacity: .75;
+}

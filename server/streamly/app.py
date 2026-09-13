@@ -17,6 +17,7 @@ from .catalog import Catalog
 from .transcoder import Transcoder, CapacityError
 from .auth import Sessions
 from .vod import Movies
+from .m3u import M3UClient, PlaylistError, detect_xtream
 from .xtream import XtreamClient
 
 STARTUP_TIMEOUT = 25      # secondes d'attente de la premiere playlist
@@ -80,9 +81,11 @@ class State:
         return None
 
     def client(self, provider):
+        ua = self.cfg.get("user_agent", "VLC/3.0.20")
+        if provider.get("kind") == "m3u":
+            return M3UClient(provider["url"], ua)
         return XtreamClient(provider["host"], provider["username"],
-                            provider["password"],
-                            self.cfg.get("user_agent", "VLC/3.0.20"))
+                            provider["password"], ua)
 
     def candidate_urls(self, provider_id, stream_id):
         """URLs a essayer pour une chaine, dans l'ordre.
@@ -94,14 +97,23 @@ class State:
         """
         urls, seen = [], set()
 
-        def add(pid, sid):
+        def add(pid, sid, url=None):
             provider = self.provider(pid)
             if not provider or not provider.get("enabled", True) or (pid, sid) in seen:
                 return
             seen.add((pid, sid))
-            urls.append({"provider": pid, "url": self.client(provider).live_url(sid)})
+            # Une entree de playlist n'a pas d'URL reconstructible : celle
+            # enregistree a la synchro est la seule utilisable. On evite ainsi
+            # de retelecharger la playlist a chaque lecture.
+            if not url and provider.get("kind") == "m3u":
+                row = self.catalog.channel(pid, sid) or {}
+                url = row.get("url")
+                if not url:
+                    return
+            urls.append({"provider": pid, "url": url or self.client(provider).live_url(sid)})
 
-        add(provider_id, int(stream_id))
+        first = self.catalog.channel(provider_id, int(stream_id)) or {}
+        add(provider_id, int(stream_id), first.get("url"))
 
         channel = self.catalog.channel(provider_id, int(stream_id))
         if channel and channel.get("canonical"):
@@ -110,7 +122,7 @@ class State:
             alts.sort(key=lambda s: (s["is_backup"],
                                      abs((s["height"] or 0) - target)))
             for alt in alts:
-                add(alt["provider_id"], alt["stream_id"])
+                add(alt["provider_id"], alt["stream_id"], alt.get("url"))
         return urls
 
 
@@ -479,7 +491,8 @@ class Handler(BaseHTTPRequestHandler):
                 "stream": STATE.transcoder.status(),
                 "providers": [
                     {"id": p["id"], "name": p.get("name", p["id"]),
-                     "enabled": p.get("enabled", True)}
+                     "enabled": p.get("enabled", True),
+                     "kind": p.get("kind", "xtream")}
                     for p in STATE.cfg.get("providers", [])],
                 "sync": cat.stats(),
                 "sync_log": STATE.sync_log[-30:] if self._admin() else [],
@@ -594,21 +607,41 @@ class Handler(BaseHTTPRequestHandler):
             pid = (body.get("id") or "").strip() or ("p%d" % int(time.time()))
             if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", pid):
                 return self._err(400, "identifiant provider invalide")
-            if urllib.parse.urlparse(body.get("host", "")).scheme not in ("http", "https"):
-                return self._err(400, "adresse HTTP ou HTTPS requise")
-            if not all(body.get(k) for k in ("host", "username", "password")):
-                return self._err(400, "host, username et password sont requis")
-            provider = {
+            link = (body.get("url") or "").strip()
+            common = {
                 "id": pid,
                 "name": body.get("name") or pid,
-                "host": body["host"].rstrip("/"),
-                "username": body["username"],
-                "password": body["password"],
                 "enabled": True,
                 "max_connections": max(1, min(10, int(body.get("max_connections", 1)))),
             }
+            if link:
+                if urllib.parse.urlparse(link).scheme not in ("http", "https"):
+                    return self._err(400, "lien HTTP ou HTTPS requis")
+                # Un lien get.php porte des identifiants Xtream : l'enregistrer
+                # comme panel plutot que comme playlist plate conserve l'EPG,
+                # les films et les libelles de categories.
+                xt = detect_xtream(link)
+                if xt:
+                    host, user, password = xt
+                    candidate = dict(common, host=host, username=user, password=password)
+                    try:
+                        STATE.client(candidate).account_info()
+                        provider = candidate
+                    except Exception:
+                        provider = dict(common, kind="m3u", url=link)
+                else:
+                    provider = dict(common, kind="m3u", url=link)
+            else:
+                if urllib.parse.urlparse(body.get("host", "")).scheme not in ("http", "https"):
+                    return self._err(400, "adresse HTTP ou HTTPS requise")
+                if not all(body.get(k) for k in ("host", "username", "password")):
+                    return self._err(400, "renseignez un lien M3U, ou host, username et password")
+                provider = dict(common, host=body["host"].rstrip("/"),
+                                username=body["username"], password=body["password"])
             try:
                 STATE.client(provider).account_info()
+            except PlaylistError as exc:
+                return self._err(400, str(exc))
             except Exception as exc:
                 return self._err(400, "connexion refusee : %s" % exc)
 
@@ -617,7 +650,8 @@ class Handler(BaseHTTPRequestHandler):
             providers.append(provider)
             STATE.cfg["providers"] = providers
             cfgmod.save({"providers": providers})
-            return self._json({"ok": True, "provider": pid})
+            return self._json({"ok": True, "provider": pid,
+                               "kind": provider.get("kind", "xtream")})
 
         if path == "/api/providers/delete":
             pid = body.get("id")

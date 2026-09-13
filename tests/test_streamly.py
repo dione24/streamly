@@ -16,6 +16,7 @@ from streamly.transcoder import Transcoder, CapacityError, _redact_credentials
 from streamly.auth import Sessions
 from streamly.catalog import Catalog
 from streamly.xtream import parse_name
+from streamly import m3u
 from streamly import app, config
 from streamly.vod import Movies
 
@@ -281,6 +282,85 @@ class CatalogTests(unittest.TestCase):
             connections.append(self.cat._db); self.cat.close()
         t = threading.Thread(target=capture); t.start(); t.join()
         self.assertIsNot(self.cat._db, connections[0])
+
+class PlaylistTests(unittest.TestCase):
+    """Lien M3U direct : une playlist doit s'importer comme un panel."""
+    SAMPLE = """#EXTM3U
+#EXTINF:-1 tvg-id="tf1.fr" tvg-name="TF1" tvg-logo="http://logo/tf1.png" group-title="FR | TNT",FR| TF1 HD
+http://serveur/live/u/p/101.ts
+#EXTINF:-1 group-title="FR | TNT",FR| FRANCE 2 FHD
+http://serveur/live/u/p/102.ts
+#EXTINF:-1 group-title="FILMS",Un film quelconque
+http://serveur/movie/u/p/9.mkv
+#EXTINF:-1,Sans groupe
+#EXTGRP:DIVERS
+http://serveur/live/u/p/103.ts
+"""
+    def test_parses_attributes_and_separate_group_lines(self):
+        entries = m3u.parse(self.SAMPLE)
+        self.assertEqual(len(entries), 4)
+        self.assertEqual(entries[0]['name'], 'FR| TF1 HD')
+        self.assertEqual(entries[0]['epg_id'], 'tf1.fr')
+        self.assertEqual(entries[0]['group'], 'FR | TNT')
+        self.assertEqual(entries[0]['url'], 'http://serveur/live/u/p/101.ts')
+        self.assertEqual(entries[3]['group'], 'DIVERS')
+
+    def test_stream_ids_follow_the_url_not_the_position(self):
+        a = m3u.parse(self.SAMPLE)
+        shuffled = m3u.parse('#EXTM3U\n' + '\n'.join(self.SAMPLE.splitlines()[5:] + self.SAMPLE.splitlines()[1:5]))
+        by_url = {e['url']: m3u.stream_id(e['url']) for e in a}
+        for e in shuffled:
+            self.assertEqual(m3u.stream_id(e['url']), by_url[e['url']])
+
+    def test_movies_are_not_imported_as_live_channels(self):
+        client = m3u.M3UClient('http://x/list.m3u', 'UA')
+        client._entries = [e for e in m3u.parse(self.SAMPLE) if not m3u._VOD_RE.search(e['url'])]
+        names = [s['name'] for s in client.live_streams()]
+        self.assertNotIn('Un film quelconque', names)
+        self.assertEqual(len(names), 3)
+        self.assertEqual([c['category_name'] for c in client.live_categories()],
+                         ['FR | TNT', 'DIVERS'])
+        # Chaque entree porte son URL : rien ne permettrait de la reconstruire.
+        self.assertEqual(client.live_url(client.live_streams()[0]['stream_id']),
+                         'http://serveur/live/u/p/101.ts')
+
+    def test_a_get_php_link_is_recognised_as_an_xtream_panel(self):
+        found = m3u.detect_xtream('http://panel.tld:8080/get.php?username=bob&password=s3cr3t&type=m3u_plus')
+        self.assertEqual(found, ('http://panel.tld:8080', 'bob', 's3cr3t'))
+        # Une playlist ordinaire ne doit pas etre prise pour un panel.
+        self.assertIsNone(m3u.detect_xtream('http://cdn.tld/liste.m3u'))
+        self.assertIsNone(m3u.detect_xtream('ftp://panel.tld/get.php?username=a&password=b'))
+        self.assertIsNone(m3u.detect_xtream('http://panel.tld/autre.php?username=a&password=b'))
+
+    def test_a_link_that_is_not_a_playlist_is_refused(self):
+        client = m3u.M3UClient('http://x/list.m3u', 'UA')
+        with patch('urllib.request.urlopen') as fake:
+            fake.return_value.__enter__.return_value.read.return_value = b'<html>404</html>'
+            with self.assertRaises(m3u.PlaylistError):
+                client.account_info()
+
+
+class CatalogPlaylistTests(unittest.TestCase):
+    """L'URL d'une entree de playlist doit survivre a la synchronisation."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.cat = Catalog(self.tmp.name + '/c.db')
+    def tearDown(self): self.cat.close(); self.tmp.cleanup()
+    def test_playlist_url_is_stored_and_returned(self):
+        client = Mock()
+        client.live_streams.return_value = [{
+            'stream_id': 4242, 'name': 'FR| TF1 HD', 'category_id': 'TNT',
+            'stream_icon': '', 'epg_channel_id': '', 'url': 'http://serveur/live/u/p/101.ts'}]
+        client.live_categories.return_value = [{'category_id': 'TNT', 'category_name': 'TNT'}]
+        self.cat.sync_provider({'id': 'liste'}, client, lambda _: None)
+        self.assertEqual(self.cat.channel('liste', 4242)['url'], 'http://serveur/live/u/p/101.ts')
+        self.assertEqual(self.cat.sources('FR', 'TF1')[0]['url'], 'http://serveur/live/u/p/101.ts')
+    def test_xtream_channels_keep_a_null_url(self):
+        client = Mock()
+        client.live_streams.return_value = [{'stream_id': 7, 'name': 'FR| M6', 'category_id': '1'}]
+        client.live_categories.return_value = [{'category_id': '1', 'category_name': 'TNT'}]
+        self.cat.sync_provider({'id': 'panel'}, client, lambda _: None)
+        self.assertIsNone(self.cat.channel('panel', 7)['url'])
+
 
 class HTTPTests(unittest.TestCase):
     def setUp(self):

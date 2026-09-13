@@ -868,13 +868,16 @@ async function openSettings() {
   if (state.configOpen) return;
   state.configOpen = true;
   state.configReturnMode = state.mode;
+  // Rendre un instantane laisse par une ouverture precedente AVANT d'en
+  // prendre un nouveau : dans l'autre sens on memorise des elements deja
+  // masques, et on efface l'instantane qu'on vient tout juste de constituer.
+  restoreSettingsSnapshot();
   state.configSnapshot = ['#player-wrap', '#preferences', '#recent-wrap', '#catalogue', '#preparations']
     .map(id => {
       const element = $(id);
       if (!element) return null;
       return {element, hidden: element.hidden};
     }).filter(Boolean);
-  restoreSettingsSnapshot();
   state.configSnapshot.forEach(item => { item.element.hidden = true; });
   $('#config').hidden = false;
   clearInterval(state.configTimer);
@@ -1067,6 +1070,7 @@ async function refreshConfig() {
   (st.providers || []).forEach(p => {
     const li = el('li');
     li.append(el('span', '', p.name));
+    li.append(el('span', 'kind-badge', p.kind === 'm3u' ? 'M3U' : 'Xtream'));
     const sync = el('button', 'quiet', 'Synchroniser');
     sync.onclick = async () => { await post('/sync', {id: p.id}); message('Synchronisation démarrée.'); };
     const del = el('button', 'quiet', 'Supprimer');
@@ -1088,20 +1092,47 @@ $('#tab-conf').onclick = async () => {
   } catch (err) { failure(err); }
 };
 $('#close-config').onclick = () => { closeSettings().catch(failure); };
+function providerKind() {
+  const picked = document.querySelector('input[name="p-kind"]:checked');
+  return picked ? picked.value : 'xtream';
+}
+
+// Les champs masques gardent leur attribut required : le navigateur refuse
+// alors de soumettre, en signalant un champ invisible. On l'accorde au mode.
+function syncProviderFields() {
+  const m3u = providerKind() === 'm3u';
+  $$('.p-xtream').forEach(field => {
+    field.hidden = m3u;
+    field.querySelectorAll('input').forEach(i => { i.required = !m3u; });
+  });
+  $$('.p-m3u').forEach(field => {
+    field.hidden = !m3u;
+    field.querySelectorAll('input').forEach(i => { i.required = m3u; });
+  });
+}
+$$('input[name="p-kind"]').forEach(radio => { radio.onchange = syncProviderFields; });
+syncProviderFields();
+
 $('#provider-form').onsubmit = async e => {
   e.preventDefault();
   $('#p-add').disabled = true;
   $('#p-msg').textContent = 'Vérification…';
   try {
-    await post('/providers', {
+    const common = {
       name: $('#p-name').value.trim(),
-      host: $('#p-host').value.trim(),
-      username: $('#p-user').value.trim(),
-      password: $('#p-pass').value,
       max_connections: Number($('#p-connections').value)
-    });
+    };
+    const kind = providerKind();
+    const payload = kind === 'm3u'
+      ? {...common, url: $('#p-url').value.trim()}
+      : {...common, host: $('#p-host').value.trim(),
+         username: $('#p-user').value.trim(), password: $('#p-pass').value};
+    const added = await post('/providers', payload);
     $('#provider-form').reset();
-    $('#p-msg').textContent = 'Abonnement ajouté. Vous pouvez synchroniser son catalogue.';
+    syncProviderFields();
+    $('#p-msg').textContent = (kind === 'm3u' && added.kind === 'xtream')
+      ? 'Lien reconnu comme panel Xtream : programme et films disponibles. Vous pouvez synchroniser.'
+      : 'Abonnement ajouté. Vous pouvez synchroniser son catalogue.';
     await refreshConfig();
   } catch (err) {
     $('#p-msg').textContent = err.message;
