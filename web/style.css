@@ -1238,6 +1238,13 @@ progress::-webkit-progress-value {
     z-index: 10;
   }
 
+  /* La vidéo 16/9 sur une colonne large dépasse vite la hauteur d'écran :
+     une fois le panneau Données ouvert, le bas du lecteur devenait
+     inatteignable (sticky). On plafonne la scène, la vidéo letterboxe. */
+  body.is-playing .video-stage {
+    max-height: calc(100vh - 430px);
+  }
+
   /* Mode Pleine Largeur / Cinéma (Catalogue replié) */
   body.is-playing.catalogue-collapsed .workspace {
     grid-template-columns: 1fr;
@@ -1255,9 +1262,26 @@ progress::-webkit-progress-value {
     position: sticky;
     top: 96px;
     max-height: calc(100vh - 115px);
+    /* Le panneau ne défile plus en bloc : seule la liste des chaînes
+       scrolle dans le panneau, la page et les filtres restent fixes
+       pendant le zapping. */
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-right: 6px;
+  }
+
+  body.is-playing #catalogue #channels {
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding-right: 6px;
+    scrollbar-gutter: stable;
+    /* En conteneur contraint, les rangées auto se replient sur le
+       minimum (cartes à overflow:hidden) : on impose le contenu. */
+    grid-auto-rows: max-content;
+    padding-right: 4px;
+    padding-bottom: 8px;
   }
 
   body.is-playing #catalogue .catalogue-heading {
@@ -1271,10 +1295,25 @@ progress::-webkit-progress-value {
   }
 
   body.is-playing #catalogue .filters {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-    margin: 14px 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 10px;
+    margin: 12px 0;
+  }
+
+  body.is-playing #catalogue .filters label {
+    min-width: 0;
+  }
+
+  body.is-playing #catalogue .filters .category-filter {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+
+  body.is-playing #catalogue .filters > span {
+    grid-column: 1 / -1;
+    margin: 0;
+    padding: 0;
   }
 
   body.is-playing #catalogue .search-box {
