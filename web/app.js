@@ -1164,6 +1164,55 @@ async function playJob(job) {
 }
 
 // Administration
+function frenchDate(epoch) {
+  return new Date(epoch * 1000).toLocaleDateString('fr-FR', {day: 'numeric', month: 'long', year: 'numeric'});
+}
+
+function expiryLabel(details) {
+  // exp_date absent = abonnement sans echeance ; exp_date inconnu = le panel
+  // ne le dit pas. Les deux ne doivent pas s'afficher pareil.
+  if (details.expires_at === null || details.expires_at === undefined) return 'échéance inconnue';
+  if (!details.expires_at) return 'sans échéance';
+  const days = Math.round((details.expires_at * 1000 - Date.now()) / 86400000);
+  if (days < 0) return 'expiré depuis le ' + frenchDate(details.expires_at);
+  if (days === 0) return 'expire aujourd’hui';
+  return 'expire le ' + frenchDate(details.expires_at) + ' · dans ' + days + (days > 1 ? ' jours' : ' jour');
+}
+
+function providerSummary(details) {
+  if (!details.reachable) return ['injoignable' + (details.error ? ' · ' + details.error : '')];
+  const lines = [];
+  const head = [
+    details.status || '',
+    details.trial ? 'essai' : '',
+    expiryLabel(details)
+  ].filter(Boolean).join(' · ');
+  if (head) lines.push(head);
+  if (details.max_connections) {
+    lines.push('connexions : ' + details.active_connections + ' / ' + details.max_connections
+      + (details.formats && details.formats.length ? ' · formats : ' + details.formats.join(', ') : ''));
+  }
+  const c = details.catalog || {};
+  const catalogue = [
+    c.channels ? c.channels.toLocaleString('fr-FR') + ' chaînes' : '',
+    c.vod ? c.vod.toLocaleString('fr-FR') + ' films' : '',
+    c.series ? c.series.toLocaleString('fr-FR') + ' séries' : ''
+  ].filter(Boolean).join(' · ');
+  lines.push(catalogue ? 'catalogue local : ' + catalogue : 'catalogue local vide — lancez une synchronisation');
+  return lines;
+}
+
+async function loadProviderDetails() {
+  const list = await api('/providers/info').catch(() => []);
+  list.forEach(details => {
+    const slot = document.querySelector('[data-provider-details="' + CSS.escape(details.id) + '"]');
+    if (!slot) return;
+    slot.replaceChildren();
+    slot.classList.toggle('unreachable', !details.reachable);
+    providerSummary(details).forEach(line => slot.append(el('span', 'detail-line', line)));
+  });
+}
+
 async function refreshConfig() {
   const st = await api('/status').catch(() => ({}));
   $('#status').textContent = 'Charge système (1 / 5 / 15 min) : ' + (st.load || []).map(n => n.toFixed(2)).join(' / ') + '\nCapacité : ' + (st.stream ? st.stream.capacity : 0) + ' chaîne(s) distincte(s)\n' + ((st.stream && st.stream.workers) || []).map(w => w.label + ' · ' + w.state + ' · ' + w.viewers + ' appareil(s) · ' + w.failovers + ' bascule(s)').join('\n');
@@ -1173,6 +1222,10 @@ async function refreshConfig() {
     const li = el('li');
     li.append(el('span', '', p.name));
     li.append(el('span', 'kind-badge', p.kind === 'm3u' ? 'M3U' : 'Xtream'));
+    const details = el('span', 'provider-details');
+    details.dataset.providerDetails = p.id;
+    details.append(el('span', 'detail-line', 'Lecture des informations…'));
+    li.append(details);
     const sync = el('button', 'quiet', 'Synchroniser');
     sync.onclick = async () => { await post('/sync', {id: p.id}); message('Synchronisation démarrée.'); };
     const del = el('button', 'quiet', 'Supprimer');
@@ -1185,6 +1238,9 @@ async function refreshConfig() {
     li.append(sync, del);
     $('#provider-list').append(li);
   });
+  // Les details interrogent le panel : on ne bloque pas l'affichage de la
+  // liste dessus, et le cache serveur evite un appel toutes les 8 secondes.
+  loadProviderDetails().catch(() => {});
 }
 
 $('#tab-conf').onclick = async () => {

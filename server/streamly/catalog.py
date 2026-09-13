@@ -492,6 +492,16 @@ class Catalog:
 
     # ------------------------------------------------------------ lectures
 
+    def provider_counts(self, provider_id):
+        """Ce que le catalogue local connait d'un abonnement."""
+        counts = {}
+        for table, column in (("channels", "stream_id"), ("vod", "stream_id"),
+                              ("series", "series_id"), ("episodes", "episode_id")):
+            counts[table] = self._db.execute(
+                "SELECT COUNT(%s) FROM %s WHERE provider_id=?" % (column, table),
+                (provider_id,)).fetchone()[0]
+        return counts
+
     def stats(self):
         cur = self._db.execute(
             "SELECT s.provider_id, s.last_sync, s.channels, s.note FROM sync_state s")

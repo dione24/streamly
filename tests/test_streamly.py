@@ -426,6 +426,37 @@ class SeriesTests(unittest.TestCase):
         self.assertNotIn('/movie/', c.episode_url(901, 'mkv'))
 
 
+class AccountDetailsTests(unittest.TestCase):
+    """Les panels renvoient des types incoherents : 0 n'est pas 'inconnu'."""
+    def test_panel_integers_tolerate_strings_and_blanks(self):
+        self.assertEqual(app._panel_int('1764000000'), 1764000000)
+        self.assertEqual(app._panel_int(3), 3)
+        # Une echeance absente doit rester distinguable d'une echeance a 0.
+        self.assertIsNone(app._panel_int(''))
+        self.assertIsNone(app._panel_int(None))
+        self.assertIsNone(app._panel_int('null'))
+        self.assertEqual(app._panel_int('0'), 0)
+
+
+class ProviderCountTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.cat = Catalog(self.tmp.name + '/c.db')
+    def tearDown(self): self.cat.close(); self.tmp.cleanup()
+    def test_counts_are_scoped_to_one_provider(self):
+        client = Mock()
+        client.live_streams.return_value = [{'stream_id': 1, 'name': 'FR| A', 'category_id': '1'}]
+        client.live_categories.return_value = [{'category_id': '1', 'category_name': 'TNT'}]
+        self.cat.sync_provider({'id': 'a'}, client, lambda _: None)
+        client.live_streams.return_value = [
+            {'stream_id': 1, 'name': 'FR| B', 'category_id': '1'},
+            {'stream_id': 2, 'name': 'FR| C', 'category_id': '1'}]
+        self.cat.sync_provider({'id': 'b'}, client, lambda _: None)
+        self.assertEqual(self.cat.provider_counts('a')['channels'], 1)
+        self.assertEqual(self.cat.provider_counts('b')['channels'], 2)
+        self.assertEqual(self.cat.provider_counts('inconnu'),
+                         {'channels': 0, 'vod': 0, 'series': 0, 'episodes': 0})
+
+
 class HTTPTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); root = self.tmp.name

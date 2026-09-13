@@ -66,7 +66,7 @@ button:disabled {
   cursor: wait;
 }
 
-button, input:not([type="checkbox"]), select {
+button, input:not([type="checkbox"]):not([type="radio"]), select, textarea {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 11px 14px;
@@ -74,9 +74,81 @@ button, input:not([type="checkbox"]), select {
   color: var(--text);
 }
 
-input:not([type="checkbox"]), select {
+/* Sans appearance:none, le navigateur dessine son propre widget de select
+   par-dessus le theme : chevron systeme, fond clair, hauteur differente des
+   champs texte voisins. C'est la seule facon d'obtenir une rangee homogene. */
+input:not([type="checkbox"]):not([type="radio"]), select, textarea {
+  appearance: none;
+  -webkit-appearance: none;
   min-width: 0;
   max-width: 100%;
+  transition: border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+input:not([type="checkbox"]):not([type="radio"]):hover:not(:disabled),
+select:hover:not(:disabled), textarea:hover:not(:disabled) {
+  border-color: var(--line-light);
+}
+
+input::placeholder, textarea::placeholder {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+input:disabled, select:disabled, textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Le chevron remplace celui du systeme, avec la place reservee a droite. */
+select {
+  cursor: pointer;
+  padding-right: 38px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%239ba898' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 11px 8px;
+}
+
+select:hover:not(:disabled) {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%23d4ef89' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
+}
+
+/* La liste deroulante ouverte est dessinee par le systeme : sur Windows et
+   Linux elle reste blanche si on ne colore pas les options. */
+select option, select optgroup {
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* Les fleches d'un champ nombre sont minuscules et hors theme. La valeur
+   reste modifiable au clavier et par les boutons de preselection. */
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-results-button {
+  -webkit-appearance: none;
+}
+
+/* Le remplissage automatique de Chrome impose un fond blanc et un texte
+   noir. Seule l'ombre interne le recouvre sans casser l'accessibilite. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+  -webkit-box-shadow: 0 0 0 1000px var(--panel) inset;
+  caret-color: var(--text);
+  transition: background-color 5000s ease-in-out 0s;
 }
 
 button:hover {
@@ -610,7 +682,9 @@ h3 {
 
 .filters select {
   font-size: 0.82rem;
-  padding: 10px 12px;
+  /* La marge droite reste reservee au chevron : un padding uniforme ferait
+     passer le texte des options longues sous la fleche. */
+  padding: 10px 34px 10px 12px;
 }
 
 .filters > span {
@@ -1117,8 +1191,9 @@ h3 {
 }
 
 .player-tools select {
-  padding: 7px 10px;
+  padding: 7px 30px 7px 10px;
   font-size: 0.8rem;
+  background-position: right 10px center;
 }
 
 .telem-toggle-btn {
@@ -1761,3 +1836,13 @@ kbd {
 .episode-list .ep-num { font-variant-numeric: tabular-nums; opacity: .6; min-width: 3.2rem; }
 .episode-list .ep-title { flex: 1; }
 .episode-list .ep-dur { opacity: .55; font-size: .85rem; }
+
+/* Details d'un abonnement sous son nom, dans les reglages */
+#provider-list li { flex-wrap: wrap; }
+.provider-details {
+  display: flex; flex-direction: column; gap: .12rem;
+  flex-basis: 100%; order: 9;
+  margin-top: .35rem; color: var(--muted); font-size: .8rem;
+}
+.provider-details.unreachable { color: var(--danger); }
+.provider-details .detail-line { white-space: normal; }

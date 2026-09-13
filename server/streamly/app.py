@@ -58,6 +58,15 @@ def _parse_epg_time(value):
     return None
 
 
+def _panel_int(value):
+    """Entier tolerant, ou None. Les panels renvoient des nombres en chaine,
+    des chaines vides, ou `null` — et 0 n'a pas le meme sens qu'inconnu."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 class State:
     def __init__(self):
         self.cfg = cfgmod.load()
@@ -73,6 +82,7 @@ class State:
         self.movies = Movies(self.cfg, os.path.join(cfgmod.DATA_DIR, "movies"), self.catalog, self.transcoder)
         self.sync_lock = threading.Lock()
         self.sync_log = []
+        self._details, self._details_lock = {}, threading.Lock()
 
     def provider(self, pid):
         for p in self.cfg.get("providers", []):
@@ -86,6 +96,45 @@ class State:
             return M3UClient(provider["url"], ua)
         return XtreamClient(provider["host"], provider["username"],
                             provider["password"], ua)
+
+    def provider_details(self, provider, force=False):
+        """Etat d'un abonnement : validite, connexions, formats.
+
+        Interroger le panel a chaque affichage des reglages le ferait a
+        chaque rafraichissement, soit toutes les huit secondes : on garde
+        la reponse quelques minutes.
+        """
+        pid = provider["id"]
+        ttl = float(self.cfg.get("account_cache_seconds", 300))
+        with self._details_lock:
+            cached = self._details.get(pid)
+            if cached and not force and time.time() - cached["at"] < ttl:
+                return cached["data"]
+        data = {"id": pid, "kind": provider.get("kind", "xtream"), "reachable": False}
+        try:
+            info = self.client(provider).account_info()
+        except Exception as exc:
+            data["error"] = str(exc)[:200]
+        else:
+            user = info.get("user_info") or {}
+            server = info.get("server_info") or {}
+            data.update({
+                "reachable": True,
+                "status": user.get("status") or "",
+                "trial": str(user.get("is_trial") or "") == "1",
+                # exp_date vide ou 0 = sans echeance, ce qui n'est pas la meme
+                # chose qu'une date inconnue : on distingue None de 0.
+                "expires_at": _panel_int(user.get("exp_date")),
+                "created_at": _panel_int(user.get("created_at")),
+                "active_connections": _panel_int(user.get("active_cons")) or 0,
+                "max_connections": _panel_int(user.get("max_connections")) or 0,
+                "formats": user.get("allowed_output_formats") or [],
+                "timezone": server.get("timezone") or "",
+            })
+        data["catalog"] = self.catalog.provider_counts(pid)
+        with self._details_lock:
+            self._details[pid] = {"at": time.time(), "data": data}
+        return data
 
     def candidate_urls(self, provider_id, stream_id):
         """URLs a essayer pour une chaine, dans l'ordre.
@@ -565,6 +614,16 @@ class Handler(BaseHTTPRequestHandler):
                 lang=one("lang"), category=one("category"), query=one("q"),
                 limit=max(1, min(int(one("limit", 120)), 500)),
                 offset=max(0, int(one("offset", 0)))))
+
+        if path == "/api/providers/info":
+            if not self._admin():
+                return self._err(403, "accès administrateur requis")
+            pid = one("id")
+            wanted = [p for p in STATE.cfg.get("providers", []) if not pid or p.get("id") == pid]
+            if pid and not wanted:
+                return self._err(404, "abonnement introuvable")
+            refresh = _as_bool(one("refresh"))
+            return self._json([STATE.provider_details(p, force=refresh) for p in wanted])
 
         if path == "/api/series":
             return self._json(cat.series_browse(
