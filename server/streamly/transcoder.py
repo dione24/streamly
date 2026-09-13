@@ -175,9 +175,22 @@ class Transcoder:
                 return _redact_credentials(line[:240], self.cfg)
         return _redact_credentials(lines[-1][:240], self.cfg)
 
-    def __init__(self, cfg, hls_dir, log_dir, monitor=True):
+    def __init__(self, cfg, hls_dir, log_dir, monitor=True, state_dir=None):
         self.cfg, self.hls_dir, self.log_dir = cfg, hls_dir, log_dir
         self.ladder = cfg['ladder']
+        # Debits mesures, par source. Sans eux, une chaine dont le debit
+        # depasse le plafond du mode serait relancee a chaque lecture : remux,
+        # mesure, declassement. Avec eux, la decision est prise avant meme de
+        # lancer ffmpeg des la deuxieme lecture, et le declassement ne coute
+        # qu'un changement de generation, une fois par chaine.
+        self._bitrate_path = os.path.join(state_dir, 'source_bitrates.json') if state_dir else None
+        self._bitrates = {}
+        if self._bitrate_path:
+            try:
+                with open(self._bitrate_path, encoding='utf-8') as fh:
+                    self._bitrates = {k: v for k, v in json.load(fh).items() if isinstance(v, dict)}
+            except (OSError, ValueError, AttributeError):
+                self._bitrates = {}
         self._ffmpeg_caps = _ffmpeg_capabilities()
         self._lock = threading.RLock()
         self.workers, self.tickets, self.reservations = {}, {}, {}
@@ -219,6 +232,33 @@ class Transcoder:
         if source_fps > 30 and int(rung['height']) < seuil:
             return source_fps / 2.0
         return source_fps
+
+    @staticmethod
+    def _source_id(url):
+        """Cle de cache. L'URL porte les identifiants : on n'ecrit que son empreinte."""
+        return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+    def _known_bitrate(self, url):
+        """Debit mesure lors d'une lecture precedente, si toujours d'actualite."""
+        entry = self._bitrates.get(self._source_id(url))
+        if not entry:
+            return 0
+        ttl = float(self.cfg.get('bitrate_cache_hours', 24)) * 3600
+        if ttl and time.time() - float(entry.get('at', 0)) > ttl:
+            return 0
+        return _int0(entry.get('bps'))
+
+    def _remember_bitrate(self, url, bps):
+        self._bitrates[self._source_id(url)] = {'bps': int(bps), 'at': time.time()}
+        if not self._bitrate_path:
+            return
+        try:
+            tmp = self._bitrate_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(self._bitrates, fh)
+            os.replace(tmp, self._bitrate_path)
+        except OSError:
+            pass
 
     def passthrough_plan(self, media, ceiling=0):
         """Decide si la source peut etre remultiplexee telle quelle.
@@ -440,7 +480,7 @@ class Transcoder:
                          last=time.time(), label=label, failovers=0, media=None,
                          audio_only=bool(audio_only), error=None,
                          ceiling=max(0, int(ceiling)), passthrough=None,
-                         passthrough_denied=False)
+                         passthrough_denied=False, measured_once=False)
                 self.workers[key] = w
                 threading.Thread(target=self._spawn, args=(key,), daemon=True).start()
             elif w['state'] == 'failed':
@@ -474,8 +514,13 @@ class Transcoder:
             w['media'], w['started'], w['error'] = media, time.time(), None
             # Chaque generation reprobe : une source de secours peut etre
             # remuxable la ou la precedente ne l'etait pas, et inversement.
+            known = self._known_bitrate(source)
+            if known:
+                # Mesure de terrain : elle prime sur ce que la source annonce.
+                media = dict(media, bitrate=known, video_bitrate=0)
             w['passthrough'] = None if (audio_only or w.get('passthrough_denied')) else \
                 self.passthrough_plan(media, w.get('ceiling', 0))
+            w['measured_once'] = False
             try:
                 # FFmpeg recopie l'URL source (avec identifiants) dans ses logs :
                 # fichier en 600, et jamais renvoyé tel quel à l'UI.
@@ -678,9 +723,13 @@ class Transcoder:
                 latest = max((os.path.getmtime(f) for f in files if os.path.exists(f)), default=w['started'])
                 if files:
                     w['state'] = 'playing'
-                if w.get('passthrough') and not w['passthrough']['measured']:
+                if w.get('passthrough') and not w.get('measured_once'):
                     measured = self._measured_bitrate_locked(key, w['generation'])
                     if measured:
+                        w['measured_once'] = True
+                        # Memorise meme quand le plafond est tenu : c'est ce qui
+                        # evite de refaire le tour a la prochaine lecture.
+                        self._remember_bitrate(w['sources'][w['index']]['url'], measured)
                         w['passthrough'] = dict(w['passthrough'], bitrate=measured, measured=True)
                         ceiling = self._ticket_ceiling_locked(key)
                         if ceiling and measured * 1.08 > ceiling:

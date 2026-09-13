@@ -67,7 +67,7 @@ class State:
         dropped = self.catalog.purge_absent([p["id"] for p in self.cfg.get("providers", [])])
         if dropped:
             print("catalogue purge des providers absents : %s" % dropped, flush=True)
-        self.transcoder = Transcoder(self.cfg, cfgmod.HLS_DIR, cfgmod.LOG_DIR)
+        self.transcoder = Transcoder(self.cfg, cfgmod.HLS_DIR, cfgmod.LOG_DIR, state_dir=cfgmod.DATA_DIR)
         self.sessions = Sessions(self.cfg)
         self.movies = Movies(self.cfg, os.path.join(cfgmod.DATA_DIR, "movies"), self.catalog, self.transcoder)
         self.sync_lock = threading.Lock()

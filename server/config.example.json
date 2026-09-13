@@ -63,6 +63,8 @@
 
   "_comment_passthrough": "Remux au lieu de reencoder quand la source est deja du H264 8 bits 4:2:0 et que son debit tient sous le plafond du mode : ~5 % de CPU au lieu de ~75 %, et la definition source. Sans debit annonce par la source, le remux n'est retenu que pour le mode Sport (sans plafond). false force le reencodage.",
   "passthrough": true,
+  "_comment_bitrate_cache": "Duree de validite d'un debit mesure, en heures. Sert a decider du remux avant de lancer FFmpeg. 0 desactive l'expiration.",
+  "bitrate_cache_hours": 24,
 
   "x264_preset": "veryfast",
   "audio_bitrate": "96k",

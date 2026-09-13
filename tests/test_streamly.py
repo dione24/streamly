@@ -208,6 +208,58 @@ class PassthroughDowngradeTests(unittest.TestCase):
         self.assertFalse(self.w['passthrough']['measured'])
 
 
+class BitrateCacheTests(unittest.TestCase):
+    """Le debit mesure survit a la lecture : une seule mauvaise surprise par chaine."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = self.tmp.name + '/data'; os.makedirs(self.state)
+    def tearDown(self): self.tmp.cleanup()
+    def make(self):
+        t = Transcoder(CFG, self.tmp.name + '/hls', self.tmp.name + '/logs',
+                       monitor=False, state_dir=self.state)
+        patch.object(t, '_spawn').start()
+        return t
+
+    def test_measurement_is_persisted_and_reused_after_restart(self):
+        t = self.make()
+        try:
+            t._remember_bitrate('http://s/secret-url', 2400000)
+        finally:
+            t.close(); patch.stopall()
+        again = self.make()
+        try:
+            self.assertEqual(again._known_bitrate('http://s/secret-url'), 2400000)
+            # L'URL porte les identifiants : seule son empreinte est ecrite.
+            written = pathlib.Path(self.state, 'source_bitrates.json').read_text()
+            self.assertNotIn('secret-url', written)
+        finally:
+            again.close(); patch.stopall()
+
+    def test_known_bitrate_decides_before_ffmpeg_starts(self):
+        t = self.make()
+        try:
+            media = {'height':1080, 'width':1920, 'fps':25, 'codec':'h264', 'pix_fmt':'yuv420p',
+                     'video_bitrate':0, 'bitrate':0, 'audio_codec':'aac', 'streams':[]}
+            # Sans mesure : remux optimiste, plafond verifie plus tard.
+            self.assertFalse(t.passthrough_plan(media, ceiling=1150000)['measured'])
+            # Avec la mesure d'une lecture precedente : decision immediate.
+            t._remember_bitrate('http://s/1', 2900000)
+            known = dict(media, bitrate=t._known_bitrate('http://s/1'), video_bitrate=0)
+            self.assertIsNone(t.passthrough_plan(known, ceiling=1150000))
+            self.assertTrue(t.passthrough_plan(known, ceiling=0)['measured'])
+        finally:
+            t.close(); patch.stopall()
+
+    def test_stale_measurement_is_retried(self):
+        t = self.make()
+        try:
+            t._remember_bitrate('http://s/1', 2900000)
+            t._bitrates[t._source_id('http://s/1')]['at'] -= 25 * 3600
+            self.assertEqual(t._known_bitrate('http://s/1'), 0)
+        finally:
+            t.close(); patch.stopall()
+
+
 class CatalogTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.cat = Catalog(self.tmp.name + '/catalog.db')
