@@ -1,0 +1,22 @@
+[Unit]
+Description=Streamly - lecteur IPTV avec transcodage ABR a la demande
+After=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/streamly/server
+ExecStart=/usr/bin/python3 /opt/streamly/server/run.py
+Restart=always
+RestartSec=3
+
+# On borne le CPU pour ne jamais etouffer les autres services de la machine.
+# 300% = 3 coeurs au maximum ; un transcodage type en consomme environ 1.
+CPUQuota=300%
+
+# Durcissement de base
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

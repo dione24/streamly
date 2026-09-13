@@ -1,0 +1,38 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 8088,
+
+  "_comment_token": "Jeton d'acces. Laisser vide pour qu'il soit genere au premier demarrage.",
+  "token": "",
+
+  "_comment_providers": "Un bloc par abonnement. 'host' inclut le port si besoin.",
+  "providers": [
+    {
+      "id": "provider-1",
+      "name": "Mon abonnement",
+      "host": "http://exemple.tld:80",
+      "username": "VOTRE_IDENTIFIANT",
+      "password": "VOTRE_MOT_DE_PASSE",
+      "enabled": true
+    }
+  ],
+
+  "_comment_ladder": "Echelle ABR. Tous les barreaux sont encodes pour garantir des segments alignes.",
+  "ladder": [
+    { "name": "720p", "height": 720, "bitrate": "1500k", "maxrate": "1700k", "bufsize": "3000k" },
+    { "name": "480p", "height": 480, "bitrate": "800k",  "maxrate": "900k",  "bufsize": "1600k" },
+    { "name": "360p", "height": 360, "bitrate": "400k",  "maxrate": "450k",  "bufsize": "800k"  },
+    { "name": "240p", "height": 240, "bitrate": "250k",  "maxrate": "280k",  "bufsize": "500k"  }
+  ],
+
+  "_comment_source": "Hauteur de source ideale. Ingerer du 720p coute 3x moins de CPU que du 1080p.",
+  "preferred_source_height": 720,
+
+  "user_agent": "VLC/3.0.20 LibVLC/3.0.20",
+  "segment_seconds": 2,
+  "playlist_size": 6,
+  "idle_timeout_seconds": 120,
+  "x264_preset": "veryfast",
+  "audio_bitrate": "96k",
+  "max_concurrent_streams": 1
+}

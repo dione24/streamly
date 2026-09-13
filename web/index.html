@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0d0f12">
+<title>Streamly</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Ecran de connexion : le jeton est conserve en local -->
+<section id="login" class="screen">
+  <div class="card">
+    <h1>Streamly</h1>
+    <p class="muted">Jeton d'acces du serveur.</p>
+    <input id="token-input" type="password" placeholder="Jeton" autocomplete="current-password">
+    <button id="token-go">Se connecter</button>
+    <p id="login-error" class="error"></p>
+  </div>
+</section>
+
+<main id="app" hidden>
+
+  <header>
+    <strong>Streamly</strong>
+    <input id="search" type="search" placeholder="Rechercher une chaine...">
+    <button id="tab-fav"  class="chip">Favoris</button>
+    <button id="tab-conf" class="chip">Réglages</button>
+  </header>
+
+  <!-- Lecteur -->
+  <section id="player-wrap" hidden>
+    <video id="video" controls playsinline></video>
+    <div id="player-bar">
+      <span id="now-playing"></span>
+      <span class="spacer"></span>
+      <label for="quality">Qualité</label>
+      <select id="quality"><option value="-1">Auto</option></select>
+      <span id="bitrate" class="muted"></span>
+      <button id="stop">Arrêter</button>
+    </div>
+  </section>
+
+  <!-- Filtres -->
+  <nav id="filters">
+    <select id="lang"><option value="">Toutes les langues</option></select>
+    <select id="category"><option value="">Toutes les catégories</option></select>
+    <span id="count" class="muted"></span>
+  </nav>
+
+  <ul id="channels"></ul>
+  <p id="empty" class="muted" hidden>Aucune chaine. Ajoutez un provider dans Réglages, puis lancez une synchronisation.</p>
+
+  <!-- Reglages -->
+  <section id="config" class="panel" hidden>
+    <h2>Providers</h2>
+    <ul id="provider-list"></ul>
+
+    <h3>Ajouter un abonnement Xtream</h3>
+    <div class="form">
+      <input id="p-name" placeholder="Nom (libre)">
+      <input id="p-host" placeholder="http://serveur.tld:80">
+      <input id="p-user" placeholder="Identifiant">
+      <input id="p-pass" type="password" placeholder="Mot de passe">
+      <button id="p-add">Ajouter et vérifier</button>
+    </div>
+    <p id="p-msg" class="muted"></p>
+
+    <h3>Synchronisation</h3>
+    <button id="sync-all">Synchroniser tous les providers</button>
+    <pre id="sync-log"></pre>
+
+    <h3>État du serveur</h3>
+    <pre id="status"></pre>
+  </section>
+
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
