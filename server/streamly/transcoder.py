@@ -127,8 +127,15 @@ class Transcoder:
 
     # -------------------------------------------------------------- cycle
 
-    def start(self, key, source_url, meta=None):
-        """Lance (ou reutilise) le transcodage pour `key`."""
+    def start(self, key, sources, meta=None):
+        """Lance (ou reutilise) le transcodage pour `key`.
+
+        `sources` est la liste ordonnee des URLs candidates pour cette chaine :
+        variantes de qualite, flux de secours du panel, puis memes chaines chez
+        les autres providers. Si un flux meurt, on passe au suivant.
+        """
+        if isinstance(sources, str):
+            sources = [sources]
         with self._lock:
             cur = self._current
             if cur and cur["key"] == key and cur["proc"].poll() is None:
@@ -136,21 +143,42 @@ class Transcoder:
                 return cur
 
             self._stop_locked()
-
-            outdir = os.path.join(self.hls_dir, key)
-            shutil.rmtree(outdir, ignore_errors=True)
-            os.makedirs(outdir, exist_ok=True)
-
-            logfile = os.path.join(self.log_dir, "ffmpeg_%s.log" % re.sub(r"\W+", "_", key))
-            handle = open(logfile, "ab")
-            proc = subprocess.Popen(self._command(source_url), cwd=outdir,
-                                    stdout=handle, stderr=handle)
             self._current = {
-                "key": key, "proc": proc, "started": time.time(),
-                "last": time.time(), "source": source_url, "meta": meta or {},
-                "log": logfile,
+                "key": key, "sources": list(sources), "index": 0,
+                "meta": meta or {}, "last": time.time(), "proc": None,
+                "started": 0, "source": None, "failovers": 0,
             }
+            self._spawn_locked()
             return self._current
+
+    def _spawn_locked(self):
+        """Demarre ffmpeg sur la source candidate courante."""
+        cur = self._current
+        key = cur["key"]
+        source = cur["sources"][cur["index"]]
+
+        outdir = os.path.join(self.hls_dir, key)
+        shutil.rmtree(outdir, ignore_errors=True)
+        os.makedirs(outdir, exist_ok=True)
+
+        logfile = os.path.join(self.log_dir,
+                               "ffmpeg_%s.log" % re.sub(r"\W+", "_", key))
+        handle = open(logfile, "ab")
+        cur["proc"] = subprocess.Popen(self._command(source), cwd=outdir,
+                                       stdout=handle, stderr=handle)
+        cur["started"] = time.time()
+        cur["source"] = source
+        cur["log"] = logfile
+
+    def _failover_locked(self):
+        """Passe a la source suivante. Retourne False s'il n'en reste plus."""
+        cur = self._current
+        if not cur or cur["index"] + 1 >= len(cur["sources"]):
+            return False
+        cur["index"] += 1
+        cur["failovers"] += 1
+        self._spawn_locked()
+        return True
 
     def touch(self, key):
         with self._lock:
@@ -164,8 +192,8 @@ class Transcoder:
     def _stop_locked(self):
         cur = self._current
         if cur:
-            proc = cur["proc"]
-            if proc.poll() is None:
+            proc = cur.get("proc")
+            if proc and proc.poll() is None:
                 proc.terminate()
                 try:
                     proc.wait(5)
@@ -179,31 +207,47 @@ class Transcoder:
             cur = self._current
             if not cur:
                 return {"running": False}
-            alive = cur["proc"].poll() is None
+            proc = cur.get("proc")
             return {
-                "running": alive,
+                "running": bool(proc and proc.poll() is None),
                 "key": cur["key"],
                 "meta": cur["meta"],
                 "uptime_s": round(time.time() - cur["started"], 1),
                 "idle_s": round(time.time() - cur["last"], 1),
                 "ladder": [r["name"] for r in self.ladder],
+                "source_index": cur["index"],
+                "sources_total": len(cur["sources"]),
+                "failovers": cur["failovers"],
             }
 
     def is_alive(self, key):
         with self._lock:
             cur = self._current
-            return bool(cur and cur["key"] == key and cur["proc"].poll() is None)
+            if not cur or cur["key"] != key:
+                return False
+            proc = cur.get("proc")
+            # Un basculement en cours ne doit pas etre vu comme un arret.
+            return bool(proc and proc.poll() is None) or cur["index"] + 1 < len(cur["sources"])
 
     def _watchdog(self):
-        """Coupe un flux inactif : cela libere la connexion unique du provider."""
+        """Surveille le flux courant.
+
+        Deux roles : couper un flux inactif, ce qui libere la connexion unique
+        du provider ; et basculer sur la source suivante si celle en cours
+        meurt alors que quelqu'un regarde encore — le cas typique d'un flux
+        qui lache en plein match.
+        """
         timeout = int(self.cfg.get("idle_timeout_seconds", 120))
         while True:
-            time.sleep(5)
+            time.sleep(2)
             with self._lock:
                 cur = self._current
                 if not cur:
                     continue
-                if cur["proc"].poll() is not None:
+                idle = time.time() - cur["last"]
+                proc = cur.get("proc")
+                if idle > timeout:
                     self._stop_locked()
-                elif time.time() - cur["last"] > timeout:
-                    self._stop_locked()
+                elif proc and proc.poll() is not None:
+                    if not self._failover_locked():
+                        self._stop_locked()

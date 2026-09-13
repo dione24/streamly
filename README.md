@@ -35,6 +35,10 @@ Coût : **≈ 0,94 vCPU** par flux sur un Xeon 3,1 GHz. Un VPS 4 vCPU suffit.
   couramment 90 000 entrées et 60 Mo de JSON à chaque rechargement)
 - **Reconstruction des catégories** quand le panel renvoie des listes vides
 - Détection des **échelles de qualité** et des **flux de secours** d'une chaîne
+- **Bascule automatique de source** : variantes de qualité, flux de secours du
+  panel puis autres providers, essayés dans l'ordre quand un flux lâche
+- **Films** : catalogue synchronisé, poids estimé affiché **avant** lecture,
+  MP4 relayé tel quel et MKV remultiplexé à la volée pour le navigateur
 - Filtre de langue **mémorisé**, recherche, favoris
 - Interface web unique pour tous les appareils, `hls.js` là où c'est nécessaire
   et HLS natif sur Safari
@@ -92,6 +96,19 @@ rendu final identique après transcodage.
 **La playlist maîtresse est générée par Streamly**, pas par ffmpeg : ce dernier
 annonce mal la bande passante des barreaux, ce qui fait choisir le mauvais
 niveau au lecteur.
+
+**Les films MKV ne sont pas lisibles en navigateur.** Plutôt que de les
+transcoder, Streamly les remultiplexe en MP4 fragmenté : la vidéo est recopiée
+(`-c:v copy`, coût nul) et seul l'audio est réencodé, les pistes E-AC3
+fréquentes sur ces fichiers n'étant pas décodables par les navigateurs. Un MP4
+est, lui, simplement relayé avec les requêtes Range, ce qui préserve le
+déplacement natif dans la vidéo.
+
+**Le poids d'un film est estimé, pas mesuré** : `bitrate x durée`. La taille
+réelle demanderait une requête HEAD par film, et `get_vod_streams` ne fournit
+ni le conteneur ni le débit — seul `get_vod_info` les donne, à raison d'un
+appel par film. Streamly ne le fait donc qu'à l'ouverture d'une fiche, puis
+conserve le résultat.
 
 **Le jeton est placé dans le chemin** des URLs de lecture (`/s/<jeton>/...`) :
 les playlists HLS référencent leurs segments en relatif, qui héritent donc du

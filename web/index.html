@@ -26,6 +26,8 @@
   <header>
     <strong>Streamly</strong>
     <input id="search" type="search" placeholder="Rechercher une chaine...">
+    <button id="tab-live" class="chip">Direct</button>
+    <button id="tab-vod"  class="chip">Films</button>
     <button id="tab-fav"  class="chip">Favoris</button>
     <button id="tab-conf" class="chip">Réglages</button>
   </header>
@@ -51,7 +53,7 @@
   </nav>
 
   <ul id="channels"></ul>
-  <p id="empty" class="muted" hidden>Aucune chaine. Ajoutez un provider dans Réglages, puis lancez une synchronisation.</p>
+  <p id="empty" class="muted" hidden>Rien à afficher. Ajoutez un provider dans Réglages, puis lancez une synchronisation.</p>
 
   <!-- Reglages -->
   <section id="config" class="panel" hidden>

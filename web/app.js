@@ -8,13 +8,31 @@
 'use strict';
 
 const $ = (s) => document.querySelector(s);
+
+/* localStorage leve une exception en navigation privee sur Safari : une
+   preference qu'on ne peut pas enregistrer ne doit pas bloquer l'application. */
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } },
+};
+
+/* Une erreur JavaScript non rattrapee laisserait l'interface muette : on la
+   rend visible plutot que de laisser l'utilisateur devant un bouton inerte. */
+function showFatal(msg) {
+  const box = $('#login-error');
+  if (box) box.textContent = String(msg).slice(0, 300);
+}
+window.addEventListener('error', (e) => showFatal('Erreur : ' + e.message));
+window.addEventListener('unhandledrejection', (e) => showFatal('Erreur : ' + (e.reason && e.reason.message || e.reason)));
+
 const state = {
-  token: localStorage.getItem('streamly_token') || '',
-  lang: localStorage.getItem('streamly_lang') || '',
+  token: store.get('streamly_token'),
+  lang: store.get('streamly_lang'),
   category: '',
   query: '',
   favorites: [],
   favoritesOnly: false,
+  mode: 'live',            // 'live' | 'vod'
   hls: null,
   current: null,
 };
@@ -44,18 +62,25 @@ const post = (path, body) =>
 async function signIn(token) {
   state.token = token;
   await api('/status');                       // leve si le jeton est mauvais
-  localStorage.setItem('streamly_token', token);
+  store.set('streamly_token', token);
   $('#login').hidden = true;
   $('#app').hidden = false;
   await boot();
 }
 
 $('#token-go').onclick = async () => {
+  const btn = $('#token-go');
+  btn.disabled = true;
+  btn.textContent = 'Connexion...';
+  $('#login-error').textContent = '';
   try {
     await signIn($('#token-input').value.trim());
   } catch (e) {
     $('#login-error').textContent =
       e.message === 'unauthorized' ? 'Jeton refusé.' : e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Se connecter';
   }
 };
 
@@ -80,7 +105,7 @@ function fillQualityMenu(levels, current) {
       ' — ' + Math.round((lvl.bitrate || 0) / 1000) + ' kbps';
     sel.appendChild(opt);
   });
-  sel.value = String(current ?? -1);
+  sel.value = String(current === undefined || current === null ? -1 : current);
 }
 
 async function play(channel) {
@@ -98,11 +123,12 @@ async function play(channel) {
 
   // Safari (iOS/macOS) : HLS natif, ABR gere par le systeme.
   const native = video.canPlayType('application/vnd.apple.mpegurl');
-  if (native && !window.Hls?.isSupported()) {
+  const hlsjs = window.Hls && window.Hls.isSupported();
+  if (native && !hlsjs) {
     video.src = url;
     video.play().catch(() => {});
     $('#quality').innerHTML = '<option value="-1">Auto (natif)</option>';
-  } else if (window.Hls?.isSupported()) {
+  } else if (hlsjs) {
     const hls = new Hls({
       lowLatencyMode: false,
       maxBufferLength: 30,          // marge confortable sur reseau instable
@@ -137,6 +163,35 @@ async function play(channel) {
     video.play().catch(() => {});
   }
 
+  $('#player-wrap').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function humanSize(bytes) {
+  if (!bytes) return '';
+  return (bytes / 1e9).toFixed(2) + ' Go';
+}
+
+async function playMovie(movie) {
+  const info = await api('/vod/info?provider=' + encodeURIComponent(movie.provider_id) +
+    '&id=' + movie.stream_id);
+
+  // Sur une connexion facturee au volume, on previent avant d'engager
+  // plusieurs gigaoctets.
+  const size = humanSize(info.size_bytes);
+  if (info.size_bytes > 2e9 &&
+      !confirm(info.title + '\n\nCe film pèse environ ' + size +
+               '.\nLancer la lecture ?')) return;
+
+  destroyPlayer();
+  $('#player-wrap').hidden = false;
+  $('#now-playing').textContent = info.title;
+  $('#bitrate').textContent = [size, info.duration,
+    info.container ? info.container.toUpperCase() : ''].filter(Boolean).join(' · ');
+  $('#quality').innerHTML = '<option value="-1">Source</option>';
+
+  const video = $('#video');
+  video.src = info.play_url;
+  video.play().catch(() => {});
   $('#player-wrap').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -204,11 +259,47 @@ function channelRow(c) {
   return li;
 }
 
+function movieRow(m) {
+  const li = document.createElement('li');
+  if (m.icon) {
+    const img = document.createElement('img');
+    img.src = m.icon; img.loading = 'lazy';
+    img.onerror = () => img.remove();
+    li.appendChild(img);
+  }
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const name = document.createElement('div');
+  name.className = 'name';
+  name.textContent = m.title || m.name;
+  const sub = document.createElement('div');
+  sub.className = 'sub';
+  sub.textContent = [m.category_name, m.rating ? '★ ' + m.rating : null,
+    m.bitrate ? Math.round(m.bitrate / 1000) + ' Mbps' : null]
+    .filter(Boolean).join(' · ');
+  meta.append(name, sub);
+  li.appendChild(meta);
+  li.onclick = () => playMovie(m).catch((e) => alert('Lecture impossible : ' + e.message));
+  return li;
+}
+
 async function renderChannels() {
   const list = $('#channels');
   list.innerHTML = '';
 
   let items;
+  if (state.mode === 'vod' && !state.favoritesOnly) {
+    const q = new URLSearchParams();
+    if (state.lang) q.set('lang', state.lang);
+    if (state.category) q.set('category', state.category);
+    if (state.query) q.set('q', state.query);
+    q.set('limit', '150');
+    items = await api('/vod?' + q.toString());
+    items.forEach((m) => list.appendChild(movieRow(m)));
+    $('#count').textContent = items.length + ' film(s)';
+    $('#empty').hidden = items.length > 0;
+    return;
+  }
   if (state.favoritesOnly) {
     items = state.favorites.map((f) => ({ ...f, sources: 0, category: '' }));
   } else {
@@ -240,7 +331,8 @@ async function loadFilters() {
 }
 
 async function loadCategories() {
-  const cats = await api('/categories' + (state.lang ? '?lang=' + encodeURIComponent(state.lang) : ''));
+  const base = state.mode === 'vod' ? '/vod/categories' : '/categories';
+  const cats = await api(base + (state.lang ? '?lang=' + encodeURIComponent(state.lang) : ''));
   const sel = $('#category');
   sel.innerHTML = '<option value="">Toutes les catégories</option>';
   cats.forEach((c) => {
@@ -255,7 +347,7 @@ async function loadCategories() {
 $('#lang').onchange = async (e) => {
   state.lang = e.target.value;
   state.category = '';
-  localStorage.setItem('streamly_lang', state.lang);   // la langue est memorisee
+  store.set('streamly_lang', state.lang);   // la langue est memorisee
   await loadCategories();
   await renderChannels();
 };
@@ -274,6 +366,20 @@ $('#search').oninput = (e) => {
     renderChannels();
   }, 250);
 };
+
+function setMode(mode) {
+  state.mode = mode;
+  state.favoritesOnly = false;
+  state.category = '';
+  $('#tab-live').style.borderColor = mode === 'live' ? '#4da3ff' : '';
+  $('#tab-vod').style.borderColor = mode === 'vod' ? '#4da3ff' : '';
+  $('#tab-fav').style.borderColor = '';
+  $('#search').placeholder = mode === 'vod' ? 'Rechercher un film...' : 'Rechercher une chaine...';
+  loadCategories().then(renderChannels);
+}
+
+$('#tab-live').onclick = () => setMode('live');
+$('#tab-vod').onclick = () => setMode('vod');
 
 $('#tab-fav').onclick = () => {
   state.favoritesOnly = !state.favoritesOnly;

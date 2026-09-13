@@ -53,6 +53,29 @@ CREATE TABLE IF NOT EXISTS favorites (
     PRIMARY KEY (lang, canonical)
 );
 
+CREATE TABLE IF NOT EXISTS vod (
+    provider_id   TEXT NOT NULL,
+    stream_id     INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    lang          TEXT,
+    title         TEXT,
+    category_id   TEXT,
+    category_name TEXT,
+    icon          TEXT,
+    rating        REAL,
+    added         INTEGER,
+    -- Renseignes paresseusement : ces champs n'existent que dans
+    -- get_vod_info, soit un appel reseau par film.
+    container     TEXT,
+    bitrate       INTEGER,
+    duration      TEXT,
+    plot          TEXT,
+    PRIMARY KEY (provider_id, stream_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vod_lang  ON vod(lang);
+CREATE INDEX IF NOT EXISTS idx_vod_cat   ON vod(category_name);
+CREATE INDEX IF NOT EXISTS idx_vod_title ON vod(title);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     provider_id TEXT PRIMARY KEY,
     last_sync   INTEGER,
@@ -137,6 +160,117 @@ class Catalog:
                 "INSERT OR REPLACE INTO sync_state VALUES (?,?,?,?)",
                 (pid, int(time.time()), len(rows), note))
         return len(rows), note
+
+    def sync_vod(self, provider, client, log=print, m3u_map=None):
+        """Importe le catalogue de films.
+
+        `get_vod_categories` renvoie souvent une liste vide : on reconstruit
+        alors les libelles depuis les `group-title` du M3U, comme pour le
+        direct. Le M3U deja telecharge peut etre passe via `m3u_map`.
+        """
+        pid = provider["id"]
+        try:
+            movies = client.vod_streams()
+        except Exception as exc:
+            log("[%s] VOD indisponible (%s)" % (pid, exc))
+            return 0
+
+        log("[%s] %d films" % (pid, len(movies)))
+
+        cat_names = {}
+        try:
+            for c in client._api("get_vod_categories") or []:
+                cat_names[str(c.get("category_id"))] = c.get("category_name") or ""
+        except Exception:
+            pass
+
+        if not cat_names and m3u_map is None:
+            log("[%s] categories VOD vides — lecture du M3U (lent, ~2 min)" % pid)
+            try:
+                m3u_map = client.category_names_from_m3u()
+            except Exception as exc:
+                log("[%s] M3U indisponible (%s)" % (pid, exc))
+                m3u_map = {}
+
+        if not cat_names and m3u_map:
+            votes = {}
+            for m in movies:
+                group = m3u_map.get(str(m.get("stream_id")))
+                if group:
+                    cid = str(m.get("category_id"))
+                    votes.setdefault(cid, {})
+                    votes[cid][group] = votes[cid].get(group, 0) + 1
+            cat_names = {cid: max(g.items(), key=lambda kv: kv[1])[0]
+                         for cid, g in votes.items()}
+            log("[%s] %d categories VOD reconstruites" % (pid, len(cat_names)))
+
+        rows = []
+        for m in movies:
+            name = m.get("name") or ""
+            lang, _canon, _q = xtream.parse_name(name)
+            cid = str(m.get("category_id"))
+            try:
+                rating = float(m.get("rating") or 0)
+            except (TypeError, ValueError):
+                rating = 0.0
+            rows.append((
+                pid, int(m.get("stream_id") or 0), name, lang,
+                _clean_label(re.sub(r"^\s*[A-Z]{2,4}\s*[-|:]\s*", "", name)),
+                cid, cat_names.get(cid), m.get("stream_icon") or "",
+                rating, int(m.get("added") or 0),
+            ))
+
+        with self._db:
+            self._db.execute("DELETE FROM vod WHERE provider_id=?", (pid,))
+            self._db.executemany(
+                "INSERT OR REPLACE INTO vod "
+                "(provider_id,stream_id,name,lang,title,category_id,"
+                " category_name,icon,rating,added) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                rows)
+        return len(rows)
+
+    def vod_browse(self, lang=None, category=None, query=None,
+                   limit=120, offset=0):
+        sql = ["SELECT provider_id, stream_id, title, lang, category_name,",
+               " icon, rating, container, bitrate, duration FROM vod WHERE 1=1"]
+        args = []
+        if lang:
+            sql.append("AND lang=?")
+            args.append(lang)
+        if category:
+            sql.append("AND category_name=?")
+            args.append(category)
+        if query:
+            sql.append("AND name LIKE ?")
+            args.append("%" + query + "%")
+        sql.append("ORDER BY added DESC LIMIT ? OFFSET ?")
+        args += [limit, offset]
+        return [dict(r) for r in self._db.execute(" ".join(sql), args).fetchall()]
+
+    def vod_categories(self, lang=None):
+        sql = ("SELECT category_name AS name, COUNT(*) AS n FROM vod "
+               "WHERE category_name IS NOT NULL AND category_name<>''")
+        args = []
+        if lang:
+            sql += " AND lang=?"
+            args.append(lang)
+        sql += " GROUP BY category_name ORDER BY n DESC"
+        return [dict(r) for r in self._db.execute(sql, args).fetchall()]
+
+    def vod_get(self, provider_id, stream_id):
+        cur = self._db.execute(
+            "SELECT * FROM vod WHERE provider_id=? AND stream_id=?",
+            (provider_id, int(stream_id)))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def vod_set_details(self, provider_id, stream_id, container, bitrate,
+                        duration, plot):
+        with self._db:
+            self._db.execute(
+                "UPDATE vod SET container=?, bitrate=?, duration=?, plot=? "
+                "WHERE provider_id=? AND stream_id=?",
+                (container, bitrate, duration, plot, provider_id, int(stream_id)))
 
     # ------------------------------------------------------------ lectures
 
