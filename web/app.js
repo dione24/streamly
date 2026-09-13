@@ -1220,7 +1220,7 @@ async function refreshConfig() {
   $('#provider-list').replaceChildren();
   (st.providers || []).forEach(p => {
     const li = el('li');
-    li.append(el('span', '', p.name));
+    li.append(el('span', 'provider-name', p.name));
     li.append(el('span', 'kind-badge', p.kind === 'm3u' ? 'M3U' : 'Xtream'));
     const details = el('span', 'provider-details');
     details.dataset.providerDetails = p.id;

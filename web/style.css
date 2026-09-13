@@ -1475,13 +1475,27 @@ progress::-webkit-progress-value {
 #provider-list li {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   border-bottom: 1px solid var(--line);
   padding: 14px 0;
 }
 
-#provider-list li span {
+/* Seul le nom occupe l'espace libre. La regle precedente visait tous les
+   span : le badge s'etirait comme un champ vide, et le bloc de details
+   partait a droite des boutons au lieu de passer a la ligne. */
+#provider-list li .provider-name {
   flex: 1;
+  min-width: 8rem;
+}
+
+#provider-list li .kind-badge {
+  flex: 0 0 auto;
+}
+
+#provider-list li .provider-details {
+  flex: 0 0 100%;
+  order: 9;
 }
 
 .token-value {
@@ -1838,10 +1852,8 @@ kbd {
 .episode-list .ep-dur { opacity: .55; font-size: .85rem; }
 
 /* Details d'un abonnement sous son nom, dans les reglages */
-#provider-list li { flex-wrap: wrap; }
 .provider-details {
   display: flex; flex-direction: column; gap: .12rem;
-  flex-basis: 100%; order: 9;
   margin-top: .35rem; color: var(--muted); font-size: .8rem;
 }
 .provider-details.unreachable { color: var(--danger); }
