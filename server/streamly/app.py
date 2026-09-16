@@ -222,9 +222,16 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- jeton
 
-    def _session_cookie(self, sid):
+    def _session_cookie(self, sid, remember=True):
+        """Cookie de session.
+
+        Sans Max-Age, le cookie meurt avec le navigateur : c'est ce que
+        promet « Rester connecte sur cet appareil » quand la case est
+        decochee. La session reste bornee cote serveur dans les deux cas.
+        """
         secure = '; Secure' if STATE.cfg.get('secure_cookies') else ''
-        return 'streamly_session=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800%s' % (sid, secure)
+        age = '; Max-Age=604800' if remember else ''
+        return 'streamly_session=%s; HttpOnly; SameSite=Strict; Path=/%s%s' % (sid, age, secure)
 
     def _clear_cookie(self):
         return 'streamly_session=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/'
@@ -314,7 +321,9 @@ class Handler(BaseHTTPRequestHandler):
                     username=body.get('username'), password=body.get('password'))
             except ValueError as exc:
                 return self._err(401, str(exc))
-            self._cookie = self._session_cookie(sid)
+            # La case est cochee par defaut dans l'interface ; une absence de
+            # champ vaut donc « se souvenir », comme avant ce changement.
+            self._cookie = self._session_cookie(sid, remember=_as_bool(body.get('remember', True)))
             return self._json({'role': role}, extra={'Cache-Control': 'no-store'})
         if not self._api_authed(params):
             return self._err(401, 'connexion requise')

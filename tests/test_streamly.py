@@ -487,6 +487,16 @@ class HTTPTests(unittest.TestCase):
     def login(self, token='test-admin'):
         r = self.request('/api/login', {'token':token}); self.assertEqual(r.status, 200)
         self.assertIn('HttpOnly', r.headers['Set-Cookie']); return r.headers['Set-Cookie'].split(';')[0]
+    def test_remember_me_controls_cookie_lifetime(self):
+        kept = self.request('/api/login', {'token': 'test-admin', 'remember': True})
+        self.assertIn('Max-Age=604800', kept.headers['Set-Cookie'])
+        # Case decochee : cookie de session, qui meurt avec le navigateur.
+        session_only = self.request('/api/login', {'token': 'test-admin', 'remember': False})
+        self.assertNotIn('Max-Age', session_only.headers['Set-Cookie'])
+        self.assertIn('HttpOnly', session_only.headers['Set-Cookie'])
+        # Un ancien client qui n'envoie pas le champ garde le comportement d'avant.
+        legacy = self.request('/api/login', {'token': 'test-admin'})
+        self.assertIn('Max-Age=604800', legacy.headers['Set-Cookie'])
     def test_viewer_cannot_administer(self):
         cookie = self.login('test-viewer')
         self.assertEqual(self.request('/api/providers/delete', {'id':'p'}, cookie).status, 403)

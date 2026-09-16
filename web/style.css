@@ -727,12 +727,29 @@ h3 {
   display: none;
 }
 
+/* Cinq onglets ne tiennent pas sur un telephone : la barre defile deja, mais
+   son ascenseur natif tranchait avec le reste. On le masque et on menage une
+   marge de fin pour que le dernier onglet ne colle pas au bord. */
+.tabs {
+  scrollbar-width: none;
+  scroll-padding-inline: 12px;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
 .category-chip {
   appearance: none;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--panel-subtle);
   color: var(--muted);
+  /* Meme hauteur que les selects de la meme rangee : a 35 px contre 40, le
+     decalage se voyait, et la cible tactile etait trop petite. */
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
   padding: 8px 14px;
   font-size: 0.74rem;
   white-space: nowrap;

@@ -121,7 +121,10 @@ $('#login-form').onsubmit = async e => {
   const username = ($('#user-input') ? $('#user-input').value.trim() : '');
   const password = $('#token-input').value.trim();
   try {
-    const payload = username ? {username, password} : {token: password, password};
+    // La case « Rester connecte » n'etait lue nulle part : le cookie etait
+    // toujours emis pour sept jours, cochee ou non.
+    const remember = $('#remember-token') ? $('#remember-token').checked : true;
+    const payload = username ? {username, password, remember} : {token: password, password, remember};
     const r = await post('/login', payload);
     store.remove('token');
     $('#token-input').value = '';
@@ -1441,5 +1444,11 @@ window.addEventListener('keydown', e => {
     } else {
       requireLogin();
     }
+  }
+  // Le formulaire s'ouvrait sans champ actif : sur un televiseur ou au
+  // clavier, il fallait une tabulation avant de pouvoir taper.
+  if (!$('#login').hidden) {
+    const first = $('#user-input') || $('#token-input');
+    if (first) first.focus({preventScroll: true});
   }
 })();
