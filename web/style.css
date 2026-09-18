@@ -1,16 +1,16 @@
 :root {
-  --bg: #0d120f;
-  --panel: #161c17;
-  --panel-subtle: #1e261f;
-  --line: #2a352c;
-  --line-light: #3b493e;
-  --text: #f2f5ef;
-  --muted: #9ba898;
-  --accent: #d4ef89;
-  --accent-hover: #e2f7a6;
-  --accent-dim: rgba(212, 239, 137, 0.12);
-  --accent-glow: rgba(212, 239, 137, 0.28);
-  --danger: #ff9888;
+  --bg: #0a0a14;
+  --panel: #12121f;
+  --panel-subtle: #1a1a2e;
+  --line: #262639;
+  --line-light: #3a3a55;
+  --text: #f5f5fa;
+  --muted: #9d9db4;
+  --accent: #a78bfa;
+  --accent-hover: #c4b5fd;
+  --accent-dim: rgba(139, 92, 246, 0.12);
+  --accent-glow: rgba(139, 92, 246, 0.28);
+  --danger: #ff7b92;
   color-scheme: dark;
   font-family: 'Avenir Next', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   font-size: 15px;
@@ -105,14 +105,14 @@ input:disabled, select:disabled, textarea:disabled {
 select {
   cursor: pointer;
   padding-right: 38px;
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%239ba898' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%239d9db4' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 14px center;
   background-size: 11px 8px;
 }
 
 select:hover:not(:disabled) {
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%23d4ef89' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%23a78bfa' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
 }
 
 /* La liste deroulante ouverte est dessinee par le systeme : sur Windows et
@@ -224,15 +224,17 @@ h3 {
 }
 
 .primary {
-  background: var(--accent);
-  color: #12190f;
-  border-color: var(--accent);
+  background: linear-gradient(135deg, #7c3aed, #a855f7);
+  color: #ffffff;
+  border-color: transparent;
   font-weight: 650;
+  box-shadow: 0 4px 18px rgba(124, 58, 237, 0.35);
 }
 
 .primary:hover {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
+  background: linear-gradient(135deg, #8b5cf6, #c026d3);
+  border-color: transparent;
+  box-shadow: 0 6px 22px rgba(139, 92, 246, 0.45);
 }
 
 .quiet {
@@ -257,8 +259,8 @@ h3 {
 }
 
 .brand-icon {
-  background: var(--accent);
-  color: #12190f;
+  background: linear-gradient(135deg, #7c3aed, #d946ef);
+  color: #ffffff;
   font-size: 1.1rem;
   border-radius: 9px;
   display: grid;
@@ -361,7 +363,7 @@ h3 {
   content: '';
   width: 5px;
   height: 10px;
-  border: solid #12190f;
+  border: solid #ffffff;
   border-width: 0 2.5px 2.5px 0;
   transform: rotate(45deg) translate(-1px, -1px);
 }
@@ -391,8 +393,8 @@ h3 {
 
 .login-art {
   min-height: 100vh;
-  background: #c7e384;
-  color: #1b2916;
+  background: radial-gradient(120% 90% at 85% 10%, #2d1b5e 0%, #1a1035 45%, #0a0a14 100%);
+  color: #ece9ff;
   overflow: hidden;
   position: relative;
   display: flex;
@@ -410,7 +412,7 @@ h3 {
 }
 
 .login-art .accent {
-  color: #4a6631;
+  color: #a855f7;
 }
 
 .login-art p {
@@ -425,11 +427,12 @@ h3 {
   position: absolute;
   width: 650px;
   height: 650px;
-  border: 1px solid #6e8a4d;
+  border: 1px solid rgba(168, 85, 247, 0.55);
   border-radius: 50%;
   top: -150px;
   right: -200px;
-  box-shadow: 0 0 0 50px #c7e384, 0 0 0 51px #829f57, 0 0 0 100px #c7e384, 0 0 0 101px #9bb46d;
+  box-shadow: 0 0 0 51px rgba(139, 92, 246, 0.22), 0 0 0 101px rgba(139, 92, 246, 0.12),
+              0 0 90px rgba(124, 58, 237, 0.35) inset;
 }
 
 /* ====================================================================
@@ -442,7 +445,7 @@ h3 {
   min-height: 84px;
   padding: 16px 4vw;
   border-bottom: 1px solid var(--line);
-  background: rgba(13, 18, 15, 0.85);
+  background: rgba(10, 10, 20, 0.85);
   backdrop-filter: blur(12px);
   position: sticky;
   top: 0;
@@ -472,7 +475,7 @@ h3 {
 }
 
 .tab.active {
-  background: #252f22;
+  background: #241b45;
   color: var(--accent);
   font-weight: 600;
 }
@@ -490,7 +493,7 @@ h3 {
 }
 
 .notice {
-  background: #2a3321;
+  background: #241b3d;
   border-left: 4px solid var(--accent);
   padding: 14px 4vw;
   line-height: 1.5;
@@ -693,13 +696,16 @@ h3 {
   white-space: nowrap;
 }
 
+/* La categorie occupe sa propre ligne : son bloc (champ de filtre + puces
+   empilees) est bien plus haut que les selects et desequilibrait la rangee. */
 .filters .category-filter {
   position: relative;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  flex: 1;
-  min-width: 280px;
+  flex-basis: 100%;
+  max-width: none;
+  order: 10;
 }
 
 .category-select {
@@ -714,17 +720,52 @@ h3 {
   border: 0;
 }
 
-.category-chips {
+/* Les puces s'empilent sur plusieurs lignes dans une zone bornee : avec des
+   centaines de categories, le ruban horizontal etait impraticable. Le champ
+   au-dessus filtre la liste en direct. */
+.category-search-box {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  padding: 6px 0 2px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0 10px;
+  max-width: 320px;
+  transition: border-color 0.18s, box-shadow 0.18s;
 }
 
-.category-chips::-webkit-scrollbar {
-  display: none;
+.category-search-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.category-search-box .search-icon {
+  font-size: 1.1rem;
+  color: var(--muted);
+  margin-right: 6px;
+  line-height: 1;
+}
+
+.category-search-box input {
+  border: 0;
+  background: none;
+  width: 100%;
+  font-size: 0.82rem;
+  color: var(--text);
+  padding: 9px 0;
+  outline: none;
+}
+
+.category-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-height: 148px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px 2px 4px 0;
 }
 
 /* Cinq onglets ne tiennent pas sur un telephone : la barre defile deja, mais
@@ -745,12 +786,12 @@ h3 {
   border-radius: 999px;
   background: var(--panel-subtle);
   color: var(--muted);
-  /* Meme hauteur que les selects de la meme rangee : a 35 px contre 40, le
-     decalage se voyait, et la cible tactile etait trop petite. */
-  min-height: 40px;
+  /* Les puces vivent desormais sous les selects, en lignes empilees : 36 px
+     reste une cible tactile correcte sans manger trois lignes d'ecran. */
+  min-height: 36px;
   display: inline-flex;
   align-items: center;
-  padding: 8px 14px;
+  padding: 7px 13px;
   font-size: 0.74rem;
   white-space: nowrap;
   font-weight: 600;
@@ -764,10 +805,10 @@ h3 {
 }
 
 .category-chip.active {
-  background: #2f3828;
+  background: #2a2050;
   border-color: var(--accent);
   color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(212, 239, 137, 0.2) inset;
+  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.2) inset;
 }
 
 /* Grille des chaînes */
@@ -789,10 +830,14 @@ h3 {
   background: var(--panel);
   overflow: hidden;
   transition: border-color 0.16s, transform 0.16s, box-shadow 0.16s;
+  /* Les cartes hors ecran ne sont ni stylees ni peintes : la liste peut
+     contenir des centaines d'entrees, le defilement reste fluide. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 92px;
 }
 
 .channel-card:hover {
-  border-color: #799161;
+  border-color: #7a5fd0;
   transform: translateY(-2px);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
 }
@@ -826,7 +871,7 @@ h3 {
   flex-shrink: 0;
   overflow: hidden;
   border-radius: 9px;
-  background: #232b24;
+  background: #1e1e30;
 }
 
 .logo-loader {
@@ -842,8 +887,8 @@ h3 {
   content: '';
   width: 18px;
   height: 18px;
-  border: 2px solid rgba(212, 239, 137, 0.35);
-  border-top-color: #d4ef89;
+  border: 2px solid rgba(139, 92, 246, 0.35);
+  border-top-color: #a78bfa;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
 }
@@ -893,7 +938,7 @@ h3 {
 .star {
   border: 0;
   background: transparent;
-  color: #61705c;
+  color: #565672;
   min-width: 46px;
   min-height: 46px;
   padding: 10px;
@@ -952,7 +997,7 @@ h3 {
   width: 46px;
   height: 46px;
   border-radius: 9px;
-  background: #232b24;
+  background: #1e1e30;
   flex-shrink: 0;
 }
 
@@ -966,7 +1011,7 @@ h3 {
 .skeleton-line {
   height: 12px;
   border-radius: 4px;
-  background: #232b24;
+  background: #1e1e30;
 }
 
 .skeleton-line.title {
@@ -987,7 +1032,7 @@ h3 {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(212, 239, 137, 0.08), transparent);
+  background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.08), transparent);
   animation: shimmer 1.5s ease-in-out infinite;
 }
 
@@ -1009,14 +1054,14 @@ h3 {
   border-radius: 16px;
   overflow: hidden;
   margin-bottom: 18px;
-  background: #141a15;
+  background: #10101c;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
   display: flex;
   flex-direction: column;
 }
 
 .video-stage {
-  background: #050806;
+  background: #050509;
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -1039,7 +1084,7 @@ h3 {
   padding: 10px 14px;
   border-radius: 999px;
   background: linear-gradient(160deg, rgba(26, 36, 29, 0.92), rgba(16, 22, 18, 0.88));
-  border: 1px solid rgba(212, 239, 137, 0.35);
+  border: 1px solid rgba(139, 92, 246, 0.35);
   color: var(--text);
   box-shadow: 0 16px 38px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(8px);
@@ -1060,7 +1105,7 @@ h3 {
 }
 
 .zap-btn {
-  border: 1px solid rgba(212, 239, 137, 0.35);
+  border: 1px solid rgba(139, 92, 246, 0.35);
   border-radius: 999px;
   width: 34px;
   height: 34px;
@@ -1167,13 +1212,14 @@ h3 {
   color: var(--danger);
 }
 
+/* Le badge DIRECT est rouge, code universel du live (TV, Netflix, YouTube). */
 .live-badge {
   display: inline-flex;
   align-items: center;
   font-size: 0.72rem;
   letter-spacing: 0.15em;
   font-weight: 700;
-  color: var(--accent);
+  color: #ff4d5e;
 }
 
 .pulse-dot {
@@ -1181,16 +1227,16 @@ h3 {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background-color: var(--accent);
-  box-shadow: 0 0 0 0 rgba(212, 239, 137, 0.7);
+  background-color: #ff4d5e;
+  box-shadow: 0 0 0 0 rgba(255, 77, 94, 0.7);
   animation: live-pulse 2s infinite;
   margin-right: 7px;
 }
 
 @keyframes live-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(212, 239, 137, 0.8); }
-  70% { box-shadow: 0 0 0 8px rgba(212, 239, 137, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(212, 239, 137, 0); }
+  0% { box-shadow: 0 0 0 0 rgba(255, 77, 94, 0.8); }
+  70% { box-shadow: 0 0 0 8px rgba(255, 77, 94, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 77, 94, 0); }
 }
 
 .player-tools {
@@ -1239,7 +1285,7 @@ h3 {
   display: flex;
   gap: 10px;
   padding: 12px 20px;
-  background: rgba(13, 18, 15, 0.75);
+  background: rgba(10, 10, 20, 0.75);
   border-top: 1px solid var(--line);
   flex-wrap: wrap;
   animation: fadeIn 0.2s ease-in-out;
@@ -1295,7 +1341,7 @@ progress::-webkit-progress-bar {
 }
 
 progress::-webkit-progress-value {
-  background: linear-gradient(90deg, var(--accent), #e5df78);
+  background: linear-gradient(90deg, var(--accent), #d946ef);
   border-radius: 3px;
   transition: width 0.3s ease;
 }
@@ -1400,6 +1446,16 @@ progress::-webkit-progress-value {
   body.is-playing #catalogue .filters .category-filter {
     grid-column: 1 / -1;
     min-width: 0;
+  }
+
+  /* En panneau lateral, l'espace vertical est compte : deux lignes de puces
+     suffisent, le champ de filtre fait le reste. */
+  body.is-playing #catalogue .category-chips {
+    max-height: 92px;
+  }
+
+  body.is-playing #catalogue .category-search-box {
+    max-width: none;
   }
 
   body.is-playing #catalogue .filters > span {
@@ -1751,6 +1807,12 @@ kbd {
     min-width: 100%;
     max-width: none;
   }
+  .category-search-box {
+    max-width: none;
+  }
+  .category-chips {
+    max-height: 118px;
+  }
   .filters label {
     flex: 1;
     min-width: 130px;
@@ -1848,8 +1910,8 @@ kbd {
   padding: .45rem .8rem; border: 1px solid rgba(255,255,255,.14);
   border-radius: 999px; cursor: pointer; font-size: .92rem;
 }
-.source-kind label:has(input:checked) { border-color: var(--accent, #cdf564); color: var(--accent, #cdf564); }
-.source-kind input { width: auto; margin: 0; accent-color: var(--accent, #cdf564); }
+.source-kind label:has(input:checked) { border-color: var(--accent, #a78bfa); color: var(--accent, #a78bfa); }
+.source-kind input { width: auto; margin: 0; accent-color: var(--accent, #a78bfa); }
 .kind-badge {
   font-size: .72rem; letter-spacing: .06em; padding: .12rem .45rem;
   border: 1px solid rgba(255,255,255,.18); border-radius: 999px; opacity: .75;
@@ -1863,7 +1925,7 @@ kbd {
   padding: .55rem .7rem; border: 1px solid rgba(255,255,255,.1);
   border-radius: .6rem; background: rgba(255,255,255,.03); cursor: pointer;
 }
-.episode-list button:hover { border-color: var(--accent, #cdf564); }
+.episode-list button:hover { border-color: var(--accent, #a78bfa); }
 .episode-list .ep-num { font-variant-numeric: tabular-nums; opacity: .6; min-width: 3.2rem; }
 .episode-list .ep-title { flex: 1; }
 .episode-list .ep-dur { opacity: .55; font-size: .85rem; }

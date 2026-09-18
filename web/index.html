@@ -2,10 +2,10 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0e120f"><meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0a0a14"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="style.css?v=20260913-v20">
-<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260913-v20"></script>
+<link rel="stylesheet" href="style.css?v=20260918-v22">
+<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260918-v22"></script>
 </head>
 <body>
 <!-- Masque au depart, comme #app : c'est /api/me qui tranche. Sans cela, le
@@ -135,7 +135,13 @@
       <select id="category" class="category-select" aria-label="Catégories">
       <option value="">Toutes les catégories</option>
       </select>
+      <div class="category-search-box">
+       <span class="search-icon" aria-hidden="true">⌕</span>
+       <input id="category-search" type="search" placeholder="Filtrer les catégories…" aria-label="Filtrer les catégories" autocomplete="off">
+       <button id="category-search-clear" type="button" class="search-clear" aria-label="Effacer le filtre de catégories" hidden>✕</button>
+      </div>
       <div id="category-chips" class="category-chips" role="tablist" aria-label="Catégories"></div>
+      <p id="category-empty" class="small muted" hidden>Aucune catégorie ne correspond.</p>
     </label>
     <span id="count" class="small muted"></span>
    </div>

@@ -97,10 +97,10 @@ function channelKey(c) {
 }
 
 function getChannelColor(str) {
-  if (!str) return '#232b24';
+  if (!str) return '#1e1e30';
   let hash = 0;
   for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-  const tints = ['#202e23', '#28311e', '#1f3032', '#322b1f', '#212734', '#2d2133'];
+  const tints = ['#241b45', '#1c2140', '#2a1a3e', '#1a2438', '#301b38', '#20204a'];
   return tints[Math.abs(hash) % tints.length];
 }
 
@@ -712,22 +712,29 @@ async function loadFilters() {
   const langs = await api('/languages' + (state.provider ? '?provider=' + encodeURIComponent(state.provider) : '')).catch(() => []);
   const sel = $('#lang');
   sel.replaceChildren(new Option('Toutes les langues', ''));
-  langs.forEach(l => sel.add(new Option(l.lang, l.lang)));
+  langs.sort((x, y) => alphaSort(x.lang, y.lang)).forEach(l => sel.add(new Option(l.lang, l.lang)));
   sel.value = state.lang;
   if (sel.selectedIndex < 0) { state.lang = ''; sel.value = ''; }
   await loadCategories();
 }
+
+const alphaSort = (a, b) => String(a || '').trim().localeCompare(String(b || '').trim(), 'fr', {sensitivity: 'base', numeric: true});
 
 function normalizeCategoryValue(value) {
   if (!value) return '';
   return typeof value === 'string' ? value : (value.name || value.slug || '');
 }
 
+let categoryValues = [];
+let categoryFilter = '';
+
 function renderCategoryChips(items = []) {
   const chips = $('#category-chips');
   if (!chips) return;
 
-  const values = [...new Set(items.map(normalizeCategoryValue).filter(Boolean))];
+  categoryValues = [...new Set(items.map(normalizeCategoryValue).filter(Boolean))];
+  const term = categoryFilter.trim().toLowerCase();
+  const visible = term ? categoryValues.filter(v => v.toLowerCase().includes(term)) : categoryValues;
   chips.replaceChildren();
 
   const makeChip = (value, label) => {
@@ -740,14 +747,51 @@ function renderCategoryChips(items = []) {
       state.category = value;
       const sel = $('#category');
       if (sel) sel.value = value;
-      renderCategoryChips(values);
+      renderCategoryChips(categoryValues);
       renderChannels();
     };
     return chip;
   };
 
   chips.append(makeChip('', 'Toutes les catégories'));
-  values.forEach(value => chips.append(makeChip(value, value)));
+  // La categorie active reste visible meme si le filtre texte l'exclut,
+  // sinon on ne voit plus ce qui est applique.
+  if (state.category && !visible.includes(state.category) && categoryValues.includes(state.category)) {
+    chips.append(makeChip(state.category, state.category));
+  }
+  visible.forEach(value => chips.append(makeChip(value, value)));
+
+  const emptyMsg = $('#category-empty');
+  if (emptyMsg) emptyMsg.hidden = visible.length > 0 || !term;
+  const searchInput = $('#category-search');
+  if (searchInput) {
+    searchInput.placeholder = categoryValues.length
+      ? 'Filtrer ' + categoryValues.length + ' catégories…'
+      : 'Filtrer les catégories…';
+  }
+}
+
+const categorySearch = $('#category-search');
+const categorySearchClear = $('#category-search-clear');
+if (categorySearch) {
+  let categorySearchTimer;
+  categorySearch.oninput = e => {
+    if (categorySearchClear) categorySearchClear.hidden = !e.target.value;
+    clearTimeout(categorySearchTimer);
+    categorySearchTimer = setTimeout(() => {
+      categoryFilter = e.target.value;
+      renderCategoryChips(categoryValues);
+    }, 120);
+  };
+}
+if (categorySearchClear) {
+  categorySearchClear.onclick = () => {
+    categorySearch.value = '';
+    categoryFilter = '';
+    categorySearchClear.hidden = true;
+    renderCategoryChips(categoryValues);
+    categorySearch.focus();
+  };
 }
 
 async function loadCategories() {
@@ -761,7 +805,7 @@ async function loadCategories() {
   if (serial !== filterGeneration) return;
   const sel = $('#category');
   const rawValues = cats.map(normalizeCategoryValue).filter(Boolean);
-  const values = [...new Set(rawValues)];
+  const values = [...new Set(rawValues)].sort(alphaSort);
   const selected = normalizeCategoryValue(state.category);
 
   sel.replaceChildren(new Option('Toutes les catégories', ''));
@@ -842,6 +886,9 @@ async function setMode(mode) {
   state.query = '';
   $('#search').value = '';
   updateClearSearch();
+  categoryFilter = '';
+  if (categorySearch) categorySearch.value = '';
+  if (categorySearchClear) categorySearchClear.hidden = true;
   $('#config').hidden = true;
   $('#preparations').hidden = mode !== 'prepared';
   $('#catalogue').hidden = mode === 'prepared';
