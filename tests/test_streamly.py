@@ -70,6 +70,43 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index('-g:v:0')+1], '100')
         self.assertEqual(cmd[cmd.index('-r:v:0')+1], '50.0')
         self.assertIn('g2_%v_%09d.ts', cmd)
+    def test_quality_driven_rate_control_is_capped_at_the_rung_target(self):
+        media = {'height':720,'width':1280,'fps':25,'streams':[{'codec_type':'audio'}]}
+        cmd = self.t._command('http://source', media, 0)
+        self.assertEqual(cmd[cmd.index('-crf:v:0')+1], '24')
+        # Le plafond est le debit cible, pas le maxrate : un contenu difficile
+        # ne doit pas couter plus qu'avec l'ancien debit moyen.
+        self.assertEqual(cmd[cmd.index('-maxrate:v:0')+1], CFG['ladder'][0]['bitrate'])
+        self.assertNotIn('-b:v:0', cmd)
+        abr = Transcoder(dict(CFG, rate_control='abr'), self.tmp.name + '/h4', self.tmp.name + '/l4', monitor=False)
+        try:
+            old = abr._command('http://source', media, 0)
+            self.assertEqual(old[old.index('-b:v:0')+1], CFG['ladder'][0]['bitrate'])
+            self.assertNotIn('-crf:v:0', old)
+        finally:
+            abr.close()
+    def test_only_playable_rungs_are_encoded_and_keep_their_ladder_index(self):
+        media = {'height':720,'width':1280,'fps':25,'streams':[{'codec_type':'audio'}]}
+        n = len(CFG['ladder'])
+        cmd = self.t._command('http://source', media, 0, levels=[n-2, n-1])
+        self.assertEqual(cmd.count('libx264'), 2)
+        self.assertEqual(cmd[cmd.index('-var_stream_map')+1],
+                         'v:0,a:0,name:%d v:1,a:1,name:%d' % (n-2, n-1))
+        self.assertIn('[0:v]split=2', cmd[cmd.index('-filter_complex')+1])
+    def test_higher_ceiling_viewer_extends_the_encoded_rungs(self):
+        with patch.object(self.t, '_spawn'):
+            self.t.open('a', 'one', [{'provider':'p','url':'http://a'}], ceiling=650000)
+            w = next(iter(self.t.workers.values()))
+            eco = list(w['levels'])
+            self.assertEqual(eco, self.t.allowed_levels({'ceiling': 650000}))
+            self.assertLess(len(eco), len(CFG['ladder']))
+            w['state'] = 'playing'
+            self.t.open('b', 'one', [{'provider':'p','url':'http://a'}], ceiling=0)
+            self.assertEqual(w['levels'], list(range(len(CFG['ladder']))))
+            self.assertEqual(w['generation'], 1)
+            # Un spectateur de plus au meme plafond ne relance rien.
+            self.t.open('c', 'one', [{'provider':'p','url':'http://a'}], ceiling=650000)
+            self.assertEqual(w['generation'], 1)
     def test_ffmpeg_errors_never_leak_provider_credentials(self):
         cfg = dict(CFG, providers=[dict(id='p', host='http://panel.invalid',
             username='SECRETUSER', password='SECRETPASS', max_connections=1)])
@@ -132,11 +169,12 @@ class PassthroughTests(unittest.TestCase):
         # 1,5 Mb/s ne tient pas sous le plafond Eco (650 kb/s) : on reencode.
         self.assertIsNone(self.t.passthrough_plan(self.H264, ceiling=650000))
         self.assertIsNotNone(self.t.passthrough_plan(self.H264, ceiling=2000000))
-        # Debit inconnu (cas courant d'un TS en HTTP) : remux optimiste,
-        # marque non mesure, plafond verifie plus tard sur les segments.
+        # Debit inconnu (cas courant d'un TS en HTTP) : sous plafond on
+        # encode, sinon la source part a plein debit le temps de la mesure.
         blind = dict(self.H264, video_bitrate=0, bitrate=0)
-        plan = self.t.passthrough_plan(blind, ceiling=2000000)
-        self.assertFalse(plan['measured'])
+        self.assertIsNone(self.t.passthrough_plan(blind, ceiling=2000000))
+        # Sans plafond (Sport), le remux reste permis et sera mesure.
+        self.assertFalse(self.t.passthrough_plan(blind, ceiling=0)['measured'])
 
     def test_remuxed_worker_exposes_one_level_and_source_resolution(self):
         ticket = self.t.open('a', 'one', [{'provider':'p','url':'http://s'}], ceiling=0)
@@ -241,8 +279,9 @@ class BitrateCacheTests(unittest.TestCase):
         try:
             media = {'height':1080, 'width':1920, 'fps':25, 'codec':'h264', 'pix_fmt':'yuv420p',
                      'video_bitrate':0, 'bitrate':0, 'audio_codec':'aac', 'streams':[]}
-            # Sans mesure : remux optimiste, plafond verifie plus tard.
-            self.assertFalse(t.passthrough_plan(media, ceiling=1150000)['measured'])
+            # Sans mesure : pas de remux sous plafond, remux permis en Sport.
+            self.assertIsNone(t.passthrough_plan(media, ceiling=1150000))
+            self.assertFalse(t.passthrough_plan(media, ceiling=0)['measured'])
             # Avec la mesure d'une lecture precedente : decision immediate.
             t._remember_bitrate('http://s/1', 2900000)
             known = dict(media, bitrate=t._known_bitrate('http://s/1'), video_bitrate=0)

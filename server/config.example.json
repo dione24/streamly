@@ -18,7 +18,7 @@
       "max_connections": 1
     }
   ],
-  "_comment_ladder": "Echelle ABR. Tous les barreaux sont encodes pour garantir des segments alignes.",
+  "_comment_ladder": "Echelle ABR. Seuls les barreaux lisibles par les spectateurs presents sont encodes (le mode Economie n'encode pas le 720p). 'bitrate' est le plafond de debit du barreau ; 'crf' peut etre precise par barreau.",
   "ladder": [
     {
       "name": "720p",
@@ -61,12 +61,16 @@
   "_comment_fps": "En dessous de cette hauteur, une source a plus de 30 i/s est encodee a la moitie de sa cadence : invisible en basse definition, 31 % de CPU economise. 0 desactive le plafonnement.",
   "high_fps_min_height": 480,
 
-  "_comment_passthrough": "Remux au lieu de reencoder quand la source est deja du H264 8 bits 4:2:0 et que son debit tient sous le plafond du mode : ~5 % de CPU au lieu de ~75 %, et la definition source. Sans debit annonce par la source, le remux n'est retenu que pour le mode Sport (sans plafond). false force le reencodage.",
+  "_comment_passthrough": "Remux au lieu de reencoder quand la source est deja du H264 8 bits 4:2:0 et que son debit tient sous le plafond du mode : ~5 % de CPU au lieu de ~75 %, et la definition source. Sous plafond, une source au debit inconnu est encodee : la remuxer pour la mesurer servait plusieurs Mo a plein debit. passthrough_unmeasured=true retablit ce remux optimiste. false force le reencodage.",
   "passthrough": true,
+  "passthrough_unmeasured": false,
   "_comment_bitrate_cache": "Duree de validite d'un debit mesure, en heures. Sert a decider du remux avant de lancer FFmpeg. 0 desactive l'expiration.",
   "bitrate_cache_hours": 24,
 
   "x264_preset": "veryfast",
+  "_comment_rate_control": "crf = qualite constante plafonnee au debit du barreau : un plateau de JT consomme ~30 % de moins, le sport reste au plafond. abr = ancien debit moyen fixe. crf plus haut = moins de donnees, moins de finesse (22 a 27 raisonnable).",
+  "rate_control": "crf",
+  "crf": 24,
   "audio_bitrate": "96k",
   "max_concurrent_streams": 2,
   "stall_timeout_seconds": 20,

@@ -220,6 +220,23 @@ class Transcoder:
         if monitor:
             threading.Thread(target=self._watchdog, daemon=True).start()
 
+    def _rate_args(self, i, rung):
+        """Controle du debit d'un barreau.
+
+        A debit moyen fixe, un plateau de JT recoit autant de bits qu'un match.
+        En qualite constante plafonnee, x264 ne depense que ce que l'image
+        demande : -31 a -33 % de donnees mesures sur un plateau pour un point
+        de VMAF, et le plafond joue le role de garde-fou sur le sport. Le
+        plafond est le debit cible du barreau (et non son maxrate) pour qu'un
+        contenu difficile ne coute pas plus qu'avant.
+        """
+        if str(self.cfg.get('rate_control', 'crf')).lower() == 'abr':
+            return ['-b:v:%d' % i, rung['bitrate'], '-maxrate:v:%d' % i, rung['maxrate'],
+                    '-bufsize:v:%d' % i, rung['bufsize']]
+        crf = rung.get('crf', self.cfg.get('crf', 24))
+        return ['-crf:v:%d' % i, str(crf), '-maxrate:v:%d' % i, rung['bitrate'],
+                '-bufsize:v:%d' % i, rung['bufsize']]
+
     def _rung_fps(self, rung, source_fps):
         """Cadence a encoder pour un barreau.
 
@@ -303,17 +320,19 @@ class Transcoder:
 
         if ceiling and effective and effective * 1.08 > ceiling:
             return None
-        # Debit inconnu : c'est le cas courant. Un flux TS servi en HTTP
-        # n'annonce ni format.bit_rate ni stream.bit_rate video — seul l'audio
-        # en a un. Exiger un chiffre ici reviendrait a reserver le remux au
-        # mode Sport. On part donc en remux, et _tick mesure le debit reel sur
-        # les premiers segments : au-dessus du plafond, il rebascule en
-        # encodage via une nouvelle generation, comme pour un failover.
+        # Debit inconnu : c'est le cas courant, un flux TS servi en HTTP
+        # n'annonce rien. Partir en remux pour mesurer ensuite servait la
+        # source a plein debit le temps de la mesure : 13 Mo constates sur une
+        # chaine a 3,9 Mb/s, a chaque premiere lecture, pour un spectateur en
+        # mode plafonne. Sous plafond, sans mesure, on encode. Le mode Sport
+        # (sans plafond) continue de remuxer et alimente le cache de debits.
+        if ceiling and not effective and not self.cfg.get('passthrough_unmeasured', False):
+            return None
         return {'audio': has_audio, 'copy_audio': copy_audio,
                 'bitrate': effective or _estimated_bitrate(media),
                 'measured': bool(effective)}
 
-    def _command(self, source, media, generation, audio_only=False, passthrough=None):
+    def _command(self, source, media, generation, audio_only=False, passthrough=None, levels=None):
         seg = int(self.cfg.get('segment_seconds', 2))
         fps = float(media['fps'])
         ua = self.cfg.get('user_agent', 'VLC/3.0.20')
@@ -376,12 +395,20 @@ class Transcoder:
                     'g%d_s_%%v.m3u8' % generation]
             return cmd
 
+        # Seuls les barreaux qu'un spectateur peut lire sont encodes : le 720p
+        # pese a lui seul pres de la moitie du CPU, et les modes Economie et
+        # Equilibre ne l'affichent jamais. Les sorties gardent l'indice du
+        # barreau dans l'echelle (name:), si bien que les noms de fichiers, le
+        # manifeste et le controle des niveaux ne changent pas.
+        if levels is None:
+            levels = list(range(len(self.ladder)))
+        rungs = [(i, self.ladder[i]) for i in levels]
         # Never upscale. The manifest uses the same dimensions as the encoder.
         chains = []
-        for i, r in enumerate(self.ladder):
+        for n, (i, r) in enumerate(rungs):
             h = min(int(r['height']), media['height']) // 2 * 2
-            chains.append('[v%d]scale=-2:%d,setsar=1[o%d]' % (i, h, i))
-        fc = '[0:v]split=%d%s;%s' % (len(self.ladder), ''.join('[v%d]' % i for i in range(len(self.ladder))), ';'.join(chains))
+            chains.append('[v%d]scale=-2:%d,setsar=1[o%d]' % (n, h, n))
+        fc = '[0:v]split=%d%s;%s' % (len(rungs), ''.join('[v%d]' % n for n in range(len(rungs))), ';'.join(chains))
         cmd = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'warning',
                '-rw_timeout', '12000000', '-user_agent', ua,
                '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3',
@@ -396,13 +423,12 @@ class Transcoder:
             cmd += ['-filter_complex_threads', str(threads)]
         cmd += ['-filter_complex', fc]
         force_key_frame_expression = 'expr:gte(t,n_forced*%d)' % seg
-        for i, r in enumerate(self.ladder):
+        for i, (_, r) in enumerate(rungs):
             cmd += ['-map', '[o%d]' % i, '-c:v:%d' % i, 'libx264',
                     '-preset:v:%d' % i, self.cfg.get('x264_preset', 'veryfast'),
-                    '-pix_fmt:v:%d' % i, 'yuv420p', '-profile:v:%d' % i, 'high',
-                    '-b:v:%d' % i, r['bitrate'], '-maxrate:v:%d' % i, r['maxrate'],
-                    '-bufsize:v:%d' % i, r['bufsize'],
-                    '-r:v:%d' % i, str(self._rung_fps(r, fps)),
+                    '-pix_fmt:v:%d' % i, 'yuv420p', '-profile:v:%d' % i, 'high']
+            cmd += self._rate_args(i, r)
+            cmd += ['-r:v:%d' % i, str(self._rung_fps(r, fps)),
                     '-g:v:%d' % i, str(round(seg * self._rung_fps(r, fps))),
                     '-keyint_min:v:%d' % i, str(round(seg * self._rung_fps(r, fps))),
                     '-sc_threshold:v:%d' % i, '0']
@@ -414,10 +440,11 @@ class Transcoder:
             cmd += ['-force_key_frames', force_key_frame_expression]
         audio = any(s.get('codec_type') == 'audio' for s in media.get('streams', [])) or media.get('unverified')
         if audio:
-            for _ in self.ladder:
+            for _ in rungs:
                 cmd += ['-map', '0:a:0']
             cmd += ['-c:a', 'aac', '-b:a', self.cfg.get('audio_bitrate', '96k'), '-ac', '2']
-        variants = ' '.join('v:%d,a:%d' % (i, i) if audio else 'v:%d' % i for i in range(len(self.ladder)))
+        variants = ' '.join(('v:%d,a:%d,name:%d' % (n, n, i)) if audio else ('v:%d,name:%d' % (n, i))
+                            for n, (i, _) in enumerate(rungs))
         hls_flags = ['delete_segments', 'omit_endlist']
         if self._ffmpeg_caps.get('hls_independent_segments'):
             hls_flags.append('independent_segments')
@@ -480,11 +507,20 @@ class Transcoder:
                          last=time.time(), label=label, failovers=0, media=None,
                          audio_only=bool(audio_only), error=None,
                          ceiling=max(0, int(ceiling)), passthrough=None,
-                         passthrough_denied=False, measured_once=False)
+                         passthrough_denied=False, measured_once=False,
+                         levels=self.allowed_levels({'ceiling': max(0, int(ceiling))}))
                 self.workers[key] = w
                 threading.Thread(target=self._spawn, args=(key,), daemon=True).start()
             elif w['state'] == 'failed':
                 raise CapacityError('Les sources de cette chaîne sont indisponibles. Arrêtez la lecture puis réessayez.')
+            elif not w.get('passthrough') and not w.get('audio_only') and not audio_only and (
+                    set(self.allowed_levels({'ceiling': max(0, int(ceiling))})) - set(w.get('levels') or [])):
+                # Un spectateur au plafond plus haut rejoint une chaine encodee
+                # pour un mode plus econome : on ajoute ses barreaux dans une
+                # nouvelle generation, que les lecteurs en place rechargent.
+                w['levels'] = sorted(set(w.get('levels') or []) | set(
+                    self.allowed_levels({'ceiling': max(0, int(ceiling))})))
+                self._restart_locked(key, w, None)
             elif (w.get('passthrough') and w['passthrough']['measured'] and ceiling
                   and w['passthrough']['bitrate'] * 1.08 > int(ceiling)):
                 # Un flux remuxe n'a qu'une qualite, celle de la source. Un
@@ -531,7 +567,8 @@ class Transcoder:
                     except OSError:
                         pass
                     w['proc'] = subprocess.Popen(self._command(source, media, generation, audio_only=audio_only,
-                                                                  passthrough=w['passthrough']),
+                                                                  passthrough=w['passthrough'],
+                                                                  levels=w.get('levels') or None),
                                                  cwd=outdir, stdout=log, stderr=log)
                 w['state'] = 'buffering'
             except OSError:
@@ -705,6 +742,9 @@ class Transcoder:
         w['state'] = 'starting'
         w['error'] = reason
         outdir = os.path.join(self.hls_dir, key)
+        # Une relance peut survenir avant le premier lancement, quand un
+        # second spectateur arrive pendant le sondage de la source.
+        os.makedirs(outdir, exist_ok=True)
         for f in os.listdir(outdir):
             m = re.match(r'g(\d+)_', f)
             if m and int(m[1]) < w['generation'] - 1:
