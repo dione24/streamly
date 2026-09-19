@@ -338,17 +338,28 @@ const NET_LEVELS = [
 async function measureConnection() {
   const cached = store.json('net', null);
   if (cached && Date.now() - cached.at < 600000) return cached.mbps;
-  const url = '/api/speedtest?t=' + Date.now();
-  const started = performance.now();
-  const res = await fetch(url, {credentials: 'same-origin', cache: 'no-store'});
-  if (!res.ok) throw new Error('mesure impossible');
-  const bytes = (await res.arrayBuffer()).byteLength;
-  const total = performance.now() - started;
-  // Le navigateur sait separer l'attente du serveur du transfert lui-meme.
-  const entry = performance.getEntriesByName(new URL(url, location.href).href).pop();
-  const transfer = entry && entry.responseStart ? entry.responseEnd - entry.responseStart : 0;
-  const ms = Math.max(transfer > 5 ? transfer : total, 20);
-  const mbps = bytes * 8 / ms / 1000;
+  const res = await fetch('/api/speedtest?t=' + Date.now(), {credentials: 'same-origin', cache: 'no-store'});
+  if (!res.ok || !res.body) throw new Error('mesure impossible');
+  // Sur une liaison lointaine, le debut d'un transfert est bride par la montee
+  // en charge de TCP, pas par le debit : on ne chronometre que la fin, une
+  // fois la connexion lancee. Mesurer le tout sous-estimait de moitie.
+  const total = Number(res.headers.get('Content-Length')) || 200000;
+  const reader = res.body.getReader();
+  let received = 0, markBytes = 0, markAt = 0, firstAt = 0;
+  for (;;) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    if (!firstAt) firstAt = performance.now();
+    received += value.byteLength;
+    if (!markAt && received >= total * 0.4) { markBytes = received; markAt = performance.now(); }
+  }
+  const end = performance.now();
+  // Connexion tres rapide : tout arrive d'un bloc, il n'y a pas de « fin » a
+  // chronometrer. On retombe alors sur le transfert entier.
+  const tail = received - markBytes >= 20000;
+  const mbps = tail ? (received - markBytes) * 8 / Math.max(end - markAt, 5) / 1000
+                    : received * 8 / Math.max(end - firstAt, 5) / 1000;
+  if (!received) throw new Error('mesure impossible');
   store.set('net', JSON.stringify({mbps, at: Date.now()}));
   return mbps;
 }
