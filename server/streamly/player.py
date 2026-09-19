@@ -55,6 +55,7 @@ class PlayerFacade:
         self._intents = {}      # owner -> (id de chaine, instant du master)
         self._bindings = {}     # owner -> (id de chaine, ticket)
         self._owner_locks = {}
+        self._slates = {}       # ticket -> ecran d'attente (voir slate())
 
     def invalidate(self):
         with self._lock:
@@ -148,6 +149,16 @@ class PlayerFacade:
                 if self._intents.get(owner) == intent:
                     self._intents.pop(owner, None)
             return ticket
+
+    def slate(self, ticket):
+        """Etat de l'ecran d'attente d'une lecture : debut, segments d'attente
+        montres, premier vrai segment servi. Sert a numeroter la playlist sans
+        rupture entre l'attente et le direct."""
+        with self._live_lock:
+            if ticket not in self._slates and len(self._slates) > 64:
+                alive = {t for _, t in self._bindings.values()}
+                self._slates = {k: v for k, v in self._slates.items() if k in alive}
+            return self._slates.setdefault(ticket, {'opened': time.time(), 'count': 0, 'first': None})
 
     # ---------------------------------------------------------- M3U
 

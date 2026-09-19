@@ -589,6 +589,13 @@ class Catalog:
             "GROUP BY lang, canonical ORDER BY label, lang, canonical")
         return [dict(r, label=_clean_label(r["label"])) for r in cur.fetchall()]
 
+    def has_icon(self, url):
+        """Vrai si cette adresse est le logo ou l'affiche d'une entree du catalogue."""
+        row = self._db.execute(
+            "SELECT 1 FROM channels WHERE icon=?1 UNION ALL SELECT 1 FROM vod WHERE icon=?1 "
+            "UNION ALL SELECT 1 FROM series WHERE icon=?1 LIMIT 1", (url,)).fetchone()
+        return row is not None
+
     def signature(self):
         """Change des qu'une synchro ou une purge modifie les chaines."""
         row = self._db.execute(

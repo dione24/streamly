@@ -141,6 +141,58 @@
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
 }
 
+/* Ecran d'attente, par-dessus la video tant que la premiere image n'est pas la */
+
+.video-stage { position: relative; }
+
+.stage-loader {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+  pointer-events: none;
+  background:
+    radial-gradient(90% 120% at 85% 0%, rgba(168, 85, 247, 0.30), transparent 55%),
+    radial-gradient(80% 110% at 0% 100%, rgba(124, 58, 237, 0.20), transparent 60%),
+    #0a0a14;
+}
+
+.stage-loader .wordmark { font-size: clamp(1.5rem, 3vw, 2.4rem); }
+.stage-loader p { margin: 4px 0 0; color: #c9c9dd; }
+.stage-loader small { color: var(--muted); font-size: 0.62rem; letter-spacing: 0.14em; }
+
+.stage-loader-bar {
+  position: relative;
+  width: min(240px, 50%);
+  height: 3px;
+  border-radius: 3px;
+  background: var(--line-light);
+  overflow: hidden;
+}
+
+.stage-loader-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 35%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #7c3aed, #d946ef);
+  animation: stage-loading 1.3s ease-in-out infinite;
+}
+
+@keyframes stage-loading {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(300%); }
+}
+
+/* Logos : la vignette est la tout de suite, l'image arrive en fondu */
+#app.tv .channel-logo { opacity: 0; transition: opacity 0.25s ease; }
+#app.tv .channel-logo.ready { opacity: 1; }
+
 /* Programme en cours : liste des chaines et panneau du lecteur */
 
 .ch-num {
@@ -653,5 +705,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .rail, .rail-label, #app.tv .movie-card .logo-slot { transition: none; }
+  .rail, .rail-label, #app.tv .movie-card .logo-slot, #app.tv .channel-logo { transition: none; }
+  .stage-loader-bar::after { animation: none; width: 100%; opacity: 0.5; }
 }

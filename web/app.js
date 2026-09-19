@@ -256,6 +256,7 @@ async function stop() {
   state.job = null;
   clearZapOverlay();
   $('#player-wrap').hidden = true;
+  $('#stage-loader').hidden = true;
   $('#program-info').hidden = true;
   $('#idle-hero').hidden = false;
   document.body.classList.remove('is-playing', 'reader-focus', 'catalogue-collapsed');
@@ -336,6 +337,9 @@ function playbackUI(title, live) {
   $('#live-badge').innerHTML = live ? '<span class="pulse-dot" aria-hidden="true"></span> DIRECT' : '● FILM PRÊT';
   $('#back-live').hidden = !live;
   $('#player-status').textContent = 'Préparation de la lecture…';
+  // L'encodeur met quelques secondes a produire : on le dit, plutot qu'un ecran noir.
+  $('#stage-loader-text').textContent = live ? 'Préparation du direct…' : 'Ouverture du film…';
+  $('#stage-loader').hidden = false;
   $('#usage').textContent = live ? '0 Mo de vidéo' : 'Version préparée';
   $('#bitrate').textContent = 'Qualité automatique';
   $('#budget-meter').hidden = true;
@@ -379,6 +383,7 @@ async function play(channel) {
     remember(channel);
   } catch (err) {
     if (attempt === state.playback) {
+      $('#stage-loader').hidden = true;
       $('#player-status').textContent = err.message;
       message(err.message);
     }
@@ -484,6 +489,7 @@ $('#pip').onclick = () => {
 const video = $('#video');
 video.addEventListener('waiting', () => { if (state.frames) state.stalls++; $('#player-status').textContent = 'Mise en réserve…'; });
 video.addEventListener('playing', () => {
+  $('#stage-loader').hidden = true;
   $('#player-status').textContent = state.frames ? 'Lecture en cours' : 'Image en ' + ((performance.now() - state.started) / 1000).toFixed(1) + ' s';
   state.frames = true;
 });
@@ -583,27 +589,20 @@ function row(c, kind = 'channel', number = 0) {
   const iconSlot = el('span', 'logo-slot');
   iconSlot.style.backgroundColor = getChannelColor(nameLabel);
   const placeholder = el('span', 'logo-placeholder', fallback);
-  const loader = el('span', 'logo-loader');
-  iconSlot.append(placeholder, loader);
+  iconSlot.append(placeholder);
 
   if (c.icon && /^https?:\/\//.test(c.icon)) {
+    // Les logos viennent de serveurs tiers, lents, et souvent en http (bloques
+    // sur une page https). Le serveur les relaie et les garde : la vignette
+    // s'affiche tout de suite, le logo la remplace quand il arrive.
     const img = el('img', 'channel-logo');
-    img.src = c.icon;
+    img.src = '/api/logo?u=' + encodeURIComponent(c.icon);
     img.alt = '';
     img.loading = 'lazy';
-    img.referrerPolicy = 'no-referrer';
-    img.onload = () => {
-      placeholder.hidden = true;
-      if (loader.isConnected) loader.remove();
-    };
-    img.onerror = () => {
-      img.remove();
-      placeholder.hidden = false;
-      if (loader.isConnected) loader.remove();
-    };
+    img.decoding = 'async';
+    img.onload = () => { img.classList.add('ready'); placeholder.hidden = true; };
+    img.onerror = () => img.remove();
     iconSlot.append(img);
-  } else if (loader.isConnected) {
-    loader.remove();
   }
 
   button.append(iconSlot);

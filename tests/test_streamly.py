@@ -22,6 +22,7 @@ from streamly import app, config
 from streamly import player as playermod
 from streamly.epg import Guide
 from streamly import relay as relaymod
+from streamly.logos import Logos
 import gzip
 import xml.etree.ElementTree as ET
 from streamly.vod import Movies
@@ -497,6 +498,47 @@ class RelaySourceTests(unittest.TestCase):
         self.assertIsNone(devices.find(paired['token']))
 
 
+PNG = b'\x89PNG\r\n\x1a\n' + b'0' * 64
+
+
+class LogoTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.known = {'http://img.example/tf1.png', 'http://img.example/page.html', 'http://img.example/gros.png',
+                      'http://img.example/svg', 'http://10.0.0.8/logo.png'}
+        self.logos = Logos(self.tmp.name + '/logos', lambda u: u in self.known)
+        self.fetched = []
+        bodies = {'http://img.example/tf1.png': PNG, 'http://img.example/page.html': b'<html>',
+                  'http://img.example/svg': b'<svg onload=alert(1)>', 'http://img.example/gros.png': PNG + b'0' * 1600000}
+        def fetch(url):
+            self.fetched.append(url)
+            data = bodies.get(url)
+            return data if data and len(data) <= 1500000 else None
+        patch.object(self.logos, '_fetch', side_effect=fetch).start()
+        self.addCleanup(patch.stopall)
+    def tearDown(self): self.tmp.cleanup()
+    def test_logo_is_fetched_once_then_served_from_disk(self):
+        self.assertEqual(self.logos.get('http://img.example/tf1.png'), (PNG, 'image/png'))
+        self.assertEqual(self.logos.get('http://img.example/tf1.png'), (PNG, 'image/png'))
+        self.assertEqual(self.fetched, ['http://img.example/tf1.png'])
+    def test_only_catalog_urls_and_real_images(self):
+        self.assertIsNone(self.logos.get('http://ailleurs.example/x.png'))     # absent du catalogue
+        self.assertIsNone(self.logos.get('file:///etc/passwd'))
+        self.assertEqual(self.fetched, [])
+        for url in ('http://img.example/page.html', 'http://img.example/svg', 'http://img.example/gros.png'):
+            self.assertIsNone(self.logos.get(url), url)
+        # Un echec est memorise : on ne resollicite pas le serveur a chaque affichage.
+        before = len(self.fetched)
+        self.assertIsNone(self.logos.get('http://img.example/page.html'))
+        self.assertEqual(len(self.fetched), before)
+    def test_private_addresses_are_never_fetched(self):
+        patch.stopall()
+        with patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('10.0.0.8', 0))]), \
+             patch('urllib.request.OpenerDirector.open') as opened:
+            self.assertIsNone(self.logos.get('http://10.0.0.8/logo.png'))
+            opened.assert_not_called()
+
+
 class GuideTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.root = pathlib.Path(self.tmp.name)
@@ -737,6 +779,7 @@ class HTTPTests(unittest.TestCase):
         state.movies = Movies(CFG, root + '/movies', state.catalog, state.transcoder)
         state.player = playermod.PlayerFacade(state.catalog, state.transcoder)
         state.devices = relaymod.Devices(state.cfg, lambda _: None)
+        state.logos = Logos(root + '/logos', state.catalog.has_icon)
         state.guide = Guide(root + '/guide.xml.gz', lambda: [], lambda: set(), log=lambda _: None)
         state.sync_log = []; self.state = app.STATE = state
         app.STATE.provider.side_effect = lambda pid: CFG['providers'][0] if pid == 'p' else None
@@ -860,6 +903,16 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(len(json.loads(posted.read())), 4)
         xml = self.request('/xmltv.php?username=tv&password=salon2024xyz')
         self.assertEqual(xml.status, 200); self.assertIn(b'<tv', xml.read())
+    def test_logo_route_needs_a_session_and_a_catalog_icon(self):
+        seed_live(self.state.catalog)
+        cookie = self.login('test-viewer')
+        with patch.object(self.state.logos, '_fetch', return_value=PNG) as fetch:
+            self.assertEqual(self.request('/api/logo?u=http%3A%2F%2Fimg%2Ftf1.png').status, 401)
+            ok = self.request('/api/logo?u=http%3A%2F%2Fimg%2Ftf1.png', cookie=cookie)
+            self.assertEqual((ok.status, ok.headers['Content-Type'], ok.read()), (200, 'image/png', PNG))
+            self.assertIn('max-age=604800', ok.headers['Cache-Control'])
+            self.assertEqual(self.request('/api/logo?u=http%3A%2F%2Fevil.example%2Fx.png', cookie=cookie).status, 404)
+            fetch.assert_called_once()
     def test_guide_is_served_to_players(self):
         seed_live(self.state.catalog)
         self.state.guide.sources = lambda: [('p', pathlib.Path(self.tmp.name, 'x.xml').as_uri(), 'VLC')]
@@ -938,6 +991,38 @@ class HTTPTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         seed_live(self.state.catalog)
         return {c['canonical']: c['id'] for c in self.state.player.index()[0]}
+    def media(self, path):
+        # Le faux encodeur ecrit dans un fil : on passe l'ecran d'attente.
+        for _ in range(40):
+            status, headers, body = self.raw(path)
+            if status != 200 or '/slate.ts' not in body:
+                break
+            time.sleep(.05)
+        return status, headers, body
+    def test_loading_slate_then_seamless_handover(self):
+        ids = self.fake_ffmpeg()
+        tc = self.state.transcoder
+        writer = tc._spawn.side_effect
+        tc._spawn.side_effect = lambda key: None          # l'encodeur n'a encore rien produit
+        base = '/live/tv/salon2024xyz/%d' % ids['TF1']
+        self.raw(base + '.m3u8')
+        status, _, body = self.raw(base + '/2.m3u8')
+        self.assertEqual(status, 200)
+        self.assertEqual([l for l in body.splitlines() if not l.startswith('#')], ['/slate.ts?n=0', '/slate.ts?n=1'])
+        slate = self.request('/slate.ts')
+        self.assertEqual((slate.status, slate.headers['Content-Type']), (200, 'video/mp2t'))
+        self.assertGreater(len(slate.read()), 10000)
+        # Deux secondes plus tard, un second ecran d'attente, derriere une discontinuite.
+        ticket = next(iter(tc.tickets))
+        self.state.player.slate(ticket)['opened'] -= 2
+        body = self.raw(base + '/2.m3u8')[2]
+        self.assertIn('#EXT-X-DISCONTINUITY\n#EXTINF:2.027,\n/slate.ts?n=2', body)
+        # L'encodeur produit : le direct prend la suite, numerote apres l'attente.
+        writer(next(iter(tc.workers)))
+        lines = self.raw(base + '/2.m3u8')[2].splitlines()
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:3', lines); self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:2', lines)
+        self.assertEqual(lines[lines.index('#EXT-X-DISCONTINUITY') + 2].rsplit('/', 1)[-1], 'g0_2_1758000000.ts')
+        self.assertNotIn('/slate.ts', '\n'.join(lines))
     def test_master_is_synthetic_and_starts_nothing(self):
         ids = self.fake_ffmpeg()
         for method in ('HEAD', 'GET'):
@@ -962,11 +1047,10 @@ class HTTPTests(unittest.TestCase):
         ids = self.fake_ffmpeg()
         base = '/live/tv/salon2024xyz/%d' % ids['TF1']
         self.raw(base + '.m3u8')
-        status, _, body = self.raw(base + '/2.m3u8')
+        status, _, body = self.media(base + '/2.m3u8')
         self.assertEqual(status, 200)
         ticket = next(iter(self.state.transcoder.tickets))
         self.assertIn('/s/%s/g0_2_1758000000.ts' % ticket, body)
-        self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:0', body)
         # Rafraichissements et changement de niveau : meme ticket, meme worker.
         self.assertEqual(self.raw(base + '/2.m3u8')[0], 200); self.assertEqual(self.raw(base + '/3.m3u8')[0], 200)
         self.assertEqual(len(self.state.transcoder.tickets), 1)
@@ -1012,13 +1096,14 @@ class HTTPTests(unittest.TestCase):
         ids = self.fake_ffmpeg(passthrough=True)
         base = '/live/tv/salon2024xyz/%d' % ids['TF1']
         self.raw(base + '.m3u8')
-        status, _, body = self.raw(base + '/3.m3u8')
+        status, _, body = self.media(base + '/3.m3u8')
         self.assertEqual(status, 200); self.assertIn('g0_0_1758000000.ts', body)
     def test_new_generation_is_flagged_as_a_discontinuity(self):
         ids = self.fake_ffmpeg()
         base = '/live/tv/salon2024xyz/%d' % ids['TF1']
-        self.raw(base + '.m3u8'); self.raw(base + '/2.m3u8')
+        self.raw(base + '.m3u8'); self.media(base + '/2.m3u8')
         tc = self.state.transcoder
+        shown = self.state.player.slate(next(iter(tc.tickets)))['count']
         with tc._lock:
             w = next(iter(tc.workers.values())); w['generation'] = 1
         tc._spawn.side_effect(w['key'])
@@ -1027,14 +1112,14 @@ class HTTPTests(unittest.TestCase):
         # La fin de l'ancienne generation, une discontinuite, puis la nouvelle,
         # numerotees a la suite : le lecteur franchit la bascule sans se figer.
         self.assertEqual(uris, ['g0_2_1758000000.ts', 'g0_2_1758000001.ts', 'g1_2_1758000002.ts', 'g1_2_1758000003.ts'])
-        self.assertIn('#EXT-X-MEDIA-SEQUENCE:1758000000', body)
-        self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:0', body)
-        self.assertEqual(body.splitlines()[body.splitlines().index('#EXT-X-DISCONTINUITY') + 2].rsplit('/', 1)[-1], 'g1_2_1758000002.ts')
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:%d' % shown, body)
+        marks = [i for i, l in enumerate(body.splitlines()) if l == '#EXT-X-DISCONTINUITY']
+        self.assertEqual(body.splitlines()[marks[-1] + 2].rsplit('/', 1)[-1], 'g1_2_1758000002.ts')
         # Une fois la nouvelle generation assez longue, l'ancienne sort de la fenetre.
         with patch.object(app, 'LIVE_OVERLAP_SEGMENTS', 2):
             body = self.raw(base + '/2.m3u8')[2]
-        self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:1', body); self.assertNotIn('g0_2_', body)
-        self.assertIn('#EXT-X-MEDIA-SEQUENCE:1758000002', body)
+        self.assertNotIn('g0_2_', body)
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:%d' % (shown + 2), body)
     def test_full_server_answers_503_to_players(self):
         ids = self.fake_ffmpeg()
         with patch.dict(self.state.transcoder.cfg, {'max_concurrent_streams': 1}):
