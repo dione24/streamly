@@ -46,7 +46,12 @@ with tempfile.TemporaryDirectory() as root:
         assert len(other) == len(ref), (ref, other)
         assert all(abs(a-b) < 0.15 for a, b in zip(ref, other)), (ref, other)
     # --- Remux : la source synthetique est deja du H264/AAC 4:2:0.
-    plan = t.passthrough_plan(media)
+    # Sans debit connu on encode, meme sans plafond : « Sport » promet du 720p
+    # compresse, pas la source brute. Le remux ne vaut que pour une source
+    # mesuree plus legere que le barreau le plus haut.
+    blind = dict(media, bitrate=0, video_bitrate=0)
+    assert t.passthrough_plan(blind) is None, 'une source non mesuree ne doit pas etre remuxee'
+    plan = t.passthrough_plan(dict(media, bitrate=300000, video_bitrate=0))
     assert plan and plan['copy_audio'], plan
     remux = root/'copy'; remux.mkdir()
     r = subprocess.run(t._command(source, media, 0, passthrough=plan), cwd=remux, capture_output=True, timeout=45)

@@ -1,121 +1,197 @@
 # Streamly
 
-Un lecteur IPTV auto-hébergé pour les connexions irrégulières et les forfaits
-facturés au volume. Le VPS transforme les sources Xtream en HLS multi-débits ;
-le navigateur choisit une qualité compatible avec le réseau **et** le mode choisi.
+**Votre IPTV, compressée et adaptée à votre connexion.**
 
-## Lecture
+Streamly est un serveur auto-hébergé qui se place entre votre abonnement IPTV
+(Xtream Codes ou M3U) et vos écrans. Il recompresse le direct à la demande en
+HLS multi-débits : le lecteur choisit la qualité que la connexion supporte, et
+un match qui pesait 3 Go/h n'en pèse plus que 0,2 à 0,7.
 
-- **Économie / Équilibré / Sport / Budget** : plafonds servis dans la playlist,
-  y compris sur Safari natif. Le mode Budget réserve un volume pour une séance
-  et refuse les nouveaux segments lorsque ce volume est atteint.
-- **Direct réactif / Connexion instable** : objectifs de retard de 6 / 30 secondes,
-  réserve client de 18 / 45 secondes et fenêtre serveur d'au moins 72 secondes.
-  Ce sont des réglages, pas une garantie de continuité pendant toute coupure.
-- Comptage des octets vidéo servis, estimation Mo/h, réserve et interruptions.
-  Le compteur opérateur inclut d'autres données et peut différer ; le budget
-  réserve 3 % de marge et compte conservativement les envois commencés.
-- Cadence source sondée et conservée jusqu'à 60 images/s, images clés alignées
-  dans le temps, pas d'agrandissement artificiel de la définition.
-- Surveillance des nouveaux segments, même si FFmpeg est encore vivant.
-  Une bascule crée une génération de fichiers distincte ; le lecteur la recharge.
-  Les sources récemment défaillantes sont dépriorisées pendant deux minutes.
+Il a été pensé pour les connexions irrégulières et les forfaits facturés au
+volume. Vous apportez votre abonnement ; Streamly ne fournit, ne référence et ne
+préconfigure aucun contenu.
 
-## Plusieurs appareils
+```
+abonnement IPTV ──▶ Streamly (FFmpeg, à la demande) ──▶ interface web
+   2,5–4 Go/h         720p · 480p · 360p · 240p      ├─▶ TiviMate, Smarters, VLC…
+                                                     └─▶ application (API de relais)
+```
 
-Une même chaîne partage son encodage. Chaque lecture a son ticket, son budget
-et son arrêt indépendant. Des chaînes différentes peuvent tourner dans les
-limites `max_concurrent_streams` et `providers[].max_connections`.
-Les préparations de films utilisent ces mêmes réservations.
+## Ce que fait Streamly
 
-Ne déclarez pas plus de connexions que votre abonnement n'en autorise.
-Le défaut est deux traitements globaux et une connexion par provider ; ajustez
-la capacité après mesure sur votre VPS. Les sessions de lecture sans requête
-vidéo pendant trois minutes sont libérées.
+**Compression adaptative**
+- Échelle 720p / 480p / 360p / 240p en H.264 + AAC, segments de 2 s, qualité
+  constante plafonnée (CRF) : un plateau de JT consomme moins qu'un match.
+- Seuls les barreaux que le mode autorise sont encodés : le 720p, qui pèse près
+  de la moitié du processeur, n'est pas calculé pour un spectateur en Économie.
+- Modes **Économie** (360p max), **Équilibré** (480p), **Sport** (720p),
+  **Audio seul**, et **Budget** : « 800 Mo pour ce match de 2 h », avec compteur
+  et arrêt à l'épuisement.
+- Une source déjà plus légère que le barreau visé est recopiée sans réencodage.
+- Bascule automatique sur une source de secours quand un flux se fige ; une même
+  chaîne regardée sur plusieurs écrans ne s'encode qu'une fois.
 
-## Films
+**Interface web façon lecteur TV**
+- Rail de navigation, catégories, chaînes numérotées avec le programme en cours,
+  lecteur toujours visible avec « maintenant / ensuite » ; grilles d'affiches
+  pour les films et les séries ; pilotable au clavier et à la télécommande.
+- Écrans explicites plutôt qu'une image figée : préparation (avec le débit
+  mesuré de votre connexion), reprise du direct, connexion trop lente pour la
+  qualité en cours, connexion interrompue, chaîne indisponible chez le
+  fournisseur.
+- Favoris, récents, recherche, PWA installable, mini-lecteur, plein écran.
+- Films et épisodes préparés sur le serveur en version légère (choix de la
+  qualité, de l'audio et des sous-titres texte), lisibles ou téléchargeables
+  avec reprise.
 
-Choisir un film ouvre une fiche avec poids source estimé et qualité à préparer.
-Le VPS prépare des MP4 H.264/AAC et des variantes HLS ; aucun téléchargement
-complet du film source n'est nécessaire sur le téléphone.
+**Vos lecteurs habituels**
+- Streamly se présente comme un panel **Xtream Codes** et comme un lien **M3U** :
+  TiviMate, IPTV Smarters, VLC… reçoivent le flux compressé et adaptatif, avec
+  guide des programmes (XMLTV réduit et mis en cache, `get_short_epg`).
+- L'encodage ne démarre qu'à l'ouverture réelle d'une chaîne : lister ou survoler
+  le bouquet ne coûte rien, ni au serveur ni à l'abonnement.
+- Pendant le démarrage de l'encodeur, le lecteur reçoit un court écran d'attente,
+  puis le direct, sans rupture de numérotation. Détails : [`docs/facade-lecteur.md`](docs/facade-lecteur.md).
 
-- Préparation explicite en arrière-plan, progression et résultat persistants.
-- Choix de l'audio et des sous-titres **texte** disponibles (les sous-titres image
-  ne sont pas convertis).
-- Lecture adaptative lorsque la préparation est terminée ; reprise locale de
-  la dernière position.
-- Téléchargement MP4 avec HTTP Range : un client compatible peut reprendre
-  son téléchargement. La reprise dépend du navigateur/gestionnaire utilisé.
-- Cache plafonné à 8 Go par défaut, garde de disque libre et limite de quatre
-  heures par commande. Les anciens résultats sont nettoyés lors d'une nouvelle
-  préparation après sept jours sans accès (les accès sont mémorisés en RAM).
+**API de relais pour une application**
+- Une application qui garde la playlist sur l'appareil peut confier un flux à
+  compresser : association par code à usage unique, jeton d'appareil, droits
+  minimaux. Contrat : [`docs/api-moteur.md`](docs/api-moteur.md).
 
-La préparation peut être longue sur un petit VPS. La lecture VOD directe de la
-version précédente est remplacée par ce parcours pour garantir un format léger
-et compatible. Les séries ne font pas encore partie du catalogue.
+## Démarrage rapide
 
-## Bibliothèque et interface
-
-Interface responsive, commandes vidéo natives, plein écran et mini-lecteur si
-le navigateur le propose, favoris, récents, recherche annulable et pagination
-par 48 éléments. Le catalogue reste en SQLite sur le serveur. Les métadonnées
-VOD survivent aux synchronisations. Une migration conserve les caractères non
-latins dans l'identification des chaînes ; d'anciens favoris devenus ambigus
-peuvent devoir être recréés.
-
-hls.js 1.5.17 est distribué localement dans `web/vendor`, avec sa licence Apache
-2.0. L'ouverture de l'app ne dépend plus d'un CDN JavaScript.
-
-## Installation
-
-Python **3.10+**, FFmpeg et ffprobe sont requis. Bibliothèque standard Python,
-sans service de base de données externe.
+Prérequis : **Python 3.10+**, **FFmpeg** et **ffprobe**. Aucune dépendance Python
+hors bibliothèque standard, aucune base de données externe (SQLite intégré).
 
 ```sh
-cd server
-cp config.example.json config.json
-# Renseigner les providers, puis :
+git clone https://github.com/dione24/streamly.git
+cd streamly/server
 python3 run.py
 ```
 
-L'installation historique dans `/opt/streamly` utilise un service systemd.
-Ne remplacez jamais `server/config.json` ou `server/data` lors d'une mise à jour.
-Le script `deploy/install.sh` est destiné à une première installation.
+Au premier lancement, `config.json` est créé et un **jeton administrateur**
+s'affiche dans le terminal. Ouvrez `http://localhost:8088`, connectez-vous avec
+ce jeton, puis dans **Réglages** : ajoutez votre abonnement et lancez la
+synchronisation. Les identifiants pour vos lecteurs externes sont dans
+**Réglages → Lecteur externe**.
 
-## Accès et HTTPS
+Pour essayer l'interface sans abonnement : `python3 tests/preview.py`
+(catalogue fictif, jeton `preview-only`, usage local uniquement).
 
-Le jeton principal ouvre une session **administrateur**. Le jeton lecture seule
-est accessible dans Réglages et ne peut pas modifier les abonnements.
-Les sessions utilisent un cookie HttpOnly / SameSite=Strict, expirent après
-sept jours et sont invalidées au redémarrage du serveur. Les URLs live portent
-un ticket de lecture, jamais le jeton administrateur. Les journaux HTTP masquent
-les tickets. `config.json` est privé et exclu du dépôt.
-
-**Sans domaine, l'installation actuelle reste en HTTP et les échanges ne sont
-pas chiffrés.** Le modèle Apache `deploy/apache-streamly.conf.example` prépare
-l'ajout de HTTPS sans remplacer les autres virtual hosts. Ne l'activez qu'après
-configuration du domaine et d'un certificat valide ; activez alors
-`secure_cookies` et limitez l'écoute du backend à `127.0.0.1`.
-
-Le passage par un VPS ne garantit pas de supprimer les blocages opérateur.
-
-## Vérification
+## Installation sur un serveur
 
 ```sh
-python3 -m unittest discover -s tests -v
-python3 tests/media_smoke.py
+sudo ./deploy/install.sh              # /opt/streamly + service systemd
+sudo ./deploy/https-site.sh tv.exemple.fr 8088   # Apache + certificat Let's Encrypt
+```
+
+- **HTTPS est indispensable dès que le serveur est joignable d'Internet** : les
+  lecteurs externes envoient leurs identifiants dans l'URL. Derrière le proxy,
+  mettez `listen_host` à `127.0.0.1` et `secure_cookies` à `true`.
+- `https-site.sh` n'ajoute qu'un site Apache et vérifie la syntaxe avant de
+  recharger : les sites existants ne sont pas touchés.
+- Une mise à jour ne doit jamais remplacer `server/config.json` ni `server/data`.
+
+**Plusieurs personnes sur une même machine** — chaque abonnement doit avoir son
+instance : dans une même instance, deux abonnements se servent de secours l'un à
+l'autre.
+
+```sh
+sudo ./deploy/instance.sh alice 8089   # /opt/streamly-alice, service streamly@alice
+sudo ./deploy/https-site.sh alice.exemple.fr 8089
+```
+
+Les instances partagent une tranche de processeur bornée (systemd) et peuvent
+être limitées en qualité avec `max_mode`.
+
+**Dimensionnement.** Le coût suit les lectures simultanées, pas le nombre de
+comptes : environ 1,15 cœur pour une chaîne en Sport (quatre barreaux depuis du
+720p), moins en Équilibré et en Économie. Mesurez sur votre machine et vos
+sources avant de promettre une capacité.
+
+## Configuration
+
+Tout est dans `server/config.json` (privé, `chmod 600`, exclu du dépôt) ;
+[`server/config.example.json`](server/config.example.json) documente chaque clé.
+Les principales :
+
+| Clé | Rôle |
+|---|---|
+| `providers` | Abonnements Xtream ou M3U, avec `max_connections` (ne déclarez pas plus que ce que l'abonnement autorise). |
+| `max_concurrent_streams` | Encodages simultanés, films en préparation compris. |
+| `ladder`, `crf`, `x264_preset` | Échelle de qualités et réglage de l'encodeur. |
+| `max_mode` | Borne de qualité de l'instance (`eco`, `balanced`, `sport`). |
+| `players` | Comptes des lecteurs externes et leur mode. |
+| `public_url`, `trust_proxy`, `secure_cookies`, `listen_host` | Publication derrière un proxy HTTPS. |
+| `epg_refresh_hours` | Fréquence de reconstruction du guide des programmes. |
+| `relay_allow_private` | Autorise l'application à faire compresser une source du réseau local (moteur domestique uniquement). |
+
+## Sécurité
+
+- Le jeton principal ouvre une session **administrateur** ; un jeton en lecture
+  seule et des comptes `users` (mots de passe en PBKDF2, `deploy/adduser.py`)
+  existent. Sessions par cookie HttpOnly / SameSite=Strict, sept jours.
+- Les lecteurs externes ont des identifiants distincts du jeton administrateur ;
+  les flux portent un ticket de lecture éphémère, jamais ce jeton.
+- Dix tentatives manquées en cinq minutes bloquent une adresse ; derrière un
+  proxy local, l'adresse réelle du client est prise en compte.
+- Les journaux masquent tickets, mots de passe et identifiants d'abonnement.
+  Aucune URL ni identifiant du fournisseur ne sort dans les playlists servies.
+- Tout ce qui va chercher une adresse venue de l'extérieur (relais, logos)
+  refuse les adresses privées et locales, redirections comprises.
+
+Une faille ? Merci de la signaler en privé au mainteneur (onglet *Security* du
+dépôt s'il est activé) plutôt que dans une issue publique.
+
+## Développement
+
+```sh
+python3 -m unittest discover -s tests -v   # près de cent tests, sans réseau
+python3 tests/media_smoke.py               # FFmpeg réel : échelle HLS et film préparé
 node --check web/app.js
 ```
 
-Le test média génère une vidéo synthétique à 50 images/s et vérifie les quatre
-variantes HLS, l'alignement des segments et la préparation VOD H.264/AAC.
-`tests/preview.py` lance une interface locale avec un catalogue fictif, sans
-accès aux abonnements (jeton `preview-only`, usage local uniquement).
+```
+server/streamly/   app.py (HTTP, API)   transcoder.py (FFmpeg, tickets, bascules)
+                   player.py (façade Xtream/M3U)   epg.py   relay.py   logos.py
+                   catalog.py (SQLite)   vod.py (films)   xtream.py · m3u.py (sources)
+web/               interface sans framework ni étape de build ; hls.js embarqué
+deploy/            installation, instances, HTTPS
+docs/              conception, contrat de l'API, mesures
+tests/
+```
 
-Les anciennes mesures de Claude sont conservées dans `docs/mesures.md` à titre
-historique : elles ne prouvent pas les performances de cette version. Mesurer
-sur les sources et appareils réels avant d'annoncer une économie ou un délai.
+Le code et ses commentaires sont en français. Les contributions sont
+bienvenues ; les plus utiles aujourd'hui :
+
+- essais avec de vrais lecteurs (TiviMate, Smarters, Apple TV) et retours précis ;
+- encodage matériel (VAAPI, QSV, NVENC, VideoToolbox) ;
+- image Docker ; segments fMP4 ; grille horaire complète du guide ;
+- l'application mobile décrite dans [`docs/app-v1-spec.md`](docs/app-v1-spec.md)
+  (modèle : [`docs/produit-hybride.md`](docs/produit-hybride.md)).
+
+Toute modification du serveur vient avec son test ; ne promettez dans la
+documentation que ce qui a été mesuré ([`docs/mesures.md`](docs/mesures.md)).
+
+## Limites connues
+
+- Démarrage d'une chaîne : 3 à 11 s selon la source (l'écran d'attente le couvre).
+- Le relais et les lecteurs externes servent le direct ; films et séries passent
+  par l'interface web.
+- Le mode Budget n'existe que dans l'interface web et l'API : un lecteur tiers ne
+  sait pas afficher un compteur.
+- Certains fournisseurs refusent les connexions venant d'un centre de données.
+- Passer par un serveur ne garantit pas de contourner un blocage opérateur.
+
+## Cadre d'usage
+
+Streamly est un outil personnel : il relaie **votre** abonnement vers **vos**
+écrans. Vous êtes responsable du respect des conditions de votre fournisseur et
+du droit applicable. Ne partagez pas un abonnement entre des personnes qui n'y
+ont pas droit, et ne fusionnez jamais les abonnements de personnes différentes
+dans une même instance.
 
 ## Licence
 
-MIT, voir [LICENSE](LICENSE). hls.js conserve sa propre licence.
+MIT, voir [LICENSE](LICENSE). hls.js (`web/vendor`) est distribué sous sa propre
+licence Apache 2.0.
