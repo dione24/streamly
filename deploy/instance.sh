@@ -38,7 +38,9 @@ root, port = sys.argv[1], int(sys.argv[2])
 cfg = json.load(open(os.path.join(root, 'config.example.json'), encoding='utf-8'))
 cfg = {k: v for k, v in cfg.items() if not k.startswith('_comment')}
 # Aucun abonnement au depart : son proprietaire l'ajoute depuis Reglages.
-cfg.update(listen_host='0.0.0.0', listen_port=port, providers=[], users=[],
+# Ecoute locale seulement : l'instance se publie en HTTPS avec https-site.sh.
+# Exposee en clair, elle laisserait passer mots de passe et jetons sur le reseau.
+cfg.update(listen_host='127.0.0.1', secure_cookies=True, listen_port=port, providers=[], users=[],
            token=secrets.token_urlsafe(24), max_concurrent_streams=1, max_mode='balanced')
 path = os.path.join(root, 'config.json')
 with open(path, 'w', encoding='utf-8') as fh:
@@ -82,7 +84,7 @@ systemctl enable "streamly@$NAME" >/dev/null 2>&1
 systemctl restart "streamly@$NAME"
 
 sleep 3
-systemctl is-active "streamly@$NAME" >/dev/null && echo "==> Instance $NAME active sur le port $PORT"
+systemctl is-active "streamly@$NAME" >/dev/null && echo "==> Instance $NAME active sur 127.0.0.1:$PORT — publiez-la avec deploy/https-site.sh"
 python3 - "$DEST/server/config.json" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1], encoding='utf-8'))
