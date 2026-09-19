@@ -64,8 +64,7 @@ Différence Streamly : bascule « Économie de données » (automatique en donn�
 | 0. Bêta amis (en cours) | Mesurer charge réelle, pannes, usages sur les 4 instances | — |
 | 1. Relais moteur — **fait** | `/api/pair`, `/api/relay`, garde-fous, tests ; validé en local sur un flux public (360p + 240p, compteur d'octets) | — |
 | 2. Moteur installable | Image Docker, service, doc d'installation, accès distant | 1 |
-| 3. App v0 | Playlist, liste, lecture directe + bascule relais, sur une plateforme | choix de plateforme, 1 |
-| 4. App v1 | Guide, favoris, recherche, mode Budget, TV | 3 |
+| 3-4. App V1 complète | Spécification : `docs/app-v1-spec.md` ; contrat du moteur : `docs/api-moteur.md`. Dix jalons, du socle au premium. | 1 |
 | 5. Premium | Achat intégré, cloud optionnel, encodage matériel | 4 |
 
 ## Décisions prises (2026-09-19)
