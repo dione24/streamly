@@ -76,5 +76,11 @@
   "stall_timeout_seconds": 20,
   "vod_cache_bytes": 8000000000,
   "secure_cookies": false,
+  "_comment_players": "Comptes des lecteurs externes (TiviMate, Smarters, VLC) : hote Streamly + identifiant + mot de passe, ou le lien get.php. Distincts du jeton admin. Un mot de passe vide est genere au demarrage. mode = eco, balanced ou sport : plafond des qualites proposees au lecteur, qui choisit ensuite selon sa connexion.",
+  "players": [
+    {"username": "streamly", "password": "", "mode": "balanced"}
+  ],
+  "_comment_public_url": "Adresse publique vue par les lecteurs (ex. https://tv.exemple.fr). Vide = deduite de la requete.",
+  "public_url": "",
   "_comment_capacity": "Limite globale de traitements (direct + preparation). Respecte aussi max_connections par provider."
 }

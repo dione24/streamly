@@ -74,6 +74,34 @@ class Sessions:
             self.items[sid] = {'role': role, 'expires': now + 7 * 86400}
             return sid, role
 
+    def player(self, username, password, address):
+        """Compte d'un lecteur externe, ou None.
+
+        TiviMate ou VLC n'ont pas de cookie : ils renvoient leurs
+        identifiants a chaque requete, segments compris. Pas de PBKDF2 ici,
+        il couterait 200 000 iterations toutes les deux secondes ; une
+        comparaison a temps constant et la meme limite de tentatives que la
+        connexion web.
+        """
+        now = time.time()
+        given = (str(username or '').encode('utf-8'), str(password or '').encode('utf-8'))
+        with self.lock:
+            self.attempts = {k: v for k, v in self.attempts.items() if now - v[1] < 300}
+            count, since = self.attempts.get(address, (0, now))
+            if count >= 10:
+                return None
+            found = None
+            for p in self.cfg.get('players', []):
+                name_ok = hmac.compare_digest(str(p.get('username') or '').encode('utf-8'), given[0])
+                pass_ok = hmac.compare_digest(str(p.get('password') or '').encode('utf-8'), given[1])
+                if name_ok and pass_ok and p.get('password') and found is None:
+                    found = p
+            if found is None:
+                self.attempts[address] = (count + 1, since)
+                return None
+            self.attempts.pop(address, None)
+            return dict(found)
+
     def get(self, cookie):
         try:
             parsed = SimpleCookie(cookie or '')

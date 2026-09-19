@@ -1,15 +1,19 @@
 # Template only. Replace the hostname and certificate paths before enabling.
-# Keep existing Apache virtual hosts. Enable proxy and proxy_http modules.
+# Keep existing Apache virtual hosts. Enable proxy, proxy_http and headers modules.
 <VirtualHost *:443>
     ServerName streamly.example.com
     SSLEngine on
     SSLCertificateFile /etc/letsencrypt/live/streamly.example.com/fullchain.pem
     SSLCertificateKeyFile /etc/letsencrypt/live/streamly.example.com/privkey.pem
     ProxyPreserveHost On
+    # Lets Streamly write https:// links in the M3U given to external players
+    # (requires mod_headers).
+    RequestHeader set X-Forwarded-Proto "https"
     ProxyTimeout 60
     ProxyPass / http://127.0.0.1:8088/ connectiontimeout=5 timeout=60
     ProxyPassReverse / http://127.0.0.1:8088/
-    # Do not log bearer playback tickets from URL paths.
+    # Do not log bearer playback tickets or player passwords from URL paths
+    # and query strings: never add %U or %q to this format.
     CustomLog /var/log/apache2/streamly-access.log "%h %t %m %>s %b"
     ErrorLog /var/log/apache2/streamly-error.log
 </VirtualHost>

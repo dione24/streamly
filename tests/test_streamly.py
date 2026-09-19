@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import os
@@ -18,11 +19,30 @@ from streamly.catalog import Catalog
 from streamly.xtream import parse_name, parse_series_info
 from streamly import m3u
 from streamly import app, config
+from streamly import player as playermod
 from streamly.vod import Movies
 
 CFG = json.loads((pathlib.Path(__file__).resolve().parents[1] / 'server/config.example.json').read_text())
 CFG.update(token='test-admin', viewer_token='test-viewer', max_concurrent_streams=2,
-           providers=[dict(id='p', name='Test', host='http://example.invalid', username='u', password='p', max_connections=2)])
+           providers=[dict(id='p', name='Test', host='http://example.invalid', username='u', password='p', max_connections=2)],
+           players=[dict(username='tv', password='salon2024xyz', mode='eco')])
+
+LIVE = [
+    {'stream_id': 1, 'name': 'FR| TF1 HD', 'category_id': 1, 'stream_icon': 'http://img/tf1.png', 'epg_channel_id': 'tf1.fr'},
+    {'stream_id': 2, 'name': 'FR| TF1 FHD', 'category_id': 1},
+    {'stream_id': 3, 'name': 'FR| TF1 [BK]', 'category_id': 1},
+    {'stream_id': 4, 'name': 'FR| M6 HD', 'category_id': 1},
+    {'stream_id': 5, 'name': 'EN| BBC One', 'category_id': 2},
+    {'stream_id': 6, 'name': 'AR| MBC 1', 'category_id': 9},
+]
+
+
+def seed_live(catalog, streams=LIVE):
+    client = Mock()
+    client.live_streams.return_value = streams
+    client.live_categories.return_value = [{'category_id': 1, 'category_name': 'France'},
+                                           {'category_id': 2, 'category_name': 'UK "News"'}]
+    catalog.sync_provider({'id': 'p'}, client, lambda _: None)
 
 class WorkerTests(unittest.TestCase):
     def setUp(self):
@@ -123,6 +143,46 @@ class WorkerTests(unittest.TestCase):
             self.assertNotIn('SECRETPASS', t.probe_last_error('k') or '')
         finally:
             t.close()
+
+class LiveEngineTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.t = Transcoder(CFG, self.tmp.name + '/hls', self.tmp.name + '/logs', monitor=False)
+        patch.object(self.t, '_spawn').start()
+    def tearDown(self):
+        self.t.close(); patch.stopall(); self.tmp.cleanup()
+    def test_each_generation_numbers_segments_after_the_previous(self):
+        media = {'width': 1280, 'height': 720, 'fps': 25, 'streams': [{'codec_type': 'audio'}]}
+        for cmd in (self.t._command('http://s', media, 0, start_number=7), self.t._command('http://s', media, 1, audio_only=True, start_number=7),
+                    self.t._command('http://s', media, 2, passthrough={'audio': True, 'copy_audio': True}, start_number=7)):
+            self.assertEqual(cmd[cmd.index('-start_number') + 1], '7')
+            self.assertLess(cmd.index('-start_number'), cmd.index('-hls_segment_filename'))
+        outdir = pathlib.Path(self.tmp.name, 'seq'); outdir.mkdir()
+        self.assertLess(abs(Transcoder._next_sequence(str(outdir), 0) - time.time()), 5)
+        (outdir / 'g0_s_2.m3u8').write_text('#EXTM3U\n#EXTINF:2,\ng0_2_100.ts\n#EXTINF:2,\ng0_2_101.ts\n')
+        (outdir / 'g0_s_3.m3u8').write_text('#EXTM3U\n#EXTINF:2,\ng0_3_100.ts\n')
+        # Le plus avance des barreaux fixe la suite : jamais de numero reutilise.
+        self.assertEqual(Transcoder._next_sequence(str(outdir), 1), 102)
+    def test_failed_channel_restarts_when_nobody_else_watches(self):
+        self.t.open('a', 'one', [{'provider': 'p', 'url': 'http://source'}])
+        self.t.workers[next(iter(self.t.workers))]['state'] = 'failed'
+        self.t.open('a', 'one', [{'provider': 'p', 'url': 'http://source'}])
+        self.assertEqual(next(iter(self.t.workers.values()))['state'], 'starting')
+        self.assertEqual(len(self.t.tickets), 1)
+        # Un autre spectateur la regarde encore : on ne coupe pas sa lecture.
+        self.t.open('b', 'one', [{'provider': 'p', 'url': 'http://source'}])
+        self.t.workers[next(iter(self.t.workers))]['state'] = 'failed'
+        with self.assertRaises(CapacityError):
+            self.t.open('a', 'one', [{'provider': 'p', 'url': 'http://source'}])
+    def test_player_tickets_expire_sooner(self):
+        ticket = self.t.open('player:tv', 'one', [{'provider': 'p', 'url': 'http://source'}], idle=45)
+        self.t.tickets[ticket]['last'] -= 60
+        self.assertIsNone(self.t.ticket(ticket))
+    def test_preview_master_matches_the_encoded_ladder(self):
+        body = self.t.preview_master(650000, lambda i: '42/%d.m3u8' % i)
+        self.assertEqual([l for l in body.splitlines() if not l.startswith('#')], ['42/2.m3u8', '42/3.m3u8'])
+        self.assertNotIn('42/0.m3u8', self.t.preview_master(1150000, lambda i: '42/%d.m3u8' % i))
+
 
 class PassthroughTests(unittest.TestCase):
     """Remux : une source deja conforme ne doit plus passer par x264."""
@@ -322,6 +382,71 @@ class CatalogTests(unittest.TestCase):
         t = threading.Thread(target=capture); t.start(); t.join()
         self.assertIsNot(self.cat._db, connections[0])
 
+class PlayerIndexTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.cat = Catalog(self.tmp.name + '/catalog.db')
+        self.facade = playermod.PlayerFacade(self.cat)
+    def tearDown(self): self.cat.close(); self.tmp.cleanup()
+    def test_one_entry_per_channel_without_backups(self):
+        seed_live(self.cat)
+        names = sorted(c['name'] for c in self.facade.index()[0])
+        # TF1 HD, FHD et [BK] ne font qu'une chaine : la source est choisie a l'ouverture.
+        self.assertEqual(names, ['AR| MBC 1', 'EN| BBC One', 'FR| M6', 'FR| TF1'])
+    def test_ids_are_stable_and_follow_a_resync(self):
+        seed_live(self.cat)
+        before = {c['name']: c['id'] for c in self.facade.index()[0]}
+        self.assertTrue(all(0 < i <= 0x7FFFFFFF for i in before.values()))
+        seed_live(self.cat, LIVE + [{'stream_id': 7, 'name': 'FR| ARTE', 'category_id': 1}])
+        after = {c['name']: c['id'] for c in self.facade.index()[0]}
+        self.assertIn('FR| ARTE', after)
+        self.assertEqual({k: after[k] for k in before}, before)
+        self.assertEqual(self.facade.channel(before['FR| TF1'])['canonical'], 'TF1')
+    def test_hash_collisions_never_share_an_id(self):
+        seed_live(self.cat)
+        with patch.object(playermod, 'stream_id', return_value=42), \
+             patch.object(playermod, 'category_id', return_value=7):
+            self.facade.invalidate()
+            channels, by_id, categories = self.facade.index()
+        self.assertEqual(len(by_id), 4)
+        self.assertEqual(len({c['id'] for c in categories}), len(categories))
+    def test_uncategorized_channels_are_grouped(self):
+        seed_live(self.cat)
+        mbc = next(c for c in self.facade.index()[0] if c['canonical'] == 'MBC 1')
+        self.assertEqual(mbc['category'], playermod.UNCATEGORIZED)
+    def test_whole_bouquet_is_fast(self):
+        seed_live(self.cat, [{'stream_id': i, 'name': 'FR| CANAL X%05d HD' % i, 'category_id': i % 40}
+                             for i in range(1, 20001)])
+        started = time.time()
+        body = self.facade.m3u({'username': 'tv', 'password': 'pw'}, 'http://h')
+        self.assertLess(time.time() - started, 3)
+        self.assertEqual(body.count('#EXTINF'), 20000)
+
+
+class PlayerAccountTests(unittest.TestCase):
+    def test_missing_passwords_are_generated_and_kept(self):
+        players, changed = config._players({'players': [{'username': 'tv', 'password': '', 'mode': 'x'}]})
+        self.assertTrue(changed)
+        self.assertEqual(len(players[0]['password']), 12)
+        self.assertTrue(set(players[0]['password']) <= set(config.PLAYER_ALPHABET))
+        self.assertEqual(players[0]['mode'], 'balanced')
+        again, changed = config._players({'players': players})
+        self.assertFalse(changed); self.assertEqual(again, players)
+        default, _ = config._players({})
+        self.assertEqual(default[0]['username'], 'streamly')
+    def test_player_check_is_rate_limited(self):
+        sessions = Sessions(dict(CFG))
+        self.assertEqual(sessions.player('tv', 'salon2024xyz', '1.2.3.4')['mode'], 'eco')
+        self.assertIsNone(sessions.player('tv', 'bad', '1.2.3.4'))
+        self.assertIsNone(sessions.player('tv', '', '1.2.3.4'))
+        # Le jeton admin n'ouvre pas la facade lecteur.
+        self.assertIsNone(sessions.player('tv', 'test-admin', '1.2.3.4'))
+        self.assertIsNone(sessions.player('tv', 'mot de passé', '1.2.3.4'))
+        for _ in range(10):
+            sessions.player('tv', 'bad', '5.6.7.8')
+        self.assertIsNone(sessions.player('tv', 'salon2024xyz', '5.6.7.8'))
+        self.assertIsNotNone(sessions.player('tv', 'salon2024xyz', '1.2.3.4'))
+
+
 class PlaylistTests(unittest.TestCase):
     """Lien M3U direct : une playlist doit s'importer comme un panel."""
     SAMPLE = """#EXTM3U
@@ -505,6 +630,7 @@ class HTTPTests(unittest.TestCase):
         state.transcoder = Transcoder(CFG, root + '/hls', root + '/logs', monitor=False)
         state.catalog = Catalog(root + '/catalog.db')
         state.movies = Movies(CFG, root + '/movies', state.catalog, state.transcoder)
+        state.player = playermod.PlayerFacade(state.catalog, state.transcoder)
         state.sync_log = []; self.state = app.STATE = state
         app.STATE.provider.side_effect = lambda pid: CFG['providers'][0] if pid == 'p' else None
         with patch('socket.getfqdn', return_value='localhost'):
@@ -558,5 +684,224 @@ class HTTPTests(unittest.TestCase):
     def test_credentials_redacted_from_log(self):
         self.request('/s/never-log-this-secret/master.m3u8')
         self.assertNotIn('never-log-this-secret', app.ACCESS_LOG[-1])
+        self.request('/get.php?username=tv&password=salon2024xyz')
+        self.request('/live/tv/salon2024xyz/12.m3u8')
+        self.assertFalse(any('salon2024xyz' in line for line in app.ACCESS_LOG[-2:]))
+
+    # ------------------------------------------------ lecteurs externes
+
+    def test_m3u_points_at_streamly_only(self):
+        seed_live(self.state.catalog)
+        with patch.object(self.state.transcoder, 'open') as opened:
+            self.assertEqual(self.request('/get.php?username=tv&password=nope').status, 401)
+            r = self.request('/get.php?username=tv&password=salon2024xyz&type=m3u_plus&output=ts',
+                             headers={'Host': 'tv.example:8088'})
+            body = r.read().decode()
+            head = self.request('/get.php?username=tv&password=salon2024xyz', headers={'Host': 'tv.example:8088'})
+        self.assertEqual(r.status, 200); self.assertEqual(head.status, 200)
+        self.assertTrue(body.startswith('#EXTM3U'))
+        tf1 = next(c for c in self.state.player.index()[0] if c['canonical'] == 'TF1')
+        self.assertIn('http://tv.example:8088/live/tv/salon2024xyz/%d.m3u8' % tf1['id'], body)
+        self.assertIn('group-title="UK \'News\'"', body)
+        # Ni le panel d'origine ni ses identifiants, et toujours du HLS.
+        self.assertNotIn('example.invalid', body); self.assertNotIn('/u/p/', body)
+        self.assertNotIn('.ts\n', body)
+        opened.assert_not_called()
+        with patch.object(app, 'GZIP_MIN_BYTES', 0):
+            packed = self.request('/get.php?username=tv&password=salon2024xyz', headers={'Host': 'tv.example:8088', 'Accept-Encoding': 'gzip'})
+        self.assertEqual(packed.headers['Content-Encoding'], 'gzip')
+        import gzip
+        self.assertEqual(gzip.decompress(packed.read()).decode(), body)
+    def test_xtream_api_contract(self):
+        seed_live(self.state.catalog)
+        refused = self.request('/player_api.php?username=tv&password=nope')
+        self.assertEqual(refused.status, 200)
+        self.assertEqual(json.loads(refused.read())['user_info']['auth'], 0)
+        account = json.loads(self.request('/player_api.php?username=tv&password=salon2024xyz',
+                                          headers={'Host': 'tv.example:8088'}).read())
+        self.assertEqual(account['user_info']['auth'], 1)
+        self.assertEqual(account['user_info']['allowed_output_formats'], ['m3u8'])
+        self.assertEqual((account['server_info']['url'], account['server_info']['port']), ('tv.example', '8088'))
+        cats = json.loads(self.request('/player_api.php?username=tv&password=salon2024xyz&action=get_live_categories').read())
+        self.assertEqual([c['category_name'] for c in cats], ['Autres', 'France', 'UK "News"'])
+        france = next(c['category_id'] for c in cats if c['category_name'] == 'France')
+        streams = json.loads(self.request('/player_api.php?username=tv&password=salon2024xyz'
+                                          '&action=get_live_streams&category_id=' + france).read())
+        self.assertEqual([s['name'] for s in streams], ['FR| M6', 'FR| TF1'])
+        self.assertTrue(all(s['direct_source'] == '' and isinstance(s['stream_id'], int) for s in streams))
+        self.assertEqual(json.loads(self.request('/player_api.php?username=tv&password=salon2024xyz'
+                                                 '&action=get_vod_streams').read()), [])
+        # Smarters poste un formulaire, sans Origin.
+        req = urllib.request.Request(self.url + '/player_api.php', b'username=tv&password=salon2024xyz&action=get_live_streams',
+                                     {'Content-Type': 'application/x-www-form-urlencoded'})
+        with urllib.request.urlopen(req, timeout=3) as posted:
+            self.assertEqual(len(json.loads(posted.read())), 4)
+        xml = self.request('/xmltv.php?username=tv&password=salon2024xyz')
+        self.assertEqual(xml.status, 200); self.assertIn(b'<tv', xml.read())
+    def test_forwarded_address_only_trusted_behind_local_proxy(self):
+        bad = lambda ip: self.request('/get.php?username=tv&password=nope', headers={'X-Forwarded-For': ip})
+        good = lambda ip: self.request('/get.php?username=tv&password=salon2024xyz', headers={'X-Forwarded-For': ip}).status
+        # Ecoute publique : l'en-tete est ignore, sinon il suffirait d'en
+        # changer pour contourner la limite de tentatives.
+        for n in range(10):
+            bad('10.0.0.%d' % n)
+        self.assertEqual(good('10.9.9.9'), 401)
+        self.state.sessions.attempts.clear()
+        # Derriere Apache : chaque client garde son propre compteur.
+        self.state.cfg['listen_host'] = '127.0.0.1'
+        for _ in range(10):
+            bad('10.0.0.1')
+        self.assertEqual(good('10.0.0.1'), 401)
+        self.assertEqual(good('10.0.0.2'), 200)
+    # ------------------------------------------------ direct lecteur
+
+    def raw(self, path, method='GET'):
+        conn = http.client.HTTPConnection('127.0.0.1', self.http.server_port, timeout=5)
+        conn.request(method, path)
+        response = conn.getresponse(); body = response.read(); conn.close()
+        return response.status, response.headers, body.decode()
+    def fake_ffmpeg(self, passthrough=False):
+        tc = self.state.transcoder
+        def spawn(key):
+            with tc._lock:
+                w = tc.workers.get(key)
+                if not w:
+                    return
+                if passthrough:
+                    w['passthrough'] = {'bitrate': 400000, 'measured': True, 'audio': True, 'copy_audio': True}
+                outdir = os.path.join(tc.hls_dir, key); os.makedirs(outdir, exist_ok=True)
+                gen, first = w['generation'], 1758000000 + 2 * w['generation']
+                for level in ([0] if passthrough else w['levels']):
+                    pathlib.Path(outdir, 'g%d_s_%d.m3u8' % (gen, level)).write_text(
+                        '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:%d\n'
+                        '#EXTINF:2.000000,\ng%d_%d_%d.ts\n#EXTINF:2.000000,\ng%d_%d_%d.ts\n'
+                        % (first, gen, level, first, gen, level, first + 1))
+                w['state'] = 'buffering'
+        patch.object(tc, '_spawn', side_effect=spawn).start()
+        patch.object(playermod, 'ZAP_SECONDS', 0).start()
+        self.state.candidate_urls.side_effect = lambda pid, sid: [{'provider': pid, 'url': 'http://src/%s' % sid}]
+        self.addCleanup(patch.stopall)
+        seed_live(self.state.catalog)
+        return {c['canonical']: c['id'] for c in self.state.player.index()[0]}
+    def test_master_is_synthetic_and_starts_nothing(self):
+        ids = self.fake_ffmpeg()
+        for method in ('HEAD', 'GET'):
+            status, headers, body = self.raw('/live/tv/salon2024xyz/%d.m3u8' % ids['TF1'], method)
+            self.assertEqual(status, 200)
+        # Mode eco : 360p et 240p seulement, adresses relatives sous l'id.
+        self.assertEqual([l for l in body.splitlines() if not l.startswith('#')],
+                         ['%d/2.m3u8' % ids['TF1'], '%d/3.m3u8' % ids['TF1']])
+        self.assertEqual(self.raw('/live/tv/salon2024xyz/%d/2.m3u8' % ids['TF1'], 'HEAD')[0], 200)
+        self.assertEqual(self.state.transcoder.workers, {})
+        status, headers, _ = self.raw('/live/tv/salon2024xyz/%d.ts' % ids['TF1'])
+        self.assertEqual((status, headers['Location']), (302, '/live/tv/salon2024xyz/%d.m3u8' % ids['TF1']))
+        self.assertEqual(self.raw('/live/tv/nope/%d.m3u8' % ids['TF1'])[0], 401)
+        self.assertEqual(self.raw('/live/tv/salon2024xyz/12345.m3u8')[0], 404)
+    def test_level_playlist_opens_once_and_points_at_tickets(self):
+        ids = self.fake_ffmpeg()
+        base = '/live/tv/salon2024xyz/%d' % ids['TF1']
+        self.raw(base + '.m3u8')
+        status, _, body = self.raw(base + '/2.m3u8')
+        self.assertEqual(status, 200)
+        ticket = next(iter(self.state.transcoder.tickets))
+        self.assertIn('/s/%s/g0_2_1758000000.ts' % ticket, body)
+        self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:0', body)
+        # Rafraichissements et changement de niveau : meme ticket, meme worker.
+        self.assertEqual(self.raw(base + '/2.m3u8')[0], 200); self.assertEqual(self.raw(base + '/3.m3u8')[0], 200)
+        self.assertEqual(len(self.state.transcoder.tickets), 1)
+        self.assertEqual(self.state.transcoder._spawn.call_count, 1)
+        ticket_row = self.state.transcoder.tickets[ticket]
+        self.assertEqual((ticket_row['owner'], ticket_row['ceiling'], ticket_row['idle']), ('player:tv', 650000, 45))
+        # Au-dessus du plafond du compte : refuse, sans rien ouvrir.
+        self.assertEqual(self.raw(base + '/0.m3u8')[0], 404)
+    def test_two_devices_never_fight_over_the_account(self):
+        ids = self.fake_ffmpeg()
+        tf1, m6 = '/live/tv/salon2024xyz/%d' % ids['TF1'], '/live/tv/salon2024xyz/%d' % ids['M6']
+        self.raw(tf1 + '.m3u8'); self.assertEqual(self.raw(tf1 + '/2.m3u8')[0], 200)
+        self.raw(m6 + '.m3u8'); self.assertEqual(self.raw(m6 + '/2.m3u8')[0], 200)
+        # Le premier appareil rafraichit TF1 : il est evince, il ne reprend pas.
+        for _ in range(3):
+            self.assertEqual(self.raw(tf1 + '/2.m3u8')[0], 410)
+            self.assertEqual(self.raw(m6 + '/2.m3u8')[0], 200)
+        self.assertEqual(self.state.transcoder._spawn.call_count, 2)
+        self.assertEqual(len(self.state.transcoder.workers), 1)
+        # Il redemande explicitement la chaine : la c'est un vrai zap.
+        self.raw(tf1 + '.m3u8'); self.assertEqual(self.raw(tf1 + '/2.m3u8')[0], 200)
+        self.assertEqual(self.raw(m6 + '/2.m3u8')[0], 410)
+    def test_quick_zapping_only_encodes_the_last_channel(self):
+        ids = self.fake_ffmpeg()
+        patch.object(playermod, 'ZAP_SECONDS', 0.3).start()
+        tf1, m6 = '/live/tv/salon2024xyz/%d' % ids['TF1'], '/live/tv/salon2024xyz/%d' % ids['M6']
+        self.raw(tf1 + '.m3u8')
+        results = {}
+        first = threading.Thread(target=lambda: results.setdefault('tf1', self.raw(tf1 + '/2.m3u8')[0])); first.start()
+        time.sleep(.1); self.raw(m6 + '.m3u8'); first.join()
+        self.assertEqual(results['tf1'], 410)
+        self.assertEqual(self.raw(m6 + '/2.m3u8')[0], 200)
+        self.assertEqual(self.state.transcoder._spawn.call_count, 1)
+    def test_paused_player_resumes_after_expiry(self):
+        ids = self.fake_ffmpeg()
+        base = '/live/tv/salon2024xyz/%d' % ids['TF1']
+        self.raw(base + '.m3u8'); self.raw(base + '/2.m3u8')
+        for t in self.state.transcoder.tickets.values():
+            t['last'] -= 60
+        # Plus aucune lecture sur le compte : la reprise n'evince personne.
+        self.assertEqual(self.raw(base + '/2.m3u8')[0], 200)
+    def test_remuxed_channel_serves_its_single_variant(self):
+        ids = self.fake_ffmpeg(passthrough=True)
+        base = '/live/tv/salon2024xyz/%d' % ids['TF1']
+        self.raw(base + '.m3u8')
+        status, _, body = self.raw(base + '/3.m3u8')
+        self.assertEqual(status, 200); self.assertIn('g0_0_1758000000.ts', body)
+    def test_new_generation_is_flagged_as_a_discontinuity(self):
+        ids = self.fake_ffmpeg()
+        base = '/live/tv/salon2024xyz/%d' % ids['TF1']
+        self.raw(base + '.m3u8'); self.raw(base + '/2.m3u8')
+        tc = self.state.transcoder
+        with tc._lock:
+            w = next(iter(tc.workers.values())); w['generation'] = 1
+        tc._spawn.side_effect(w['key'])
+        status, _, body = self.raw(base + '/2.m3u8')
+        uris = [l.rsplit('/', 1)[-1] for l in body.splitlines() if not l.startswith('#')]
+        # La fin de l'ancienne generation, une discontinuite, puis la nouvelle,
+        # numerotees a la suite : le lecteur franchit la bascule sans se figer.
+        self.assertEqual(uris, ['g0_2_1758000000.ts', 'g0_2_1758000001.ts', 'g1_2_1758000002.ts', 'g1_2_1758000003.ts'])
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:1758000000', body)
+        self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:0', body)
+        self.assertEqual(body.splitlines()[body.splitlines().index('#EXT-X-DISCONTINUITY') + 2].rsplit('/', 1)[-1], 'g1_2_1758000002.ts')
+        # Une fois la nouvelle generation assez longue, l'ancienne sort de la fenetre.
+        with patch.object(app, 'LIVE_OVERLAP_SEGMENTS', 2):
+            body = self.raw(base + '/2.m3u8')[2]
+        self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:1', body); self.assertNotIn('g0_2_', body)
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:1758000002', body)
+    def test_full_server_answers_503_to_players(self):
+        ids = self.fake_ffmpeg()
+        with patch.dict(self.state.transcoder.cfg, {'max_concurrent_streams': 1}):
+            self.state.transcoder.open('web-session', 'EN|BBC ONE', [{'provider': 'p', 'url': 'http://x'}])
+            base = '/live/tv/salon2024xyz/%d' % ids['TF1']
+            self.raw(base + '.m3u8')
+            status, headers, _ = self.raw(base + '/2.m3u8')
+        self.assertEqual((status, headers['Retry-After']), (503, '10'))
+    def test_player_and_web_share_the_same_encoder(self):
+        ids = self.fake_ffmpeg()
+        cookie = self.login()
+        web = json.loads(self.request('/api/play', {'lang': 'FR', 'canonical': 'TF1', 'mode': 'eco'}, cookie).read())
+        base = '/live/tv/salon2024xyz/%d' % ids['TF1']
+        self.raw(base + '.m3u8'); self.assertEqual(self.raw(base + '/2.m3u8')[0], 200)
+        self.assertEqual(len(self.state.transcoder.workers), 1)
+        self.assertIn(web['ticket'], self.state.transcoder.tickets)
+    def test_player_credentials_in_settings(self):
+        viewer, admin = self.login('test-viewer'), self.login()
+        seen = json.loads(self.request('/api/player-credentials', cookie=viewer, headers={'Host': 'tv.example'}).read())['players'][0]
+        self.assertEqual(seen['username'], 'tv'); self.assertEqual(seen['mode'], 'eco')
+        self.assertEqual(seen['m3u_url'], 'http://tv.example/get.php?username=tv&password=salon2024xyz&type=m3u_plus&output=m3u8')
+        self.assertEqual(self.request('/api/player-credentials', {'regenerate': True}, viewer).status, 403)
+        with patch.object(app.cfgmod, 'save') as saved:
+            self.assertEqual(self.request('/api/player-credentials', {'mode': 'ultra'}, admin).status, 400)
+            fresh = json.loads(self.request('/api/player-credentials', {'regenerate': True, 'mode': 'sport'}, admin).read())
+        self.assertNotEqual(fresh['password'], 'salon2024xyz'); self.assertEqual(fresh['mode'], 'sport')
+        saved.assert_called_once()
+        self.assertEqual(self.request('/get.php?username=tv&password=salon2024xyz').status, 401)
+        self.assertEqual(self.request('/get.php?username=tv&password=' + fresh['password']).status, 200)
 
 if __name__ == '__main__': unittest.main()

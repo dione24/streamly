@@ -1,4 +1,5 @@
 """HTTP API, device cookies and short-lived media tickets. Admin-only writes."""
+import gzip
 import json
 import mimetypes
 import os
@@ -14,14 +15,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config as cfgmod
 from .catalog import Catalog
-from .transcoder import Transcoder, CapacityError
+from .transcoder import Transcoder, CapacityError, MODE_CEILINGS
 from .auth import Sessions
+from . import player as playermod
 from .vod import Movies
 from .m3u import M3UClient, PlaylistError, detect_xtream
 from .xtream import XtreamClient, parse_series_info
 
 STARTUP_TIMEOUT = 25      # secondes d'attente de la premiere playlist
 ACCESS_LOG = []           # journal d'acces circulaire, expose via /api/access
+LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
+LIVE_OVERLAP_SEGMENTS = 6  # fin de l'ancienne generation gardee tant que la nouvelle est plus courte
+GZIP_MIN_BYTES = 1400     # en dessous, l'en-tete gzip coute plus qu'il ne gagne
+PLAYER_PATHS = ("/get.php", "/player_api.php", "/panel_api.php", "/xmltv.php")
+# Tickets, chemins de lecteur et identifiants en query ne vont jamais au journal.
+REDACTIONS = (
+    (re.compile(r"(/(?:s|v|media)/)[^/ ?]+"), r"\1[redacted]"),
+    (re.compile(r"(/live/)[^/ ?]+/[^/ ?]+"), r"\1[redacted]"),
+    (re.compile(r"((?:username|password)=)[^& ]+"), r"\1[redacted]"),
+)
 
 
 def _as_bool(value):
@@ -79,6 +91,7 @@ class State:
             print("catalogue purge des providers absents : %s" % dropped, flush=True)
         self.transcoder = Transcoder(self.cfg, cfgmod.HLS_DIR, cfgmod.LOG_DIR, state_dir=cfgmod.DATA_DIR)
         self.sessions = Sessions(self.cfg)
+        self.player = playermod.PlayerFacade(self.catalog, self.transcoder)
         self.movies = Movies(self.cfg, os.path.join(cfgmod.DATA_DIR, "movies"), self.catalog, self.transcoder)
         self.sync_lock = threading.Lock()
         self.sync_log = []
@@ -185,8 +198,10 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # Journal d'acces minimal : indispensable pour distinguer « la requete
         # n'arrive pas » de « le serveur repond mal ».
-        line = "%s  %s  %s" % (time.strftime("%H:%M:%S"),
-                               self.client_address[0], re.sub(r"(/(?:s|v|media)/)[^/ ?]+", r"\1[redacted]", fmt % args))
+        text = fmt % args
+        for pattern, replacement in REDACTIONS:
+            text = pattern.sub(replacement, text)
+        line = "%s  %s  %s" % (time.strftime("%H:%M:%S"), self._client_ip(), text)
         ACCESS_LOG.append(line)
         del ACCESS_LOG[:-400]
 
@@ -219,6 +234,223 @@ class Handler(BaseHTTPRequestHandler):
 
     def _err(self, code, msg):
         self._json({"error": msg}, code)
+
+    def _compact(self, obj):
+        # Le bouquet complet pese plusieurs Mo : pas d'indentation ici.
+        self._listing(json.dumps(obj, ensure_ascii=False, separators=(",", ":")),
+                      "application/json; charset=utf-8")
+
+    def _listing(self, body, ctype, extra=None):
+        """Catalogue pour un lecteur externe, compresse s'il l'accepte.
+
+        Le bouquet complet fait 5 a 8 Mo en clair, environ six fois moins en
+        gzip : c'est a chaque rafraichissement de la liste dans TiviMate.
+        """
+        headers = dict(extra or {}, **{"Cache-Control": "no-store", "Vary": "Accept-Encoding"})
+        body = body.encode("utf-8")
+        accepted = (self.headers.get("Accept-Encoding") or "").lower()
+        if len(body) > GZIP_MIN_BYTES and "gzip" in accepted:
+            body = gzip.compress(body, 5)
+            headers["Content-Encoding"] = "gzip"
+        self._raw(200, body, ctype, headers)
+
+    # ---------------------------------------------------------- adresse
+
+    def _behind_proxy(self):
+        # Les en-tetes X-Forwarded-* ne sont crus que si Streamly n'ecoute
+        # qu'en local : il n'est alors joignable qu'a travers le proxy.
+        return (STATE.cfg.get("listen_host") in LOCAL_HOSTS
+                and self.client_address[0] in ("127.0.0.1", "::1"))
+
+    def _client_ip(self):
+        """Adresse du client. Derriere Apache, toutes les requetes viennent de
+        127.0.0.1 : la limite de tentatives bloquerait tout le monde a la fois."""
+        headers = getattr(self, "headers", None)
+        if headers is not None and self._behind_proxy():
+            forwarded = (headers.get("X-Forwarded-For") or "").split(",")[-1].strip()
+            if forwarded:
+                return forwarded
+        return self.client_address[0]
+
+    def _public_base(self):
+        """Adresse que les lecteurs doivent appeler, sans barre finale."""
+        configured = (STATE.cfg.get("public_url") or "").strip().rstrip("/")
+        if configured:
+            return configured
+        proto = "https" if STATE.cfg.get("secure_cookies") else "http"
+        host = self.headers.get("Host") or ""
+        if self._behind_proxy():
+            proto = (self.headers.get("X-Forwarded-Proto") or proto).split(",")[0].strip()
+            host = (self.headers.get("X-Forwarded-Host") or host).split(",")[0].strip()
+        if proto not in ("http", "https"):
+            proto = "http"
+        if not re.fullmatch(r"[A-Za-z0-9.\-]+(:\d{1,5})?|\[[0-9A-Fa-f:.]+\](:\d{1,5})?", host or ""):
+            host = "%s:%s" % (self.server.server_address[0], self.server.server_address[1])
+        return "%s://%s" % (proto, host)
+
+    # ----------------------------------------------------- lecteurs externes
+
+    def _serve_player(self, path, params):
+        """get.php, player_api.php, xmltv.php : ce qu'attend un lecteur Xtream.
+
+        Identifiants du compte lecteur, jamais le jeton admin ni ceux du
+        panel d'origine. Aucune de ces routes ne demarre FFmpeg.
+        """
+        one = lambda k: (params.get(k) or [""])[0]
+        player = STATE.sessions.player(one("username"), one("password"), self._client_ip())
+        if path in ("/player_api.php", "/panel_api.php"):
+            if not player:
+                # Contrat Xtream : un refus reste un 200. Smarters traite un
+                # 401 comme un serveur injoignable.
+                return self._compact({"user_info": {"auth": 0}})
+            active = STATE.transcoder.owner_streams(playermod.owner(player))
+            return self._compact(STATE.player.api(player, one("action"), params,
+                                                  self._public_base(), active))
+        if not player:
+            return self._raw(401, "identifiants refusés\n", "text/plain; charset=utf-8",
+                             {"Cache-Control": "no-store"})
+        if path == "/get.php":
+            return self._listing(STATE.player.m3u(player, self._public_base()),
+                                 "audio/x-mpegurl; charset=utf-8",
+                                 {"Content-Disposition": 'inline; filename="streamly.m3u"'})
+        return self._listing(STATE.player.xmltv(), "application/xml; charset=utf-8")
+
+    def _serve_live(self, path):
+        """/live/{user}/{pass}/{id}.m3u8 et /live/{user}/{pass}/{id}/{niveau}.m3u8.
+
+        L'URL d'une chaine reste la meme d'une lecture a l'autre ; le ticket
+        interne, lui, change. Le master ne demarre rien : les lecteurs le
+        demandent aussi au survol. Seule la playlist d'un niveau ouvre la
+        chaine, et les segments passent ensuite par /s/{ticket}/.
+        """
+        parts = path[len("/live/"):].split("/")
+        if len(parts) not in (3, 4):
+            return self._err(404, "flux introuvable")
+        player = STATE.sessions.player(parts[0], parts[1], self._client_ip())
+        if not player:
+            return self._raw(401, "identifiants refusés\n", "text/plain; charset=utf-8",
+                             {"Cache-Control": "no-store"})
+        owner = playermod.owner(player)
+        ceiling = MODE_CEILINGS.get(player.get("mode"), MODE_CEILINGS["balanced"])
+        mpegurl = "application/vnd.apple.mpegurl"
+        match = re.fullmatch(r"(\d{1,10})(?:\.(m3u8|ts))?", parts[2]) if len(parts) == 3 else \
+            re.fullmatch(r"(\d{1,10})", parts[2])
+        channel = STATE.player.channel(match[1]) if match else None
+        if not channel:
+            return self._err(404, "chaîne introuvable")
+
+        if len(parts) == 3:
+            if match[2] != "m3u8":
+                # Un flux TS a debit fixe ne s'adapterait plus a la connexion :
+                # on renvoie vers le HLS, que VLC et TiviMate suivent.
+                location = "/live/%s/%s/%d.m3u8" % (urllib.parse.quote(parts[0], safe=""),
+                                                    urllib.parse.quote(parts[1], safe=""), channel["id"])
+                return self._raw(302, "", "text/plain; charset=utf-8",
+                                 {"Location": location, "Cache-Control": "no-store"})
+            if self.command == "GET":
+                STATE.player.want(owner, channel["id"])
+            body = STATE.transcoder.preview_master(ceiling, lambda i: "%d/%d.m3u8" % (channel["id"], i))
+            return self._raw(200, body, mpegurl, {"Cache-Control": "no-store"})
+
+        level = re.fullmatch(r"(\d{1,2})\.m3u8", parts[3])
+        if not level or int(level[1]) not in STATE.transcoder.allowed_levels({"ceiling": ceiling}):
+            return self._err(404, "qualité inconnue")
+        if self.command == "HEAD":
+            return self._raw(200, "", mpegurl, {"Cache-Control": "no-store"})
+        best = STATE.catalog.pick_source(channel["lang"], channel["canonical"],
+                                         int(STATE.cfg.get("preferred_source_height", 720)))
+        if not best:
+            return self._err(404, "chaîne introuvable")
+
+        def open_channel():
+            return STATE.transcoder.open(
+                owner, (channel["lang"] or "") + "|" + channel["canonical"],
+                STATE.candidate_urls(best["provider_id"], best["stream_id"]),
+                channel["canonical"], ceiling, 0, idle=playermod.PLAYER_IDLE)
+        try:
+            ticket = STATE.player.ticket(owner, channel["id"], open_channel)
+        except playermod.Evicted:
+            return self._err(410, "chaîne reprise par un autre appareil de ce compte")
+        except CapacityError as exc:
+            # Pas de JSON 409 ici : un lecteur n'en lit rien. 503 + Retry-After
+            # est ce qu'il sait traiter.
+            return self._raw(503, str(exc) + "\n", "text/plain; charset=utf-8",
+                             {"Retry-After": "10", "Cache-Control": "no-store"})
+        return self._live_media(ticket, int(level[1]))
+
+    def _live_media(self, ticket, level):
+        """Playlist d'un niveau, ses segments pointes vers /s/{ticket}/."""
+        deadline = time.time() + STARTUP_TIMEOUT
+        while True:
+            t = STATE.transcoder.ticket(ticket, touch=False)
+            status = STATE.transcoder.status(ticket)
+            if not t or not status:
+                return self._err(410, "lecture arrêtée")
+            if status["state"] == "failed":
+                return self._err(502, "sources indisponibles")
+            if status["state"] != "starting":
+                # Un remux n'a qu'une variante : on la sert quel que soit le
+                # niveau annonce, faute de quoi le lecteur n'aurait rien.
+                served = 0 if status["passthrough"] else level
+                if served not in STATE.transcoder.allowed_levels(t):
+                    return self._err(404, "qualité indisponible")
+                generation = status["generation"]
+                target = os.path.join(STATE.transcoder.hls_dir, t["key"], "g%d_s_%d.m3u8" % (generation, served))
+                if os.path.isfile(target):
+                    break
+            if time.time() > deadline:
+                return self._err(504, "source trop lente")
+            time.sleep(.15)
+        try:
+            with open(target, encoding="utf-8") as fh:
+                head, segments = _hls_segments(fh.read())
+        except OSError:
+            return self._err(504, "source trop lente")
+        previous = []
+        if generation and len(segments) < LIVE_OVERLAP_SEGMENTS:
+            # Juste apres une bascule (source de secours, barreaux ajoutes),
+            # la nouvelle generation n'a que quelques secondes. On garde la
+            # fin de la precedente devant une discontinuite : le lecteur finit
+            # son tampon et franchit la frontiere comme une coupure pub. Sans
+            # cela, VLC mettait plus de vingt secondes a se recaler.
+            for old in (served, 0):
+                path = os.path.join(STATE.transcoder.hls_dir, t["key"], "g%d_s_%d.m3u8" % (generation - 1, old))
+                if old in STATE.transcoder.allowed_levels(t) and os.path.isfile(path):
+                    try:
+                        with open(path, encoding="utf-8") as fh:
+                            previous = _hls_segments(fh.read())[1]
+                    except OSError:
+                        previous = []
+                    break
+        first = (previous or segments or [[""]])[0][-1]
+        number = re.search(r"_(\d+)\.ts$", first)
+        longest = max([float(m) for seg in previous + segments for l in seg
+                       for m in re.findall(r"^#EXTINF:([\d.]+)", l)] or [0])
+        lines = []
+        for l in head:
+            if l.startswith("#EXT-X-TARGETDURATION:"):
+                # Un remux peut avoir des segments plus longs que l'encodage.
+                l = "#EXT-X-TARGETDURATION:%d" % max(int(l.split(":")[1]), int(-(-longest // 1)))
+            if not l.startswith(("#EXT-X-MEDIA-SEQUENCE", "#EXT-X-DISCONTINUITY-SEQUENCE")):
+                lines.append(l)
+        lines += ["#EXT-X-MEDIA-SEQUENCE:%d" % (int(number[1]) if number else 0),
+                  "#EXT-X-DISCONTINUITY-SEQUENCE:%d" % (generation - 1 if previous else generation)]
+        for segment in previous:
+            lines += segment
+        if previous:
+            lines.append("#EXT-X-DISCONTINUITY")
+        for segment in segments:
+            lines += segment
+        body = "\n".join(l if l.startswith("#") else "/s/%s/%s" % (ticket, l) for l in lines)
+        return self._raw(200, body + "\n", "application/vnd.apple.mpegurl", {"Cache-Control": "no-store"})
+
+    def _player_credentials(self, player):
+        base = self._public_base()
+        query = urllib.parse.urlencode({"username": player["username"], "password": player["password"],
+                                        "type": "m3u_plus", "output": "m3u8"})
+        return {"username": player["username"], "password": player["password"],
+                "mode": player.get("mode", "balanced"), "server": base,
+                "m3u_url": "%s/get.php?%s" % (base, query)}
 
     # -------------------------------------------------------------- jeton
 
@@ -261,7 +493,7 @@ class Handler(BaseHTTPRequestHandler):
             self._request_session = None
             return None
         try:
-            sid, role = STATE.sessions.login(token, self.client_address[0])
+            sid, role = STATE.sessions.login(token, self._client_ip())
         except ValueError:
             self._request_session = None
             return None
@@ -289,6 +521,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_stream(path)
         if path.startswith("/v/"):
             return self._serve_vod(path)
+        if path in PLAYER_PATHS:
+            return self._serve_player(path, params)
+        if path.startswith("/live/"):
+            return self._serve_live(path)
         if path.startswith("/api/"):
             if not self._api_authed(params):
                 return self._err(401, "jeton invalide ou absent")
@@ -305,6 +541,16 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get('Origin')
         if origin and urllib.parse.urlparse(origin).netloc != self.headers.get('Host'):
             return self._err(403, 'origine refusée')
+        if path in ('/player_api.php', '/panel_api.php'):
+            # Smarters envoie ses identifiants en formulaire, pas en JSON.
+            try:
+                length = int(self.headers.get('Content-Length') or 0)
+            except ValueError:
+                length = -1
+            if length < 0 or length > 16384:
+                return self._err(413, 'requête trop grande')
+            form = urllib.parse.parse_qs(self.rfile.read(length).decode('utf-8', 'replace'))
+            return self._serve_player(path, dict(params, **form))
         try:
             length = int(self.headers.get('Content-Length') or 0)
             if length < 0 or length > 16384:
@@ -317,7 +563,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/login':
             try:
                 sid, role = STATE.sessions.login(
-                    body.get('token'), self.client_address[0],
+                    body.get('token'), self._client_ip(),
                     username=body.get('username'), password=body.get('password'))
             except ValueError as exc:
                 return self._err(401, str(exc))
@@ -333,7 +579,7 @@ class Handler(BaseHTTPRequestHandler):
             STATE.sessions.logout(sid)
             self._cookie = self._clear_cookie()
             return self._raw(200, '{}', 'application/json', {'Cache-Control': 'no-store'})
-        if path.startswith('/api/providers') or path in ('/api/sync', '/api/viewer-token'):
+        if path.startswith('/api/providers') or path in ('/api/sync', '/api/viewer-token', '/api/player-credentials'):
             if not self._admin():
                 return self._err(403, 'accès administrateur requis')
         try:
@@ -581,6 +827,10 @@ class Handler(BaseHTTPRequestHandler):
                 "load": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
             })
 
+        if path == '/api/player-credentials':
+            # Lecture seule comprise : c'est ce qu'on colle dans son lecteur.
+            return self._json({'players': [self._player_credentials(p) for p in STATE.cfg.get('players', [])]})
+
         if path == "/api/access":
             if not self._admin():
                 return self._err(403, "accès administrateur requis")
@@ -799,6 +1049,7 @@ class Handler(BaseHTTPRequestHandler):
             # Sans cette purge, les chaines de l'abonnement supprime restent
             # listees et ne peuvent plus rien jouer.
             dropped = cat.purge_absent([p["id"] for p in providers])
+            STATE.player.invalidate()
             return self._json({"ok": True, "purged": dropped})
 
         if path == "/api/sync":
@@ -824,7 +1075,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(404, 'chaîne introuvable')
             audio_only = _as_bool(body.get('audio_only'))
             mode = body.get('mode', 'balanced')
-            ceiling = {'eco': 650000, 'balanced': 1150000, 'sport': 0}.get(mode, 1150000)
+            ceiling = MODE_CEILINGS.get(mode, MODE_CEILINGS['balanced'])
             budget = 0
             if mode == 'budget':
                 mb, minutes = float(body.get('budget_mb', 800)), float(body.get('minutes', 120))
@@ -854,8 +1105,44 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'ok': True})
         if path == '/api/viewer-token':
             return self._json({'token': STATE.cfg.get('viewer_token')})
+        if path == '/api/player-credentials':
+            players = [dict(p) for p in STATE.cfg.get('players', [])]
+            name = body.get('username') or (players[0]['username'] if players else '')
+            target = next((p for p in players if p.get('username') == name), None)
+            if not target:
+                return self._err(404, 'compte lecteur introuvable')
+            if 'mode' in body:
+                if body['mode'] not in cfgmod.PLAYER_MODES:
+                    return self._err(400, 'mode inconnu')
+                target['mode'] = body['mode']
+            if _as_bool(body.get('regenerate')):
+                # L'ancien mot de passe cesse aussitot de fonctionner : le
+                # lecteur devra etre reconfigure.
+                target['password'] = cfgmod.player_password()
+            STATE.cfg['players'] = players
+            cfgmod.save({'players': players})
+            return self._json(self._player_credentials(target))
 
         return self._err(404, "endpoint inconnu")
+
+
+def _hls_segments(text):
+    """(en-tete, segments) d'une playlist de media ; un segment est la liste de
+    ses lignes, l'URI en dernier."""
+    head, segments, pending = [], [], []
+    for line in (l.strip() for l in text.splitlines()):
+        if not line:
+            continue
+        if line.startswith("#EXT-X-ENDLIST"):
+            continue
+        if line.startswith("#") and not segments and not pending and not line.startswith(("#EXTINF", "#EXT-X-PROGRAM-DATE-TIME", "#EXT-X-DISCONTINUITY")):
+            head.append(line)
+        elif line.startswith("#"):
+            pending.append(line)
+        else:
+            segments.append(pending + [line])
+            pending = []
+    return head, segments
 
 
 def _estimated_size(movie):
@@ -907,6 +1194,7 @@ def _run_sync(only_id=None):
                 log("[%s] ECHEC series : %s" % (provider.get("id"), exc))
             log("[%s] termine : %d chaines, %d films, %d series" %
                 (provider["id"], count, nvod, nseries))
+        STATE.player.invalidate()
 
 
 def main():

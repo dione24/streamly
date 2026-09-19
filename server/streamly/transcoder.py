@@ -129,6 +129,10 @@ class CapacityError(RuntimeError):
     pass
 
 
+# Plafond de debit par mode, audio et transport compris. 0 = toute l'echelle.
+MODE_CEILINGS = {'eco': 650000, 'balanced': 1150000, 'sport': 0}
+
+
 def _redact_credentials(text, cfg=None):
     """Masque les identifiants provider dans les messages d'erreur.
 
@@ -332,8 +336,36 @@ class Transcoder:
                 'bitrate': effective or _estimated_bitrate(media),
                 'measured': bool(effective)}
 
-    def _command(self, source, media, generation, audio_only=False, passthrough=None, levels=None):
+    @staticmethod
+    def _next_sequence(outdir, generation):
+        """Premier numero de segment d'une generation.
+
+        Juste apres le dernier segment de la precedente : la facade lecteur
+        sert alors les deux generations dans une meme playlist, separees par
+        une discontinuite, et la sequence ne recule jamais. Repartir de 0
+        figeait TiviMate et VLC, qui ne rechargent pas le manifeste comme le
+        front web. Une premiere generation part de l'horloge.
+        """
+        last = -1
+        if generation:
+            pattern = re.compile(r'^g%d_[^_\s]+_(\d+)\.ts$' % (generation - 1), re.M)
+            try:
+                names = os.listdir(outdir)
+            except OSError:
+                names = []
+            for name in names:
+                if re.fullmatch(r'g%d_(?:s_\d+|a)\.m3u8' % (generation - 1), name):
+                    try:
+                        with open(os.path.join(outdir, name), encoding='utf-8') as fh:
+                            last = max([last] + [int(n) for n in pattern.findall(fh.read())])
+                    except OSError:
+                        continue
+        return last + 1 if last >= 0 else int(time.time())
+
+    def _command(self, source, media, generation, audio_only=False, passthrough=None, levels=None,
+                 start_number=None):
         seg = int(self.cfg.get('segment_seconds', 2))
+        start = str(int(time.time()) if start_number is None else int(start_number))
         fps = float(media['fps'])
         ua = self.cfg.get('user_agent', 'VLC/3.0.20')
         # Mode audio-only : pas de transcodage vidéo.
@@ -346,7 +378,8 @@ class Transcoder:
                    '-analyzeduration', '2000000', '-probesize', '2000000', '-i', source,
                    '-map', '0:a:0', '-vn',
                    '-c:a', 'aac', '-b:a', self.cfg.get('audio_bitrate', '96k'), '-ac', '2',
-                   '-f', 'hls', '-hls_time', str(seg), '-hls_list_size', str(max(36, int(self.cfg.get('playlist_size', 36))))]
+                   '-f', 'hls', '-hls_time', str(seg), '-hls_list_size', str(max(36, int(self.cfg.get('playlist_size', 36)))),
+                   '-start_number', start]
             if self._ffmpeg_caps.get('hls_flags'):
                 hls_flags = ['delete_segments', 'omit_endlist']
                 if self._ffmpeg_caps.get('hls_independent_segments'):
@@ -379,7 +412,8 @@ class Transcoder:
             # devient un minimum, la duree reelle des segments suit le GOP.
             cmd += ['-sn', '-dn',
                     '-f', 'hls', '-hls_time', str(seg),
-                    '-hls_list_size', str(max(36, int(self.cfg.get('playlist_size', 36))))]
+                    '-hls_list_size', str(max(36, int(self.cfg.get('playlist_size', 36)))),
+                   '-start_number', start]
             if self._ffmpeg_caps.get('hls_flags'):
                 hls_flags = ['delete_segments', 'omit_endlist']
                 if self._ffmpeg_caps.get('hls_independent_segments'):
@@ -450,7 +484,8 @@ class Transcoder:
             hls_flags.append('independent_segments')
         if self._ffmpeg_caps.get('hls_temp_file'):
             hls_flags.append('temp_file')
-        cmd += ['-f', 'hls', '-hls_time', str(seg), '-hls_list_size', str(max(36, int(self.cfg.get('playlist_size', 36))))]
+        cmd += ['-f', 'hls', '-hls_time', str(seg), '-hls_list_size', str(max(36, int(self.cfg.get('playlist_size', 36)))),
+                   '-start_number', start]
         if self._ffmpeg_caps.get('hls_flags'):
             cmd += ['-hls_flags', '+'.join(hls_flags)]
         cmd += ['-hls_segment_type', 'mpegts', '-var_stream_map', variants]
@@ -482,7 +517,7 @@ class Transcoder:
         with self._lock:
             self.reservations.pop(job, None)
 
-    def open(self, owner, identity, sources, label='', ceiling=0, budget=0, audio_only=False):
+    def open(self, owner, identity, sources, label='', ceiling=0, budget=0, audio_only=False, idle=180):
         key = hashlib.sha256(identity.encode()).hexdigest()[:20]
         with self._lock:
             self._expire_locked()
@@ -495,6 +530,14 @@ class Transcoder:
                           if t['owner'] == owner and t['key'] != key]:
                 self._release_locked(stale, owner)
             w = self.workers.get(key)
+            if w and w['state'] == 'failed' and all(
+                    t['owner'] == owner for t in self.tickets.values() if t['key'] == key):
+                # Personne d'autre ne regarde ce worker en echec : on repart de
+                # zero plutot que de refuser jusqu'a son expiration. Un lecteur
+                # externe ne sait pas « arreter puis reessayer ».
+                for stale in [k for k, t in self.tickets.items() if t['key'] == key]:
+                    self._release_locked(stale, owner)
+                w = self.workers.get(key)
             if not w:
                 if len(self.workers) + len(self.reservations) >= max(1, int(self.cfg.get('max_concurrent_streams', 1))):
                     raise CapacityError('Le serveur a atteint sa limite de chaînes simultanées. Une chaîne déjà ouverte peut être partagée.')
@@ -530,7 +573,7 @@ class Transcoder:
             ticket = secrets.token_urlsafe(24)
             self.tickets[ticket] = dict(owner=owner, key=key, last=time.time(), created=time.time(),
                                         bytes=0, ceiling=max(0, int(ceiling)), budget=max(0, int(budget)),
-                                        audio_only=bool(audio_only))
+                                        audio_only=bool(audio_only), idle=max(10, int(idle)))
             return ticket
 
     def _spawn(self, key):
@@ -568,7 +611,8 @@ class Transcoder:
                         pass
                     w['proc'] = subprocess.Popen(self._command(source, media, generation, audio_only=audio_only,
                                                                   passthrough=w['passthrough'],
-                                                                  levels=w.get('levels') or None),
+                                                                  levels=w.get('levels') or None,
+                                                                  start_number=self._next_sequence(outdir, generation)),
                                                  cwd=outdir, stdout=log, stderr=log)
                 w['state'] = 'buffering'
             except OSError:
@@ -577,7 +621,7 @@ class Transcoder:
     def ticket(self, ticket, owner=None, touch=True):
         with self._lock:
             t = self.tickets.get(ticket)
-            if not t or (owner is not None and t['owner'] != owner) or time.time() - t['last'] > 180:
+            if not t or (owner is not None and t['owner'] != owner) or time.time() - t['last'] > t.get('idle', 180):
                 return None
             if touch:
                 t['last'] = time.time()
@@ -629,15 +673,34 @@ class Transcoder:
                               bw, int(media['width']), int(media['height']), float(media['fps'])),
                           'g%d_s_0.m3u8' % w['generation']]
                 return '\n'.join(lines) + '\n'
-            for i in self.allowed_levels(t):
-                r = self.ladder[i]
-                h = min(int(r['height']), media['height']) // 2 * 2
-                width = round(h * media['width'] / media['height'] / 2) * 2
-                # Include transport overhead; do not invent codec level strings.
-                bw = int((_bps(r['maxrate']) + _bps(self.cfg.get('audio_bitrate', '96k'))) * 1.08)
-                lines += ['#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=%.3f' % (bw, width, h, self._rung_fps(r, media['fps'])),
-                          'g%d_s_%d.m3u8' % (w['generation'], i)]
+            lines += self._variant_lines(self.allowed_levels(t), media,
+                                         lambda i: 'g%d_s_%d.m3u8' % (w['generation'], i))
             return '\n'.join(lines) + '\n'
+
+    def _variant_lines(self, levels, media, uri):
+        lines = []
+        for i in levels:
+            r = self.ladder[i]
+            h = min(int(r['height']), media['height']) // 2 * 2
+            width = round(h * media['width'] / media['height'] / 2) * 2
+            # Include transport overhead; do not invent codec level strings.
+            bw = int((_bps(r['maxrate']) + _bps(self.cfg.get('audio_bitrate', '96k'))) * 1.08)
+            lines += ['#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,FRAME-RATE=%.3f' % (bw, width, h, self._rung_fps(r, media['fps'])),
+                      uri(i)]
+        return lines
+
+    def preview_master(self, ceiling, uri):
+        """Master d'une chaine pas encore ouverte, pour les lecteurs externes.
+
+        Ils le demandent au survol comme a la lecture : sonder la source ici
+        couterait une connexion a l'abonnement a chaque fois. On annonce
+        l'echelle qu'un 720p a 25 i/s produirait ; le lecteur choisit sur
+        BANDWIDTH, pas sur la definition exacte.
+        """
+        media = {'width': 1280, 'height': 720, 'fps': 25}
+        lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-INDEPENDENT-SEGMENTS']
+        lines += self._variant_lines(self.allowed_levels({'ceiling': ceiling}), media, uri)
+        return '\n'.join(lines) + '\n'
 
     def status(self, ticket=None):
         with self._lock:
@@ -657,6 +720,12 @@ class Transcoder:
                             audio_only=t.get('audio_only'))
             return {'running': bool(self.workers), 'workers': [public(w) for w in self.workers.values()],
                     'capacity': int(self.cfg.get('max_concurrent_streams', 1))}
+
+    def owner_streams(self, owner):
+        """Nombre de chaines ouvertes par un proprietaire."""
+        with self._lock:
+            self._expire_locked()
+            return len({t['key'] for t in self.tickets.values() if t['owner'] == owner})
 
     def release(self, ticket, owner=None):
         with self._lock:
@@ -694,7 +763,7 @@ class Transcoder:
     def _expire_locked(self):
         now = time.time()
         for ticket, t in list(self.tickets.items()):
-            if now - t['last'] > 180:
+            if now - t['last'] > t.get('idle', 180):
                 self.release(ticket)
 
     def _ticket_ceiling_locked(self, key):

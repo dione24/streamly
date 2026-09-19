@@ -574,6 +574,27 @@ class Catalog:
             rows.append(row)
         return rows
 
+    def player_channels(self):
+        """Toutes les chaines distinctes, pour les lecteurs externes.
+
+        Meme regroupement que browse(), sans pagination : TiviMate et VLC
+        chargent le bouquet d'un bloc, et c'est SQLite qui le sert, jamais le
+        panel d'origine (plus de deux minutes pour son export M3U).
+        """
+        cur = self._db.execute(
+            "SELECT lang, canonical, MIN(name) AS label, MAX(icon) AS icon, "
+            "MAX(category_name) AS category, MAX(epg_id) AS epg_id "
+            "FROM channels WHERE canonical<>'' AND is_backup=0 "
+            "GROUP BY lang, canonical ORDER BY label, lang, canonical")
+        return [dict(r, label=_clean_label(r["label"])) for r in cur.fetchall()]
+
+    def signature(self):
+        """Change des qu'une synchro ou une purge modifie les chaines."""
+        row = self._db.execute(
+            "SELECT (SELECT COUNT(*) FROM channels), "
+            "COALESCE(SUM(last_sync), 0), COALESCE(SUM(channels), 0) FROM sync_state").fetchone()
+        return tuple(row)
+
     def sources(self, lang, canonical):
         """Toutes les variantes d'une chaine, tous providers confondus.
 
