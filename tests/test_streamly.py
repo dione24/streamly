@@ -750,6 +750,21 @@ class HTTPTests(unittest.TestCase):
         # Un ancien client qui n'envoie pas le champ garde le comportement d'avant.
         legacy = self.request('/api/login', {'token': 'test-admin'})
         self.assertIn('Max-Age=604800', legacy.headers['Set-Cookie'])
+    def test_session_never_leaks_to_the_next_request_on_a_connection(self):
+        # Apache reutilise ses connexions vers Streamly d'un visiteur a l'autre.
+        cookie = self.login()
+        conn = http.client.HTTPConnection('127.0.0.1', self.http.server_port, timeout=5)
+        def get(headers):
+            conn.request('GET', '/api/me', headers=headers)
+            r = conn.getresponse(); r.read(); return r
+        self.assertEqual(get({'Cookie': cookie}).status, 200)
+        self.assertEqual(get({}).status, 401)
+        # Un jeton en en-tete fait poser un cookie : il ne doit pas suivre.
+        with_token = get({'Authorization': 'Bearer test-admin'})
+        self.assertIn('streamly_session', with_token.headers['Set-Cookie'])
+        stranger = get({})
+        self.assertEqual(stranger.status, 401); self.assertIsNone(stranger.headers['Set-Cookie'])
+        conn.close()
     def test_viewer_cannot_administer(self):
         cookie = self.login('test-viewer')
         self.assertEqual(self.request('/api/providers/delete', {'id':'p'}, cookie).status, 403)

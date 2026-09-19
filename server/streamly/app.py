@@ -213,6 +213,15 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "Streamly"
 
+    def handle_one_request(self):
+        # Une connexion persistante sert plusieurs requetes avec le meme objet,
+        # et un proxy partage ses connexions entre visiteurs : sans cette
+        # remise a zero, la session (et le cookie a poser) d'une requete
+        # passait a la suivante, donc a quelqu'un d'autre.
+        self._request_session = None
+        self._cookie = None
+        super().handle_one_request()
+
     def log_message(self, fmt, *args):
         # Journal d'acces minimal : indispensable pour distinguer « la requete
         # n'arrive pas » de « le serveur repond mal ».
