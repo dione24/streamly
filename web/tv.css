@@ -5,8 +5,7 @@
    ==================================================================== */
 
 #app.tv {
-  --rail: 76px;
-  --rail-open: 212px;
+  --rail: 84px;
   --groups: 236px;
   min-height: 100dvh;
 }
@@ -14,6 +13,8 @@
 #app.tv footer { display: none; }
 
 /* ------------------------------------------------------------ Rail */
+/* Largeur fixe, libelle sous l'icone : un rail qui s'ouvrait au survol
+   recouvrait la colonne des categories. */
 
 .rail {
   position: fixed;
@@ -23,32 +24,20 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 18px 12px;
+  padding: 16px 8px;
   background: linear-gradient(180deg, #0d0d1a 0%, #0a0a14 100%);
   border-right: 1px solid var(--line);
-  overflow: hidden;
-  transition: width 0.22s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.22s;
-}
-
-.rail:hover, .rail:focus-within {
-  width: var(--rail-open);
-  box-shadow: 24px 0 60px rgba(0, 0, 0, 0.55);
 }
 
 .rail .wordmark {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  display: grid;
+  place-content: center;
   height: 52px;
-  padding: 0 6px;
-  margin-bottom: 14px;
-  font-size: 1.25rem;
+  margin-bottom: 12px;
   text-decoration: none;
-  color: var(--text);
-  white-space: nowrap;
 }
 
-.rail .brand-icon { flex: 0 0 40px; }
+.rail .wordmark .rail-label { display: none; }
 
 .rail .tabs, .rail .account-actions {
   display: flex;
@@ -61,25 +50,28 @@
 
 .rail .account-actions {
   margin-top: auto;
-  padding-top: 12px;
+  padding-top: 10px;
   border-top: 1px solid var(--line);
 }
 
 .rail .tab {
   position: relative;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 16px;
+  justify-content: center;
+  gap: 5px;
   width: 100%;
-  height: 48px;
-  padding: 0 14px;
+  min-height: 60px;
+  padding: 8px 2px;
   border: 0;
   border-radius: 12px;
   background: transparent;
   color: var(--muted);
-  font-size: 0.95rem;
+  font-size: 0.66rem;
   font-weight: 600;
-  white-space: nowrap;
+  line-height: 1.1;
+  text-align: center;
   cursor: pointer;
   box-shadow: none;
   transition: background 0.15s, color 0.15s;
@@ -98,9 +90,9 @@
 .rail .tab.active::before {
   content: '';
   position: absolute;
-  left: -12px;
-  top: 12px;
-  bottom: 12px;
+  left: -8px;
+  top: 14px;
+  bottom: 14px;
   width: 4px;
   border-radius: 0 4px 4px 0;
   background: linear-gradient(180deg, #7c3aed, #d946ef);
@@ -110,17 +102,6 @@
   flex: 0 0 22px;
   width: 22px;
   height: 22px;
-}
-
-.rail-label {
-  opacity: 0;
-  transform: translateX(-6px);
-  transition: opacity 0.18s, transform 0.18s;
-}
-
-.rail:hover .rail-label, .rail:focus-within .rail-label {
-  opacity: 1;
-  transform: none;
 }
 
 /* ----------------------------------------------------------- Scene */
@@ -635,7 +616,7 @@
 @media (max-width: 999px) {
   #app.tv { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
 
-  .rail, .rail:hover, .rail:focus-within {
+  .rail {
     inset: auto 0 0 0;
     width: auto;
     height: calc(64px + env(safe-area-inset-bottom));
@@ -647,7 +628,6 @@
     border-top: 1px solid var(--line);
     background: rgba(10, 10, 20, 0.94);
     backdrop-filter: blur(14px);
-    box-shadow: none;
   }
 
   .rail .wordmark { display: none; }
@@ -663,17 +643,14 @@
 
   .rail .tab {
     flex: 1 1 0;
-    flex-direction: column;
-    justify-content: center;
     gap: 3px;
-    height: auto;
+    min-height: 0;
     min-width: 52px;
     padding: 4px 2px;
     font-size: 0.62rem;
   }
 
   .rail .tab.active::before { left: 25%; right: 25%; top: -6px; bottom: auto; width: auto; height: 3px; border-radius: 0 0 4px 4px; }
-  .rail-label, .rail:hover .rail-label { opacity: 1; transform: none; }
 
   .stage { margin-left: 0; }
   #app.tv .notice { left: 50%; transform: translateX(-50%); }
@@ -705,6 +682,68 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .rail, .rail-label, #app.tv .movie-card .logo-slot, #app.tv .channel-logo { transition: none; }
+  #app.tv .movie-card .logo-slot, #app.tv .channel-logo { transition: none; }
   .stage-loader-bar::after { animation: none; width: 100%; opacity: 0.5; }
+}
+
+/* ============================================================ Reglages */
+
+#app.tv #config .catalogue-heading { align-items: end; margin-bottom: 22px; }
+#app.tv #config .catalogue-heading h2 { margin: 0; }
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-items: start;
+  max-width: 1320px;
+}
+
+.settings-card {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 22px 24px 24px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+}
+
+.settings-card.wide { grid-column: 1 / -1; }
+
+.settings-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.settings-card h3 { margin: 0; font-size: 1.05rem; }
+.settings-card h3.sub { margin-top: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+.settings-card .label-hint { margin: -6px 0 0; }
+.settings-card .settings-actions { margin: 0; }
+.settings-card #provider-list, .settings-card .device-list { margin: 0; }
+.settings-card #provider-list:empty, .settings-card .device-list:empty, .settings-card [role="status"]:empty { display: none; }
+.settings-card pre { margin: 0; }
+
+.add-provider {
+  border: 1px dashed var(--line-light);
+  border-radius: 12px;
+  padding: 0 16px;
+}
+
+.add-provider > summary {
+  padding: 14px 0;
+  color: var(--accent-hover);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.add-provider[open] { padding-bottom: 18px; border-style: solid; }
+.add-provider .settings-form { margin: 4px 0 0; }
+
+@media (max-width: 1100px) {
+  .settings-grid { grid-template-columns: 1fr; }
+  .add-provider .settings-form { grid-template-columns: 1fr; }
 }

@@ -952,6 +952,17 @@ searchInput.oninput = e => {
 };
 
 async function setMode(mode) {
+  if (state.configOpen) {
+    // Quitter les reglages par un onglet, sans « Fermer » : meme remise en
+    // etat, sinon la page restait en mode reglages et le lecteur masque.
+    state.configOpen = false;
+    state.configReturnMode = null;
+    document.body.classList.remove('view-config');
+    clearInterval(state.configTimer);
+    state.configTimer = null;
+    restoreSettingsSnapshot();
+  }
+  $('#tab-conf').classList.remove('active');
   state.mode = mode;
   state.category = '';
   state.query = '';
@@ -1003,6 +1014,7 @@ async function openSettings() {
   // masques, et on efface l'instantane qu'on vient tout juste de constituer.
   restoreSettingsSnapshot();
   document.body.classList.add('view-config');
+  $$('.rail .tab').forEach(t => t.classList.toggle('active', t.id === 'tab-conf'));
   state.configSnapshot = ['#player-wrap', '#preferences', '#recent-wrap', '#catalogue', '#preparations', '#filters', '#idle-hero']
     .map(id => {
       const element = $(id);
@@ -1367,6 +1379,8 @@ async function refreshConfig() {
   // Les details interrogent le panel : on ne bloque pas l'affichage de la
   // liste dessus, et le cache serveur evite un appel toutes les 8 secondes.
   loadProviderDetails().catch(() => {});
+  // Sans abonnement, le formulaire d'ajout est la seule chose utile : on l'ouvre.
+  if (!(st.providers || []).length) $('#add-provider').open = true;
 }
 
 $('#tab-conf').onclick = async () => {

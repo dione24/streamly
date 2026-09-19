@@ -4,9 +4,9 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a14"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="style.css?v=20260919-v26">
-<link rel="stylesheet" href="tv.css?v=20260919-v26">
-<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260919-v26"></script>
+<link rel="stylesheet" href="style.css?v=20260919-v27">
+<link rel="stylesheet" href="tv.css?v=20260919-v27">
+<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260919-v27"></script>
 </head>
 <body>
 <!-- Masque au depart, comme #app : c'est /api/me qui tranche. Sans cela, le
@@ -190,45 +190,60 @@
   </section>
   <section id="config" class="settings" hidden>
    <div class="catalogue-heading">
-    <h2>Votre serveur<span class="accent">.</span></h2>
+    <div>
+     <p class="eyebrow">VOTRE SERVEUR</p>
+     <h2>Réglages<span class="accent">.</span></h2>
+    </div>
     <button id="close-config" class="quiet">Fermer ✕</button>
    </div>
-   <h3>Abonnements</h3>
-   <ul id="provider-list"></ul>
-   <form id="provider-form" class="settings-form">
-    <div class="source-kind" role="radiogroup" aria-label="Type de source">
-     <label><input type="radio" name="p-kind" value="xtream" checked><span>Identifiants Xtream</span></label>
-     <label><input type="radio" name="p-kind" value="m3u"><span>Lien M3U</span></label>
-    </div>
-    <label>Nom<input id="p-name" placeholder="Mon abonnement" required></label>
-    <label class="p-xtream">Adresse<input id="p-host" type="url" placeholder="http://serveur:80" required></label>
-    <label class="p-xtream">Identifiant<input id="p-user" autocomplete="off" required></label>
-    <label class="p-xtream">Mot de passe<input id="p-pass" type="password" autocomplete="new-password" required></label>
-    <label class="p-m3u" hidden>Lien de la playlist
-     <input id="p-url" type="url" autocomplete="off" placeholder="http://serveur/get.php?username=…&amp;password=…&amp;type=m3u_plus">
-     <span class="label-hint">Un lien <code>get.php</code> est reconnu comme panel Xtream : programme et films restent disponibles.</span>
-    </label>
-    <label>Connexions autorisées<input id="p-connections" type="number" min="1" max="10" value="1" required></label>
-    <button id="p-add" class="primary">Ajouter et vérifier</button>
-   </form>
-   <p id="p-msg" role="status"></p>
-   <div class="settings-actions">
-    <button id="sync-all" class="quiet">Synchroniser les catalogues</button>
-    <button id="viewer-token" class="quiet">Afficher le jeton lecture seule</button>
+   <div class="settings-grid">
+    <article class="settings-card wide">
+     <header><h3>Abonnements</h3><button id="sync-all" class="quiet">Synchroniser les catalogues</button></header>
+     <p class="label-hint">Vos comptes IPTV. Après un ajout, lancez une synchronisation pour importer chaînes, films et séries.</p>
+     <ul id="provider-list"></ul>
+     <details id="add-provider" class="add-provider">
+      <summary>Ajouter un abonnement</summary>
+     <form id="provider-form" class="settings-form">
+      <div class="source-kind" role="radiogroup" aria-label="Type de source">
+       <label><input type="radio" name="p-kind" value="xtream" checked><span>Identifiants Xtream</span></label>
+       <label><input type="radio" name="p-kind" value="m3u"><span>Lien M3U</span></label>
+      </div>
+      <label>Nom<input id="p-name" placeholder="Mon abonnement" required></label>
+      <label class="p-xtream">Adresse<input id="p-host" type="url" placeholder="http://serveur:80" required></label>
+      <label class="p-xtream">Identifiant<input id="p-user" autocomplete="off" required></label>
+      <label class="p-xtream">Mot de passe<input id="p-pass" type="password" autocomplete="new-password" required></label>
+      <label class="p-m3u" hidden>Lien de la playlist
+       <input id="p-url" type="url" autocomplete="off" placeholder="http://serveur/get.php?username=…&amp;password=…&amp;type=m3u_plus">
+       <span class="label-hint">Un lien <code>get.php</code> est reconnu comme panel Xtream : programme et films restent disponibles.</span>
+      </label>
+      <label>Connexions autorisées<input id="p-connections" type="number" min="1" max="10" value="1" required></label>
+      <button id="p-add" class="primary">Ajouter et vérifier</button>
+     </form>
+     </details>
+     <p id="p-msg" role="status"></p>
+    </article>
+    <article class="settings-card">
+     <header><h3>Lecteur externe</h3></header>
+     <p class="label-hint">TiviMate, IPTV Smarters, VLC… : collez ces identifiants dans votre lecteur. Le direct passe par ce serveur, compressé et adapté à la connexion.</p>
+     <div id="player-access" class="player-access"></div>
+     <p id="player-msg" role="status"></p>
+    </article>
+    <article class="settings-card">
+     <header><h3>Application Streamly</h3><button id="pair-code" class="quiet">Associer un appareil</button></header>
+     <p class="label-hint">L’application garde votre playlist sur l’appareil et ne passe par ce serveur que pour économiser des données. Générez un code, puis saisissez-le dans l’application.</p>
+     <p id="pair-value" class="token-value pair-code" hidden></p>
+     <ul id="device-list" class="device-list"></ul>
+     <h3 class="sub">Accès en lecture seule</h3>
+     <p class="label-hint">Un jeton pour regarder sur l’interface web sans pouvoir toucher aux réglages.</p>
+     <div class="settings-actions"><button id="viewer-token" class="quiet">Afficher le jeton lecture seule</button></div>
+     <p id="viewer-value" class="token-value" hidden></p>
+    </article>
+    <article class="settings-card wide">
+     <header><h3>Lectures et charge du serveur</h3></header>
+     <pre id="status"></pre>
+     <details><summary>Journal de synchronisation</summary><pre id="sync-log"></pre></details>
+    </article>
    </div>
-   <p id="viewer-value" class="token-value" hidden></p>
-   <h3>Lecteur externe</h3>
-   <p class="label-hint">TiviMate, IPTV Smarters, VLC… : collez ces identifiants dans votre lecteur. Le direct passe par ce serveur, compressé et adapté à la connexion.</p>
-   <div id="player-access" class="player-access"></div>
-   <p id="player-msg" role="status"></p>
-   <h3>Application Streamly</h3>
-   <p class="label-hint">L’application garde votre playlist sur l’appareil et ne passe par ce serveur que pour économiser des données. Générez un code, puis saisissez-le dans l’application.</p>
-   <div class="settings-actions"><button id="pair-code" class="quiet">Associer un appareil</button></div>
-   <p id="pair-value" class="token-value pair-code" hidden></p>
-   <ul id="device-list" class="device-list"></ul>
-   <h3>Lectures et charge du serveur</h3>
-   <pre id="status"></pre>
-   <details><summary>Journal de synchronisation</summary><pre id="sync-log"></pre></details>
   </section>
   </section>
  </div>
