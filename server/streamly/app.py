@@ -949,6 +949,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/favorites":
             return self._json(cat.favorites())
 
+        if path == '/api/guide/now':
+            ids = [i for i in (one('ids') or '').split(',') if i][:300]
+            return self._compact(STATE.guide.now_next(ids))
+
         if path == '/api/preparations':
             return self._json(STATE.movies.list())
         if path == '/api/vod/tracks':

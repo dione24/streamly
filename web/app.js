@@ -256,6 +256,8 @@ async function stop() {
   state.job = null;
   clearZapOverlay();
   $('#player-wrap').hidden = true;
+  $('#program-info').hidden = true;
+  $('#idle-hero').hidden = false;
   document.body.classList.remove('is-playing', 'reader-focus', 'catalogue-collapsed');
   $('#preferences').hidden = false;
   renderRecents();
@@ -312,6 +314,8 @@ if (toggleTelemBtn) {
 
 function playbackUI(title, live) {
   $('#player-wrap').hidden = false;
+  $('#idle-hero').hidden = true;
+  $('#program-info').hidden = true;
   $('#now-playing').textContent = title;
   $('#preferences').hidden = true;
   const recent = $('#recent-wrap');
@@ -351,6 +355,7 @@ async function play(channel) {
   state.generation = null;
   playbackUI(channel.label, true);
   message('');
+  updateProgramInfo().catch(() => {});
   
   markNowPlaying(channel);
 
@@ -566,12 +571,13 @@ function renderSkeletons(count = 6) {
 }
 
 // Catalogue row
-function row(c, kind = 'channel') {
+function row(c, kind = 'channel', number = 0) {
   const movie = kind === 'movie' || kind === 'series';
   const li = el('li', 'channel-card' + (movie ? ' movie-card' : ''));
   li.dataset.channelKey = channelKey(c);
   const button = el('button', 'channel-main');
   button.type = 'button';
+  if (!movie && number) button.append(el('span', 'ch-num', String(number)));
   const nameLabel = movie ? c.title : c.label;
   const fallback = (nameLabel || '?').trim().slice(0, 2).toUpperCase();
   const iconSlot = el('span', 'logo-slot');
@@ -607,9 +613,18 @@ function row(c, kind = 'channel') {
     el('div', 'sub', movie ? (c.category_name || (kind === 'series' ? 'Série' : 'Film'))
                            : [c.category || 'Direct', c.lang].filter(Boolean).join(' · '))
   );
+  if (!movie && c.epg_id) {
+    // Rempli apres coup par loadNowNext : la liste s'affiche sans attendre le guide.
+    const now = el('div', 'epg-now');
+    now.dataset.epgId = c.epg_id;
+    now.hidden = true;
+    now.append(el('span', 'epg-title'), el('span', 'epg-bar'));
+    meta.append(now);
+  }
   button.append(meta);
   button.onclick = () => (kind === 'series' ? seriesDialog(c)
                         : kind === 'movie' ? movieDialog(c) : play(c)).catch(failure);
+  if (!movie) button.ondblclick = () => fullscreenWhenReady();
   li.append(button);
 
   if (!movie) {
@@ -634,6 +649,55 @@ function row(c, kind = 'channel') {
     li.append(star);
   }
   return li;
+}
+
+// Programme en cours : une requete par page de chaines, sur le guide en cache du serveur.
+const clock = epoch => new Date(epoch * 1000).toLocaleTimeString('fr-FR', {hour: '2-digit', minute: '2-digit'});
+const progressOf = p => Math.max(0, Math.min(100, (Date.now() / 1000 - p.start) / Math.max(1, p.stop - p.start) * 100));
+
+async function loadNowNext(items) {
+  const ids = [...new Set(items.map(c => c.epg_id).filter(Boolean))];
+  if (!ids.length) return;
+  const guide = await api('/guide/now?ids=' + encodeURIComponent(ids.join(',')), {skipAuthRedirect: true});
+  $$('#channels .epg-now').forEach(slot => {
+    const entry = guide[slot.dataset.epgId];
+    const program = entry && (entry.now || entry.next);
+    if (!program) return;
+    slot.querySelector('.epg-title').textContent = (entry.now ? '' : clock(program.start) + ' · ') + program.title;
+    slot.querySelector('.epg-bar').style.setProperty('--progress', (entry.now ? progressOf(entry.now) : 0) + '%');
+    slot.hidden = false;
+  });
+}
+
+async function updateProgramInfo() {
+  const box = $('#program-info');
+  const channel = state.current;
+  if (!channel || !channel.epg_id || state.job) { box.hidden = true; return; }
+  const guide = await api('/guide/now?ids=' + encodeURIComponent(channel.epg_id), {skipAuthRedirect: true}).catch(() => ({}));
+  const entry = guide[channel.epg_id];
+  if (state.current !== channel || !entry || !(entry.now || entry.next)) { box.hidden = true; return; }
+  const now = entry.now, next = entry.next;
+  $('.program-now', box).hidden = !now;
+  $('.program-bar', box).hidden = !now;
+  if (now) {
+    $('#program-now-title').textContent = now.title;
+    $('#program-now-time').textContent = clock(now.start) + ' – ' + clock(now.stop);
+    $('#program-progress').style.width = progressOf(now) + '%';
+  }
+  $('.program-next', box).hidden = !next;
+  if (next) {
+    $('#program-next-title').textContent = next.title;
+    $('#program-next-time').textContent = clock(next.start);
+  }
+  box.hidden = false;
+}
+setInterval(() => { if (state.current) updateProgramInfo().catch(() => {}); }, 30000);
+
+function fullscreenWhenReady(tries = 20) {
+  // Le double-clic suit un clic qui vient de lancer la lecture : on attend
+  // que le lecteur soit affiche, dans la fenetre d'activation du geste.
+  if (!$('#player-wrap').hidden) { if (!document.fullscreenElement) $('#fullscreen').click(); return; }
+  if (tries > 0) setTimeout(() => fullscreenWhenReady(tries - 1), 100);
 }
 
 async function renderChannels(more = false) {
@@ -670,8 +734,10 @@ async function renderChannels(more = false) {
     if (!more) $('#channels').replaceChildren();
     const fragment = document.createDocumentFragment();
     const kind = {vod: 'movie', series: 'series'}[state.mode] || 'channel';
-    items.forEach(c => fragment.append(row(c, kind)));
+    const first = $('#channels').children.length;
+    items.forEach((c, i) => fragment.append(row(c, kind, first + i + 1)));
     $('#channels').append(fragment);
+    if (kind === 'channel') loadNowNext(items).catch(() => {});
     $('#load-more').hidden = !hasMore;
     $('#empty').hidden = $('#channels').children.length > 0;
     const totalRendered = $('#channels').children.length;
@@ -705,6 +771,12 @@ async function renderChannels(more = false) {
 }
 
 $('#load-more').onclick = () => { state.page++; renderChannels(true); };
+// En colonne defilante, la suite se charge en approchant du bas : pas de bouton a viser.
+$('#channels').addEventListener('scroll', e => {
+  const list = e.currentTarget, more = $('#load-more');
+  if (more.hidden || more.disabled) return;
+  if (list.scrollTop + list.clientHeight > list.scrollHeight - 600) more.click();
+}, {passive: true});
 
 let filterGeneration = 0;
 async function loadFilters() {
@@ -931,7 +1003,8 @@ async function openSettings() {
   // prendre un nouveau : dans l'autre sens on memorise des elements deja
   // masques, et on efface l'instantane qu'on vient tout juste de constituer.
   restoreSettingsSnapshot();
-  state.configSnapshot = ['#player-wrap', '#preferences', '#recent-wrap', '#catalogue', '#preparations']
+  document.body.classList.add('view-config');
+  state.configSnapshot = ['#player-wrap', '#preferences', '#recent-wrap', '#catalogue', '#preparations', '#filters', '#idle-hero']
     .map(id => {
       const element = $(id);
       if (!element) return null;
@@ -951,6 +1024,7 @@ async function openSettings() {
 async function closeSettings() {
   if (!state.configOpen) return;
   state.configOpen = false;
+  document.body.classList.remove('view-config');
   $('#config').hidden = true;
   clearInterval(state.configTimer);
   state.configTimer = null;

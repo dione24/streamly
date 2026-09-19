@@ -1,0 +1,657 @@
+/* ====================================================================
+   Interface « lecteur TV » : rail de navigation, colonnes qui defilent
+   chacune pour soi, lecteur toujours visible. S'appuie sur les variables
+   et les composants de style.css ; ce fichier ne porte que la structure.
+   ==================================================================== */
+
+#app.tv {
+  --rail: 76px;
+  --rail-open: 212px;
+  --groups: 236px;
+  min-height: 100dvh;
+}
+
+#app.tv footer { display: none; }
+
+/* ------------------------------------------------------------ Rail */
+
+.rail {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 40;
+  width: var(--rail);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 12px;
+  background: linear-gradient(180deg, #0d0d1a 0%, #0a0a14 100%);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+  transition: width 0.22s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.22s;
+}
+
+.rail:hover, .rail:focus-within {
+  width: var(--rail-open);
+  box-shadow: 24px 0 60px rgba(0, 0, 0, 0.55);
+}
+
+.rail .wordmark {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 6px;
+  margin-bottom: 14px;
+  font-size: 1.25rem;
+  text-decoration: none;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.rail .brand-icon { flex: 0 0 40px; }
+
+.rail .tabs, .rail .account-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+}
+
+.rail .account-actions {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.rail .tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.rail .tab:hover, .rail .tab:focus-visible {
+  background: var(--panel-subtle);
+  color: var(--text);
+}
+
+.rail .tab.active {
+  background: var(--accent-dim);
+  color: var(--accent-hover);
+}
+
+.rail .tab.active::before {
+  content: '';
+  position: absolute;
+  left: -12px;
+  top: 12px;
+  bottom: 12px;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background: linear-gradient(180deg, #7c3aed, #d946ef);
+}
+
+.rail-icon {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+}
+
+.rail-label {
+  opacity: 0;
+  transform: translateX(-6px);
+  transition: opacity 0.18s, transform 0.18s;
+}
+
+.rail:hover .rail-label, .rail:focus-within .rail-label {
+  opacity: 1;
+  transform: none;
+}
+
+/* ----------------------------------------------------------- Scene */
+
+.stage {
+  margin-left: var(--rail);
+  min-width: 0;
+}
+
+#app.tv .notice {
+  position: fixed;
+  z-index: 60;
+  top: 16px;
+  left: calc(var(--rail) + 50%);
+  transform: translateX(calc(-50% - var(--rail) / 2));
+  max-width: min(640px, 80vw);
+  margin: 0;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+}
+
+/* Programme en cours : liste des chaines et panneau du lecteur */
+
+.ch-num {
+  flex: 0 0 auto;
+  min-width: 2.2em;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  opacity: 0.75;
+}
+
+.epg-now {
+  display: grid;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.epg-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #c9c9dd;
+  font-size: 0.78rem;
+}
+
+.epg-bar, .program-bar {
+  display: block;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.epg-bar::after {
+  content: '';
+  display: block;
+  width: var(--progress, 0%);
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #7c3aed, #d946ef);
+}
+
+.program-info {
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.10), rgba(18, 18, 31, 0.6));
+}
+
+.program-now, .program-next {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.program-now strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1.05rem;
+}
+
+.program-next { color: var(--muted); font-size: 0.88rem; }
+.program-next span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.program-tag {
+  color: var(--accent);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.program-time {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.program-bar { height: 4px; }
+.program-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #7c3aed, #d946ef);
+  transition: width 0.6s ease;
+}
+
+.idle-hero {
+  position: relative;
+  display: grid;
+  align-content: center;
+  gap: 10px;
+  min-height: 300px;
+  padding: 40px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 140% at 85% 0%, rgba(168, 85, 247, 0.28), transparent 55%),
+    radial-gradient(90% 120% at 0% 100%, rgba(124, 58, 237, 0.16), transparent 60%),
+    var(--panel);
+}
+
+.idle-hero::after {
+  content: '';
+  position: absolute;
+  right: -70px;
+  top: -70px;
+  width: 260px;
+  height: 260px;
+  border-radius: 50%;
+  border: 1px solid rgba(196, 181, 253, 0.22);
+  box-shadow: 0 0 0 38px rgba(196, 181, 253, 0.05), 0 0 0 86px rgba(196, 181, 253, 0.03);
+  pointer-events: none;
+}
+
+.idle-hero h2 { margin: 0; font-size: clamp(1.6rem, 2.4vw, 2.3rem); line-height: 1.1; }
+.idle-hero .keyboard-hints { margin-top: 12px; color: var(--muted); font-size: 0.8rem; }
+
+/* ============================================================ Grand ecran */
+
+@media (min-width: 1000px) {
+  #app.tv { height: 100dvh; overflow: hidden; }
+
+  .stage { height: 100dvh; display: flex; flex-direction: column; }
+
+  #app.tv .workspace {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: auto minmax(330px, 0.85fr) minmax(0, 1.5fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* --- Colonne 1 : categories */
+  #app.tv #filters.groups {
+    grid-column: 1;
+    width: var(--groups);
+    display: flex;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 10px;
+    margin: 0;
+    padding: 22px 12px 14px 18px;
+    border-right: 1px solid var(--line);
+    background: #0c0c18;
+    overflow: hidden;
+  }
+
+  #app.tv .groups > label {
+    display: grid;
+    gap: 5px;
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: none;
+    margin: 0;
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  #app.tv .groups select { width: 100%; min-height: 38px; font-size: 0.85rem; }
+
+  #app.tv .groups .category-filter {
+    flex: 1 1 0;
+    width: auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    order: 0;
+  }
+
+  #app.tv .groups .category-select { display: none; }
+  #app.tv .groups .category-search-box { max-width: none; flex: 0 0 auto; }
+
+  #app.tv .groups .category-chips {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    display: flex;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 2px;
+    margin: 0 -6px 0 0;
+    padding: 0 6px 12px 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  #app.tv .groups .category-chip {
+    flex: 0 0 auto;
+    width: 100%;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: #c4c4d8;
+    font-size: 0.86rem;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-align: left;
+    text-transform: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  #app.tv .groups .category-chip:hover { background: var(--panel-subtle); color: var(--text); }
+
+  #app.tv .groups .category-chip.active {
+    background: linear-gradient(135deg, #7c3aed, #a855f7);
+    color: #fff;
+    font-weight: 700;
+    box-shadow: 0 8px 24px rgba(124, 58, 237, 0.35);
+  }
+
+  #app.tv .groups > #count {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 8px 2px 0;
+    border-top: 1px solid var(--line);
+  }
+
+  /* --- Colonne 2 : chaines, films, series */
+  #app.tv #catalogue {
+    grid-column: 2;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 22px 8px 0 22px;
+    overflow: hidden;
+    border-right: 1px solid var(--line);
+  }
+
+  #app.tv #catalogue .catalogue-heading {
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    margin: 0 14px 14px 0;
+  }
+
+  #app.tv #catalogue h2 { font-size: 1.5rem; margin: 0; }
+  #app.tv #catalogue .search-box { width: 100%; max-width: none; }
+
+  #app.tv #channels {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+    grid-auto-rows: max-content;
+    gap: 4px;
+    margin: 0;
+    padding: 2px 10px 24px 2px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  #app.tv .channel-card {
+    border-color: transparent;
+    border-radius: 12px;
+    background: transparent;
+    box-shadow: none;
+    contain-intrinsic-size: auto 66px;
+  }
+
+  #app.tv .channel-card:hover { background: var(--panel); transform: none; }
+
+  #app.tv .channel-card.now-playing {
+    background: linear-gradient(90deg, rgba(124, 58, 237, 0.30), rgba(124, 58, 237, 0.06));
+    border-color: rgba(167, 139, 250, 0.45);
+  }
+
+  #app.tv .channel-main { min-height: 62px; padding: 8px 10px; gap: 12px; }
+  #app.tv .channel-card .logo-slot { width: 46px; height: 46px; border-radius: 10px; }
+  #app.tv .channel-card .name { font-size: 0.95rem; }
+  #app.tv .channel-card .sub { font-size: 0.72rem; }
+  #app.tv #channels:empty { flex: 0 0 auto; padding: 0; }
+  #app.tv #empty { margin: 0 14px 0 0; }
+  #app.tv #load-more { flex: 0 0 auto; margin: 8px 14px 14px 0; }
+
+  /* --- Colonne 3 : lecteur */
+  #app.tv #viewer {
+    grid-column: 3;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding: 22px 26px 26px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  #app.tv #player-wrap {
+    position: static;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  #app.tv .video-stage {
+    border-radius: 16px;
+    overflow: hidden;
+    max-height: calc(100dvh - 330px);
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.65), 0 0 0 1px var(--line);
+  }
+
+  #app.tv .player-heading { margin: 0; }
+  #app.tv .player-heading h1 { font-size: clamp(1.3rem, 1.9vw, 1.9rem); }
+  #app.tv #preferences, #app.tv #recent-wrap { margin: 0; }
+
+  /* Mode cinema : « Masquer les chaines » ne garde que le lecteur. */
+  body.catalogue-collapsed #app.tv #filters,
+  body.catalogue-collapsed #app.tv #catalogue { display: none; }
+  body.catalogue-collapsed #app.tv #viewer { grid-column: 1 / -1; padding-inline: clamp(26px, 9vw, 180px); }
+  body.catalogue-collapsed #app.tv .video-stage { max-height: calc(100dvh - 260px); }
+
+  /* --- Films et series : grille d'affiches, le lecteur ne prend la scene
+         que lorsqu'un film prepare est en lecture. */
+  body.mode-vod #app.tv #viewer, body.mode-series #app.tv #viewer { display: none; }
+  body.mode-vod #app.tv #catalogue, body.mode-series #app.tv #catalogue { grid-column: 2 / -1; border-right: 0; }
+
+  body.mode-vod.is-playing #app.tv #viewer, body.mode-series.is-playing #app.tv #viewer,
+  body.mode-prepared.is-playing #app.tv #viewer { display: flex; grid-column: 1 / -1; padding-inline: clamp(26px, 9vw, 180px); }
+  body.mode-vod.is-playing #app.tv #catalogue, body.mode-series.is-playing #app.tv #catalogue,
+  body.mode-vod.is-playing #app.tv #filters, body.mode-series.is-playing #app.tv #filters,
+  body.mode-prepared.is-playing #app.tv #preparations { display: none; }
+
+  body.mode-vod #app.tv #catalogue .catalogue-heading,
+  body.mode-series #app.tv #catalogue .catalogue-heading {
+    flex-direction: row;
+    align-items: end;
+    justify-content: space-between;
+  }
+  body.mode-vod #app.tv #catalogue .search-box,
+  body.mode-series #app.tv #catalogue .search-box { width: min(420px, 45%); }
+
+  body.mode-vod #app.tv #channels, body.mode-series #app.tv #channels {
+    grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+    align-items: start;
+    gap: 22px 16px;
+    padding: 6px 14px 40px 4px;
+  }
+
+  /* --- Favoris : pas de colonne de categories */
+  body.mode-favorites #app.tv #catalogue { grid-column: 1 / 3; padding-left: 26px; }
+
+  /* --- Films prets et reglages : pleine scene, defilement propre */
+  body.mode-prepared #app.tv #viewer { display: none; }
+  #app.tv #preparations, #app.tv #config {
+    grid-column: 1 / -1;
+    margin: 0;
+    padding: 30px clamp(26px, 5vw, 70px) 60px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    overflow-y: auto;
+  }
+  body.view-config #app.tv #viewer { display: none; }
+}
+
+/* Affiches : valable a toutes les tailles */
+#app.tv .movie-card {
+  border: 0;
+  background: none;
+  box-shadow: none;
+  overflow: visible;
+  contain-intrinsic-size: auto 300px;
+}
+
+#app.tv .movie-card .channel-main {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  min-height: 0;
+  padding: 0;
+  text-align: left;
+}
+
+#app.tv .movie-card .logo-slot {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 2 / 3;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5);
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.22s;
+}
+
+#app.tv .movie-card .channel-logo {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  object-fit: cover;
+  padding: 0;
+}
+
+#app.tv .movie-card .logo-placeholder { font-size: 1.6rem; }
+
+#app.tv .movie-card:hover .logo-slot,
+#app.tv .movie-card:focus-within .logo-slot {
+  transform: translateY(-4px) scale(1.03);
+  box-shadow: 0 22px 50px rgba(0, 0, 0, 0.65), 0 0 0 2px var(--accent);
+}
+
+#app.tv .movie-card .name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  font-size: 0.88rem;
+  line-height: 1.3;
+}
+
+#app.tv .movie-card .sub { font-size: 0.72rem; }
+
+/* ============================================================ Petit ecran */
+
+@media (max-width: 999px) {
+  #app.tv { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
+
+  .rail, .rail:hover, .rail:focus-within {
+    inset: auto 0 0 0;
+    width: auto;
+    height: calc(64px + env(safe-area-inset-bottom));
+    flex-direction: row;
+    align-items: stretch;
+    gap: 0;
+    padding: 6px 6px env(safe-area-inset-bottom);
+    border-right: 0;
+    border-top: 1px solid var(--line);
+    background: rgba(10, 10, 20, 0.94);
+    backdrop-filter: blur(14px);
+    box-shadow: none;
+  }
+
+  .rail .wordmark { display: none; }
+
+  .rail .tabs, .rail .account-actions {
+    flex: 1 1 auto;
+    flex-direction: row;
+    gap: 0;
+  }
+
+  .rail .tabs { order: 1; }
+  .rail .account-actions { order: 2; flex: 0 0 auto; margin: 0; padding: 0; border: 0; }
+
+  .rail .tab {
+    flex: 1 1 0;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    height: auto;
+    min-width: 52px;
+    padding: 4px 2px;
+    font-size: 0.62rem;
+  }
+
+  .rail .tab.active::before { left: 25%; right: 25%; top: -6px; bottom: auto; width: auto; height: 3px; border-radius: 0 0 4px 4px; }
+  .rail-label, .rail:hover .rail-label { opacity: 1; transform: none; }
+
+  .stage { margin-left: 0; }
+  #app.tv .notice { left: 50%; transform: translateX(-50%); }
+
+  #app.tv .workspace { display: flex; flex-direction: column; gap: 18px; padding: 16px; }
+  #app.tv #viewer { order: -1; display: flex; flex-direction: column; gap: 14px; }
+  #app.tv #filters.groups { order: 1; }
+  #app.tv #catalogue { order: 2; }
+
+  /* Sur telephone, la liste passe avant l'accueil. */
+  #app.tv .idle-hero { display: none; }
+
+  body.is-playing #app.tv #player-wrap {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    margin: -16px -16px 0;
+    padding: 0 0 10px;
+    border-radius: 0;
+    background: var(--bg);
+  }
+
+  body.mode-vod #app.tv #channels, body.mode-series #app.tv #channels {
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+    gap: 16px 12px;
+  }
+
+  body.view-config #app.tv #viewer, body.mode-prepared #app.tv #viewer { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail, .rail-label, #app.tv .movie-card .logo-slot { transition: none; }
+}

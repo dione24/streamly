@@ -462,7 +462,7 @@ XMLTV = '''<?xml version="1.0" encoding="UTF-8"?>
 <programme start="20260919120000 +0000" stop="20260919140000 +0000" channel="m6.fr"><title>Film</title></programme>
 </tv>
 '''
-NOW = 1789819200  # 2026-09-19 11:20 UTC
+NOW = 1789819200  # 2026-09-19 12:00 UTC
 
 
 class RelaySourceTests(unittest.TestCase):
@@ -525,6 +525,18 @@ class GuideTests(unittest.TestCase):
         guide = self.guide([self.source('a.xml', XMLTV[:XMLTV.index('<programme start="20260919120000 +0000" stop="20260919140000')])])
         self.assertTrue(guide.rebuild(now=NOW))
         self.assertEqual([p.findtext('title') for p in self.parsed(guide).iter('programme')], ['JT & meteo'])
+    def test_now_and_next_come_from_the_cached_guide(self):
+        guide = self.guide([self.source('a.xml', XMLTV)]); guide.rebuild(now=NOW)
+        self.assertEqual(guide.now_next(['tf1.fr'], now=NOW), {})   # lecture en tache de fond
+        for _ in range(50):
+            if guide.now_next(['tf1.fr'], now=NOW): break
+            time.sleep(.05)
+        found = guide.now_next(['tf1.fr', 'm6.fr', 'absente'], now=NOW + 600)
+        self.assertEqual(found['tf1.fr']['now']['title'], 'JT & meteo')
+        self.assertIsNone(found['tf1.fr']['next'])
+        before = guide.now_next(['m6.fr'], now=NOW - 600)['m6.fr']
+        self.assertIsNone(before['now']); self.assertEqual(before['next']['title'], 'Film')
+        self.assertNotIn('absente', found)
     def test_a_sync_forces_a_rebuild_even_when_fresh(self):
         guide = self.guide([self.source('a.xml', XMLTV)]); guide.rebuild(now=NOW)
         with patch.object(guide, 'rebuild') as rebuild:

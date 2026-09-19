@@ -72,6 +72,62 @@ class Guide:
         except OSError:
             return None
 
+    def _index(self):
+        """{chaine: [(debut, fin, titre)]} du guide sur disque, garde en memoire.
+
+        Relu quand le fichier change. Le premier appel lance la lecture en
+        tache de fond et repond vide : afficher une liste de chaines ne doit
+        jamais attendre l'analyse de 90 000 programmes.
+        """
+        try:
+            stamp = os.path.getmtime(self.path)
+        except OSError:
+            return {}
+        with self._lock:
+            if getattr(self, '_index_stamp', None) == stamp:
+                return self._index_data
+            if getattr(self, '_indexing', False):
+                return getattr(self, '_index_data', {})
+            self._indexing = True
+        threading.Thread(target=self._load_index, args=(stamp,), daemon=True).start()
+        return getattr(self, '_index_data', {})
+
+    def _load_index(self, stamp):
+        data = {}
+        try:
+            with gzip.open(self.path, 'rb') as fh:
+                for elem in _elements(fh, 'programme'):
+                    start, stop = _epoch(elem.get('start')), _epoch(elem.get('stop'))
+                    if start is None or stop is None:
+                        continue
+                    data.setdefault(elem.get('channel'), []).append(
+                        (start, stop, (elem.findtext('title') or '').strip()))
+            for rows in data.values():
+                rows.sort()
+        except (OSError, EOFError):
+            data = {}
+        with self._lock:
+            self._index_data, self._index_stamp, self._indexing = data, stamp, False
+
+    def now_next(self, ids, now=None):
+        """Programme en cours et suivant de chaque chaine demandee."""
+        now = time.time() if now is None else now
+        index, out = self._index(), {}
+        for cid in ids:
+            rows = index.get(cid)
+            if not rows:
+                continue
+            current = following = None
+            for start, stop, title in rows:
+                if start <= now < stop:
+                    current = {'title': title, 'start': start, 'stop': stop}
+                elif start > now:
+                    following = {'title': title, 'start': start, 'stop': stop}
+                    break
+            if current or following:
+                out[cid] = {'now': current, 'next': following}
+        return out
+
     def ensure_fresh(self, force=False):
         """Relance la construction en tache de fond si le guide a vieilli.
 

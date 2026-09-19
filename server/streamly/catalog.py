@@ -542,6 +542,7 @@ class Catalog:
                "  MIN(name) AS label,",
                "  MAX(icon) AS icon,",
                "  MAX(category_name) AS category,",
+               "  MAX(epg_id) AS epg_id,",
                "  COUNT(*) AS sources,",
                "  MAX(height) AS best_height,",
                "  GROUP_CONCAT(DISTINCT provider_id) AS providers",
