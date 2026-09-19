@@ -4,8 +4,8 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a14"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="style.css?v=20260919-v23">
-<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260919-v23"></script>
+<link rel="stylesheet" href="style.css?v=20260919-v24">
+<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260919-v24"></script>
 </head>
 <body>
 <!-- Masque au depart, comme #app : c'est /api/me qui tranche. Sans cela, le
@@ -188,6 +188,11 @@
    <p class="label-hint">TiviMate, IPTV Smarters, VLC… : collez ces identifiants dans votre lecteur. Le direct passe par ce serveur, compressé et adapté à la connexion.</p>
    <div id="player-access" class="player-access"></div>
    <p id="player-msg" role="status"></p>
+   <h3>Application Streamly</h3>
+   <p class="label-hint">L’application garde votre playlist sur l’appareil et ne passe par ce serveur que pour économiser des données. Générez un code, puis saisissez-le dans l’application.</p>
+   <div class="settings-actions"><button id="pair-code" class="quiet">Associer un appareil</button></div>
+   <p id="pair-value" class="token-value pair-code" hidden></p>
+   <ul id="device-list" class="device-list"></ul>
    <h3>Lectures et charge du serveur</h3>
    <pre id="status"></pre>
    <details><summary>Journal de synchronisation</summary><pre id="sync-log"></pre></details>

@@ -74,6 +74,19 @@ class Sessions:
             self.items[sid] = {'role': role, 'expires': now + 7 * 86400}
             return sid, role
 
+    def blocked(self, address):
+        """Vrai apres dix echecs en cinq minutes depuis cette adresse."""
+        now = time.time()
+        with self.lock:
+            self.attempts = {k: v for k, v in self.attempts.items() if now - v[1] < 300}
+            return self.attempts.get(address, (0, now))[0] >= 10
+
+    def failed(self, address):
+        now = time.time()
+        with self.lock:
+            count, since = self.attempts.get(address, (0, now))
+            self.attempts[address] = (count + 1, since)
+
     def player(self, username, password, address):
         """Compte d'un lecteur externe, ou None.
 

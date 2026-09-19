@@ -21,6 +21,7 @@ from streamly import m3u
 from streamly import app, config
 from streamly import player as playermod
 from streamly.epg import Guide
+from streamly import relay as relaymod
 import gzip
 import xml.etree.ElementTree as ET
 from streamly.vod import Movies
@@ -464,6 +465,38 @@ XMLTV = '''<?xml version="1.0" encoding="UTF-8"?>
 NOW = 1789819200  # 2026-09-19 11:20 UTC
 
 
+class RelaySourceTests(unittest.TestCase):
+    def resolve(self, *ips):
+        return patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', (ip, 0)) for ip in ips])
+    def test_public_http_sources_are_accepted(self):
+        with self.resolve('93.184.216.34'):
+            self.assertEqual(relaymod.check_source('http://Panel.Example:8080/u/p/12'), 'panel.example')
+    def test_internal_network_is_never_relayed(self):
+        for ip in ('127.0.0.1', '10.0.0.5', '192.168.1.10', '169.254.169.254', '100.64.0.1', '::1'):
+            with self.resolve(ip), self.assertRaises(ValueError):
+                relaymod.check_source('http://piege.example/flux')
+        # Un nom qui repond en public ET en prive reste refuse.
+        with self.resolve('93.184.216.34', '10.0.0.5'), self.assertRaises(ValueError):
+            relaymod.check_source('http://piege.example/flux')
+        with self.resolve('192.168.1.10'):
+            self.assertEqual(relaymod.check_source('http://nas.local/flux', allow_private=True), 'nas.local')
+    def test_only_http_urls(self):
+        for bad in ('file:///etc/passwd', 'rtmp://x/y', 'concat:a|b', '', None, 'http://', 'x' * 3000):
+            with self.assertRaises(ValueError):
+                relaymod.check_source(bad)
+    def test_pairing_codes_are_single_use_and_tokens_hashed(self):
+        saved = []
+        devices = relaymod.Devices({}, saved.append)
+        code, _ = devices.new_code()
+        self.assertIsNone(devices.pair('mauvais1', 'x'))
+        paired = devices.pair(code.upper()[:4] + '-' + code[4:], 'iPhone')
+        self.assertIsNone(devices.pair(code, 'rejoue'))
+        self.assertEqual(devices.find(paired['token'])['name'], 'iPhone')
+        self.assertNotIn(paired['token'], json.dumps(saved))
+        devices.remove(paired['id'])
+        self.assertIsNone(devices.find(paired['token']))
+
+
 class GuideTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.root = pathlib.Path(self.tmp.name)
@@ -684,6 +717,7 @@ class HTTPTests(unittest.TestCase):
         state.catalog = Catalog(root + '/catalog.db')
         state.movies = Movies(CFG, root + '/movies', state.catalog, state.transcoder)
         state.player = playermod.PlayerFacade(state.catalog, state.transcoder)
+        state.devices = relaymod.Devices(state.cfg, lambda _: None)
         state.guide = Guide(root + '/guide.xml.gz', lambda: [], lambda: set(), log=lambda _: None)
         state.sync_log = []; self.state = app.STATE = state
         app.STATE.provider.side_effect = lambda pid: CFG['providers'][0] if pid == 'p' else None
@@ -995,6 +1029,49 @@ class HTTPTests(unittest.TestCase):
         self.raw(base + '.m3u8'); self.assertEqual(self.raw(base + '/2.m3u8')[0], 200)
         self.assertEqual(len(self.state.transcoder.workers), 1)
         self.assertIn(web['ticket'], self.state.transcoder.tickets)
+    # ------------------------------------------------ application
+
+    def pair(self):
+        code = json.loads(self.request('/api/pair-code', {}, self.login()).read())['code']
+        return json.loads(self.request('/api/pair', {'code': code, 'name': 'Pixel'}).read())
+    def test_app_pairs_then_relays_its_own_source(self):
+        self.fake_ffmpeg()
+        self.assertEqual(self.request('/api/pair-code', {}, self.login('test-viewer')).status, 403)
+        self.assertEqual(self.request('/api/pair', {'code': 'abcdefgh'}).status, 401)
+        device = self.pair()
+        bearer = {'Authorization': 'Bearer ' + device['token']}
+        import socket
+        real = socket.getaddrinfo
+        fake = lambda host, *a, **k: [(2, 1, 6, '', ('93.184.216.34', 0))] if str(host).endswith('.example') else real(host, *a, **k)
+        with patch('socket.getaddrinfo', side_effect=fake):
+            r = self.request('/api/relay', {'source': 'http://panel.example/u/p/12', 'label': 'TF1', 'mode': 'eco'}, headers=dict(bearer))
+            played = json.loads(r.read())
+            self.assertEqual(r.status, 200); self.assertIsNone(r.headers['Set-Cookie'])
+            self.assertEqual(played['ceiling'], 650000)
+            ticket = self.state.transcoder.tickets[played['ticket']]
+            self.assertEqual(ticket['owner'], 'device:' + device['id'])
+            worker = next(iter(self.state.transcoder.workers.values()))
+            self.assertEqual((worker['provider'], worker['sources'][0]['url']), ('relay:panel.example', 'http://panel.example/u/p/12'))
+            # Le compteur du mode Budget : l'app suit sa consommation.
+            status = json.loads(self.request('/api/playback?ticket=' + played['ticket'], headers=dict(bearer)).read())
+            self.assertEqual(status['bytes'], 0)
+            # Une autre chaine du meme appareil remplace la premiere.
+            self.request('/api/relay', {'source': 'http://autre.example/u/p/13'}, headers=dict(bearer))
+            self.assertEqual(len(self.state.transcoder.workers), 1)
+        self.assertEqual(self.request('/api/relay', {'source': 'http://127.0.0.1:3306/'}, headers=dict(bearer)).status, 400)
+    def test_device_token_opens_nothing_else(self):
+        device = self.pair()
+        bearer = {'Authorization': 'Bearer ' + device['token']}
+        self.assertEqual(json.loads(self.request('/api/me', headers=dict(bearer)).read())['role'], 'device')
+        for path in ('/api/channels', '/api/devices', '/api/player-credentials', '/api/status'):
+            self.assertEqual(self.request(path, headers=dict(bearer)).status, 403, path)
+        for path in ('/api/providers/delete', '/api/pair-code', '/api/play', '/api/favorites'):
+            self.assertEqual(self.request(path, {}, headers=dict(bearer)).status, 403, path)
+        # Revocation depuis Reglages : le jeton cesse aussitot de fonctionner.
+        admin = self.login()
+        self.assertEqual([d['name'] for d in json.loads(self.request('/api/devices', cookie=admin).read())], ['Pixel'])
+        self.request('/api/devices/delete', {'id': device['id']}, admin)
+        self.assertEqual(self.request('/api/me', headers=dict(bearer)).status, 401)
     def test_player_credentials_in_settings(self):
         viewer, admin = self.login('test-viewer'), self.login()
         seen = json.loads(self.request('/api/player-credentials', cookie=viewer, headers={'Host': 'tv.example'}).read())['players'][0]

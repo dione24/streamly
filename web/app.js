@@ -943,6 +943,7 @@ async function openSettings() {
   await refreshConfig();
   // Hors du rafraichissement de 8 s : il remettrait a zero le choix en cours.
   loadPlayerAccess().catch(failure);
+  loadDevices().catch(failure);
   $('#config').scrollIntoView({behavior: 'smooth', block: 'start'});
   state.configTimer = setInterval(() => refreshConfig().catch(failure), 8000);
 }
@@ -1447,6 +1448,36 @@ async function loadPlayerAccess() {
     box.append(card);
   });
 }
+
+// Appareils de l'application, associes par un code a usage unique.
+async function loadDevices() {
+  const devices = await api('/devices');
+  const list = $('#device-list');
+  list.replaceChildren();
+  devices.forEach(device => {
+    const li = el('li');
+    const since = new Date(device.created * 1000).toLocaleDateString('fr-FR');
+    li.append(el('span', 'provider-name', device.name), el('span', 'detail-line', 'associé le ' + since));
+    const remove = el('button', 'quiet', 'Retirer');
+    remove.onclick = async () => {
+      if (!confirm('Retirer cet appareil ? Sa lecture en cours s’arrêtera.')) return;
+      await post('/devices/delete', {id: device.id});
+      await loadDevices();
+    };
+    li.append(remove);
+    list.append(li);
+  });
+}
+
+$('#pair-code').onclick = async () => {
+  try {
+    const data = await post('/pair-code');
+    // Groupe par quatre : plus simple a recopier sur un telephone.
+    $('#pair-value').textContent = data.code.slice(0, 4).toUpperCase() + '-' + data.code.slice(4).toUpperCase()
+      + '  ·  valable ' + Math.round(data.expires_in / 60) + ' min, utilisable une fois';
+    $('#pair-value').hidden = false;
+  } catch (err) { failure(err); }
+};
 
 $('#viewer-token').onclick = async () => {
   const data = await post('/viewer-token');

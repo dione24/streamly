@@ -19,6 +19,7 @@ from .transcoder import Transcoder, CapacityError, MODE_CEILINGS, capped_ceiling
 from .auth import Sessions
 from . import player as playermod
 from .epg import Guide
+from . import relay as relaymod
 from .vod import Movies
 from .m3u import M3UClient, PlaylistError, detect_xtream
 from .xtream import XtreamClient, parse_series_info
@@ -27,6 +28,9 @@ STARTUP_TIMEOUT = 25      # secondes d'attente de la premiere playlist
 ACCESS_LOG = []           # journal d'acces circulaire, expose via /api/access
 LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
 LIVE_OVERLAP_SEGMENTS = 6  # fin de l'ancienne generation gardee tant que la nouvelle est plus courte
+# Un appareil associe ne fait que lire : rien d'autre de l'API ne lui est ouvert.
+DEVICE_GET = ("/api/me", "/api/playback")
+DEVICE_POST = ("/api/relay", "/api/stop")
 GZIP_MIN_BYTES = 1400     # en dessous, l'en-tete gzip coute plus qu'il ne gagne
 PLAYER_PATHS = ("/get.php", "/player_api.php", "/panel_api.php", "/xmltv.php")
 # Tickets, chemins de lecteur et identifiants en query ne vont jamais au journal.
@@ -99,6 +103,7 @@ class State:
                            self.cfg.get("epg_refresh_hours", 6),
                            log=lambda msg: print(msg, flush=True))
         self.guide.ensure_fresh()
+        self.devices = relaymod.Devices(self.cfg, cfgmod.save)
         self.movies = Movies(self.cfg, os.path.join(cfgmod.DATA_DIR, "movies"), self.catalog, self.transcoder)
         self.sync_lock = threading.Lock()
         self.sync_log = []
@@ -544,6 +549,14 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             self._request_session = None
             return None
+        address = self._client_ip()
+        device = None if STATE.sessions.blocked(address) else STATE.devices.find(token)
+        if device:
+            # L'app envoie son jeton a chaque requete : pas de cookie, et un
+            # proprietaire stable pour « une lecture a la fois par appareil ».
+            session = dict(id='device:' + device['id'], role='device')
+            self._request_session = session
+            return session
         try:
             sid, role = STATE.sessions.login(token, self._client_ip())
         except ValueError:
@@ -582,8 +595,11 @@ class Handler(BaseHTTPRequestHandler):
             # /live/ ni extension : beaucoup d'apps IPTV l'emploient.
             return self._serve_live("/live" + path)
         if path.startswith("/api/"):
-            if not self._api_authed(params):
+            session = self._api_authed(params)
+            if not session:
                 return self._err(401, "jeton invalide ou absent")
+            if session['role'] == 'device' and path not in DEVICE_GET:
+                return self._err(403, "réservé à l'interface web")
             try:
                 return self._api_get(path, params)
             except (ValueError, TypeError):
@@ -627,15 +643,27 @@ class Handler(BaseHTTPRequestHandler):
             # champ vaut donc « se souvenir », comme avant ce changement.
             self._cookie = self._session_cookie(sid, remember=_as_bool(body.get('remember', True)))
             return self._json({'role': role}, extra={'Cache-Control': 'no-store'})
-        if not self._api_authed(params):
+        if path == '/api/pair':
+            address = self._client_ip()
+            if STATE.sessions.blocked(address):
+                return self._err(429, 'Trop de tentatives. Réessayez dans cinq minutes.')
+            paired = STATE.devices.pair(body.get('code'), body.get('name'))
+            if not paired:
+                STATE.sessions.failed(address)
+                return self._err(401, 'Code inconnu ou expiré.')
+            return self._json(paired)
+        session = self._api_authed(params)
+        if not session:
             return self._err(401, 'connexion requise')
+        if session['role'] == 'device' and path not in DEVICE_POST:
+            return self._err(403, "réservé à l'interface web")
         if path == '/api/logout':
             sid = self._api_authed(None)['id']
             STATE.transcoder.release_owner(sid)
             STATE.sessions.logout(sid)
             self._cookie = self._clear_cookie()
             return self._raw(200, '{}', 'application/json', {'Cache-Control': 'no-store'})
-        if path.startswith('/api/providers') or path in ('/api/sync', '/api/viewer-token', '/api/player-credentials'):
+        if path.startswith('/api/providers') or path.startswith('/api/devices') or path in ('/api/sync', '/api/viewer-token', '/api/player-credentials', '/api/pair-code'):
             if not self._admin():
                 return self._err(403, 'accès administrateur requis')
         try:
@@ -883,6 +911,10 @@ class Handler(BaseHTTPRequestHandler):
                 "load": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
             })
 
+        if path == '/api/devices':
+            if not self._admin():
+                return self._err(403, "accès administrateur requis")
+            return self._json(STATE.devices.list())
         if path == '/api/player-credentials':
             # Lecture seule comprise : c'est ce qu'on colle dans son lecteur.
             return self._json({'players': [self._player_credentials(p) for p in STATE.cfg.get('players', [])]})
@@ -1130,18 +1162,9 @@ class Handler(BaseHTTPRequestHandler):
             if not best:
                 return self._err(404, 'chaîne introuvable')
             audio_only = _as_bool(body.get('audio_only'))
-            mode = body.get('mode', 'balanced')
-            ceiling = MODE_CEILINGS.get(mode, MODE_CEILINGS['balanced'])
-            budget = 0
-            if mode == 'budget':
-                mb, minutes = float(body.get('budget_mb', 800)), float(body.get('minutes', 120))
-                if not (20 <= mb <= 50000 and 5 <= minutes <= 1440):
-                    return self._err(400, 'budget ou durée hors limites')
-                budget = int(mb * 1000000 * .97)
-                ceiling = int(budget * 8 / (minutes * 60))
-            ceiling = capped_ceiling(STATE.cfg, ceiling)
-            if not STATE.transcoder.allowed_levels({'ceiling': ceiling}):
-                return self._err(400, 'Budget insuffisant pour la durée choisie. Augmentez le volume ou réduisez la durée.')
+            ceiling, budget, refusal = _playback_limits(body)
+            if refusal:
+                return self._err(400, refusal)
             try:
                 ticket = STATE.transcoder.open(self._session()['id'], (lang or '') + '|' + canonical,
                     STATE.candidate_urls(best['provider_id'], best['stream_id']), canonical, ceiling, budget, audio_only=audio_only)
@@ -1157,6 +1180,36 @@ class Handler(BaseHTTPRequestHandler):
                 'audio_only': audio_only,
                 'epg_id': best.get('epg_id'),
             })
+        if path == '/api/relay':
+            # L'app detient la playlist ; elle confie ici un flux a compresser.
+            try:
+                host = relaymod.check_source(body.get('source'), _as_bool(STATE.cfg.get('relay_allow_private')))
+            except ValueError as exc:
+                return self._err(400, str(exc))
+            source = body['source'].strip()
+            audio_only = _as_bool(body.get('audio_only'))
+            ceiling, budget, refusal = _playback_limits(body)
+            if refusal:
+                return self._err(400, refusal)
+            identity = 'relay|' + relaymod._digest(source)
+            try:
+                # Un hote = un abonnement, souvent a une seule connexion : deux
+                # flux du meme hote ne s'ouvrent pas en parallele.
+                ticket = STATE.transcoder.open(self._session()['id'], identity,
+                    [{'provider': 'relay:' + host, 'url': source}],
+                    str(body.get('label') or 'Relais')[:80], ceiling, budget, audio_only=audio_only)
+            except CapacityError as exc:
+                return self._err(409, str(exc))
+            return self._json({'ticket': ticket, 'play_url': '/s/%s/master.m3u8' % ticket,
+                               'ceiling': ceiling, 'budget': budget, 'audio_only': audio_only})
+        if path == '/api/pair-code':
+            code, seconds = STATE.devices.new_code()
+            return self._json({'code': code, 'expires_in': seconds})
+        if path == '/api/devices/delete':
+            device_id = str(body.get('id') or '')
+            STATE.transcoder.release_owner('device:' + device_id)
+            STATE.devices.remove(device_id)
+            return self._json({'ok': True})
         if path == '/api/stop':
             STATE.transcoder.release(body.get('ticket'), self._session()['id'])
             return self._json({'ok': True})
@@ -1181,6 +1234,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self._player_credentials(target))
 
         return self._err(404, "endpoint inconnu")
+
+
+def _playback_limits(body):
+    """(plafond, budget, refus) d'une demande de lecture, web ou app."""
+    mode = body.get('mode', 'balanced')
+    ceiling = MODE_CEILINGS.get(mode, MODE_CEILINGS['balanced'])
+    budget = 0
+    if mode == 'budget':
+        mb, minutes = float(body.get('budget_mb', 800)), float(body.get('minutes', 120))
+        if not (20 <= mb <= 50000 and 5 <= minutes <= 1440):
+            return 0, 0, 'budget ou durée hors limites'
+        budget = int(mb * 1000000 * .97)
+        ceiling = int(budget * 8 / (minutes * 60))
+    ceiling = capped_ceiling(STATE.cfg, ceiling)
+    if not STATE.transcoder.allowed_levels({'ceiling': ceiling}):
+        return 0, 0, 'Budget insuffisant pour la durée choisie. Augmentez le volume ou réduisez la durée.'
+    return ceiling, budget, None
 
 
 def _hls_segments(text):

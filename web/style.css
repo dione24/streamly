@@ -1625,6 +1625,28 @@ progress::-webkit-progress-value {
   }
 }
 
+.pair-code {
+  font-size: 1.1rem;
+  letter-spacing: 0.06em;
+}
+
+.device-list {
+  padding: 0;
+  list-style: none;
+}
+
+.device-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.device-list li .provider-name {
+  flex: 1;
+}
+
 .token-value {
   word-break: break-all;
   padding: 16px;
