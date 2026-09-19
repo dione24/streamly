@@ -133,6 +133,19 @@ class CapacityError(RuntimeError):
 MODE_CEILINGS = {'eco': 650000, 'balanced': 1150000, 'sport': 0}
 
 
+def capped_ceiling(cfg, ceiling):
+    """Plafond d'une lecture, borne par max_mode.
+
+    Sur une machine partagee, l'exploitant limite chaque instance (le 720p
+    pese pres de la moitie de l'encodage) ; l'administrateur de l'instance ne
+    peut pas depasser cette borne depuis l'interface.
+    """
+    cap = MODE_CEILINGS.get(cfg.get('max_mode'), 0)
+    if not cap:
+        return ceiling
+    return min(ceiling, cap) if ceiling else cap
+
+
 def _redact_credentials(text, cfg=None):
     """Masque les identifiants provider dans les messages d'erreur.
 

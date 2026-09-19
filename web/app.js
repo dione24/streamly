@@ -1416,10 +1416,11 @@ async function loadPlayerAccess() {
     const tools = el('div', 'access-tools');
     const mode = el('select');
     mode.setAttribute('aria-label', 'Qualité maximale proposée au lecteur');
-    PLAYER_MODES.forEach(([value, label]) => {
+    const allowed = PLAYER_MODES.slice(0, PLAYER_MODES.findIndex(m => m[0] === player.max_mode) + 1 || PLAYER_MODES.length);
+    allowed.forEach(([value, label]) => {
       const option = el('option', '', label);
       option.value = value;
-      option.selected = value === player.mode;
+      option.selected = value === (allowed.some(m => m[0] === player.mode) ? player.mode : allowed[allowed.length - 1][0]);
       mode.append(option);
     });
     mode.onchange = async () => {

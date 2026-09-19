@@ -834,6 +834,12 @@ class HTTPTests(unittest.TestCase):
             bad('10.0.0.1')
         self.assertEqual(good('10.0.0.1'), 401)
         self.assertEqual(good('10.0.0.2'), 200)
+        # Transition : proxy en place, ecoute encore publique.
+        self.state.cfg.update(listen_host='0.0.0.0', trust_proxy=True)
+        self.assertEqual(good('10.0.0.1'), 401)
+        m3u = self.request('/get.php?username=tv&password=salon2024xyz', headers={
+            'X-Forwarded-For': '10.0.0.3', 'X-Forwarded-Proto': 'https', 'Host': 'tv.example'})
+        self.assertEqual(m3u.status, 200)
     # ------------------------------------------------ direct lecteur
 
     def raw(self, path, method='GET'):
@@ -969,6 +975,18 @@ class HTTPTests(unittest.TestCase):
             self.raw(base + '.m3u8')
             status, headers, _ = self.raw(base + '/2.m3u8')
         self.assertEqual((status, headers['Retry-After']), (503, '10'))
+    def test_instance_cap_bounds_web_and_players(self):
+        ids = self.fake_ffmpeg()
+        self.state.cfg['players'] = [dict(username='tv', password='salon2024xyz', mode='sport')]
+        self.state.sessions.cfg = self.state.cfg
+        self.state.cfg['max_mode'] = 'balanced'
+        body = self.raw('/live/tv/salon2024xyz/%d.m3u8' % ids['TF1'])[2]
+        self.assertNotIn('/0.m3u8', body); self.assertIn('/1.m3u8', body)
+        web = json.loads(self.request('/api/play', {'lang': 'FR', 'canonical': 'TF1', 'mode': 'sport'}, self.login()).read())
+        self.assertEqual(web['ceiling'], 1150000)
+        # Un mode plus econome que la borne reste respecte.
+        eco = json.loads(self.request('/api/play', {'lang': 'FR', 'canonical': 'M6', 'mode': 'eco'}, self.login()).read())
+        self.assertEqual(eco['ceiling'], 650000)
     def test_player_and_web_share_the_same_encoder(self):
         ids = self.fake_ffmpeg()
         cookie = self.login()

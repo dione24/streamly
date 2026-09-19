@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config as cfgmod
 from .catalog import Catalog
-from .transcoder import Transcoder, CapacityError, MODE_CEILINGS
+from .transcoder import Transcoder, CapacityError, MODE_CEILINGS, capped_ceiling
 from .auth import Sessions
 from . import player as playermod
 from .epg import Guide
@@ -272,7 +272,9 @@ class Handler(BaseHTTPRequestHandler):
     def _behind_proxy(self):
         # Les en-tetes X-Forwarded-* ne sont crus que si Streamly n'ecoute
         # qu'en local : il n'est alors joignable qu'a travers le proxy.
-        return (STATE.cfg.get("listen_host") in LOCAL_HOSTS
+        # trust_proxy couvre la transition : proxy HTTPS en place, port HTTP
+        # encore ouvert. Seule une requete venue de la boucle locale est crue.
+        return ((STATE.cfg.get("listen_host") in LOCAL_HOSTS or _as_bool(STATE.cfg.get("trust_proxy")))
                 and self.client_address[0] in ("127.0.0.1", "::1"))
 
     def _client_ip(self):
@@ -380,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._raw(401, "identifiants refusés\n", "text/plain; charset=utf-8",
                              {"Cache-Control": "no-store"})
         owner = playermod.owner(player)
-        ceiling = MODE_CEILINGS.get(player.get("mode"), MODE_CEILINGS["balanced"])
+        ceiling = capped_ceiling(STATE.cfg, MODE_CEILINGS.get(player.get("mode"), MODE_CEILINGS["balanced"]))
         mpegurl = "application/vnd.apple.mpegurl"
         match = re.fullmatch(r"(\d{1,10})(?:\.(m3u8|ts))?", parts[2]) if len(parts) == 3 else \
             re.fullmatch(r"(\d{1,10})", parts[2])
@@ -499,6 +501,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "type": "m3u_plus", "output": "m3u8"})
         return {"username": player["username"], "password": player["password"],
                 "mode": player.get("mode", "balanced"), "server": base,
+                "max_mode": STATE.cfg.get("max_mode") or "sport",
                 "m3u_url": "%s/get.php?%s" % (base, query)}
 
     # -------------------------------------------------------------- jeton
@@ -1136,6 +1139,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(400, 'budget ou durée hors limites')
                 budget = int(mb * 1000000 * .97)
                 ceiling = int(budget * 8 / (minutes * 60))
+            ceiling = capped_ceiling(STATE.cfg, ceiling)
             if not STATE.transcoder.allowed_levels({'ceiling': ceiling}):
                 return self._err(400, 'Budget insuffisant pour la durée choisie. Augmentez le volume ou réduisez la durée.')
             try:
