@@ -796,6 +796,12 @@ class HTTPTests(unittest.TestCase):
         status, headers, _ = self.raw('/live/tv/salon2024xyz/%d.ts' % ids['TF1'])
         self.assertEqual((status, headers['Location']), (302, '/live/tv/salon2024xyz/%d.m3u8' % ids['TF1']))
         self.assertEqual(self.raw('/live/tv/nope/%d.m3u8' % ids['TF1'])[0], 401)
+        # Forme courte Xtream, sans /live/ ni extension : renvoyee vers le HLS.
+        status, headers, _ = self.raw('/tv/salon2024xyz/%d' % ids['TF1'])
+        self.assertEqual((status, headers['Location']), (302, '/live/tv/salon2024xyz/%d.m3u8' % ids['TF1']))
+        self.assertEqual(self.raw('/tv/salon2024xyz/%d.m3u8' % ids['TF1'])[0], 200)
+        self.assertFalse(any('salon2024xyz' in line for line in app.ACCESS_LOG[-3:]))
+        self.assertEqual(self.raw('/tv/nope/%d' % ids['TF1'])[0], 401)
         self.assertEqual(self.raw('/live/tv/salon2024xyz/12345.m3u8')[0], 404)
     def test_level_playlist_opens_once_and_points_at_tickets(self):
         ids = self.fake_ffmpeg()

@@ -32,6 +32,7 @@ PLAYER_PATHS = ("/get.php", "/player_api.php", "/panel_api.php", "/xmltv.php")
 REDACTIONS = (
     (re.compile(r"(/(?:s|v|media)/)[^/ ?]+"), r"\1[redacted]"),
     (re.compile(r"(/live/)[^/ ?]+/[^/ ?]+"), r"\1[redacted]"),
+    (re.compile(r"(\"[A-Z]+ /)(?!live/)[^/ ?\"]+/[^/ ?\"]+(/\d+(?:\.[a-z0-9]+)?[ ?])"), r"\1[redacted]\2"),
     (re.compile(r"((?:username|password)=)[^& ]+"), r"\1[redacted]"),
 )
 
@@ -525,6 +526,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_player(path, params)
         if path.startswith("/live/"):
             return self._serve_live(path)
+        if re.fullmatch(r"/[^/]+/[^/]+/\d{1,10}(?:\.(?:ts|m3u8))?", path):
+            # Forme courte des panels Xtream, /{user}/{pass}/{id}, sans
+            # /live/ ni extension : beaucoup d'apps IPTV l'emploient.
+            return self._serve_live("/live" + path)
         if path.startswith("/api/"):
             if not self._api_authed(params):
                 return self._err(401, "jeton invalide ou absent")
