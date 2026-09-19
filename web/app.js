@@ -321,8 +321,72 @@ const STAGE_SCREENS = {
   movie: ['Ouverture du film…', 'VERSION ADAPTÉE À VOTRE FORFAIT'],
   wait: ['Reprise du direct…', 'LA SOURCE EST INSTABLE · MERCI DE PATIENTER QUELQUES SECONDES'],
   offline: ['Votre connexion Internet est interrompue', 'LA LECTURE REPRENDRA DÈS SON RETOUR'],
+  slow: ['Votre connexion est trop lente pour cette qualité', 'STREAMLY PASSE À UNE QUALITÉ PLUS LÉGÈRE · RAPPROCHEZ-VOUS DU WI-FI OU CHANGEZ DE RÉSEAU'],
   source: ['Cette chaîne ne répond pas chez votre fournisseur', 'ESSAYEZ UNE AUTRE CHAÎNE · SI LE PROBLÈME DURE, CONTACTEZ VOTRE FOURNISSEUR IPTV']
 };
+
+// Debit du spectateur, mesure pendant que l'encodeur demarre : sa connexion ne
+// sert a rien d'autre a ce moment-la. 200 Ko, garde dix minutes pour ne pas
+// depenser de donnees a chaque zapping.
+const NET_LEVELS = [
+  [0.6, 'faible', 'la qualité restera basse pour éviter les coupures'],
+  [1.5, 'correcte', 'idéale pour le 480p'],
+  [4, 'bonne', 'le 720p passera sans peine'],
+  [Infinity, 'excellente', 'toutes les qualités passeront']
+];
+
+async function measureConnection() {
+  const cached = store.json('net', null);
+  if (cached && Date.now() - cached.at < 600000) return cached.mbps;
+  const url = '/api/speedtest?t=' + Date.now();
+  const started = performance.now();
+  const res = await fetch(url, {credentials: 'same-origin', cache: 'no-store'});
+  if (!res.ok) throw new Error('mesure impossible');
+  const bytes = (await res.arrayBuffer()).byteLength;
+  const total = performance.now() - started;
+  // Le navigateur sait separer l'attente du serveur du transfert lui-meme.
+  const entry = performance.getEntriesByName(new URL(url, location.href).href).pop();
+  const transfer = entry && entry.responseStart ? entry.responseEnd - entry.responseStart : 0;
+  const ms = Math.max(transfer > 5 ? transfer : total, 20);
+  const mbps = bytes * 8 / ms / 1000;
+  store.set('net', JSON.stringify({mbps, at: Date.now()}));
+  return mbps;
+}
+
+function connectionPill(mbps, advice, verdict) {
+  const slot = $('#stage-loader-net');
+  let [, label, fallback] = NET_LEVELS.find(([limit]) => mbps < limit);
+  // « Correcte » dans l'absolu peut etre insuffisante pour la qualite en cours.
+  if (verdict) label = verdict;
+  // Au-dela de 20 Mbit/s, la mesure n'est plus fine : on le dit tel quel.
+  const shown = mbps >= 20 ? 'plus de 20' : '≈ ' + mbps.toLocaleString('fr-FR', {maximumFractionDigits: mbps < 10 ? 1 : 0});
+  slot.replaceChildren(el('span', '', 'Votre connexion : '), el('strong', 'net-' + (verdict ? 'faible' : label), shown + ' Mbit/s · ' + label),
+    el('span', 'net-advice', advice || fallback));
+  slot.hidden = false;
+}
+
+function showConnection() {
+  $('#stage-loader-net').hidden = true;
+  const attempt = state.playback;
+  measureConnection().then(mbps => {
+    if (attempt === state.playback && !$('#stage-loader').hidden) connectionPill(mbps);
+  }).catch(() => {});
+}
+
+// Pendant la lecture, hls.js mesure le debit reel sur chaque segment telecharge.
+// Quand l'image cale, on sait donc si c'est la connexion du spectateur qui ne
+// suit pas, ou la source : on ne met pas sur le dos du reseau ce qui vient d'ailleurs.
+function stallCause() {
+  if (!navigator.onLine) return {kind: 'offline'};
+  const hls = state.hls;
+  const level = hls && hls.levels && hls.levels[hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel];
+  const estimate = hls && hls.bandwidthEstimate;
+  if (level && estimate && estimate < level.bitrate * 1.15) {
+    return {kind: 'slow', mbps: estimate / 1e6,
+            advice: 'il en faudrait ' + (level.bitrate * 1.2 / 1e6).toLocaleString('fr-FR', {maximumFractionDigits: 1}) + ' Mbit/s pour le ' + level.height + 'p'};
+  }
+  return {kind: 'wait'};
+}
 
 function stageScreen(kind) {
   const box = $('#stage-loader');
@@ -335,7 +399,9 @@ function stageScreen(kind) {
   // Une panne de source n'avance pas toute seule : pas de barre animee, un bouton.
   box.classList.toggle('settled', kind === 'source');
   $('#stage-retry').hidden = kind !== 'source';
+  $('#stage-loader-net').hidden = true;
   box.hidden = false;
+  if (kind === 'prepare') showConnection();
 }
 
 $('#stage-retry').onclick = () => { if (state.current) play(state.current).catch(failure); };
@@ -520,7 +586,14 @@ video.addEventListener('waiting', () => {
   if (state.frames && !state.job && !state.stallTimer && $('#stage-loader').hidden) {
     state.stallTimer = setTimeout(() => {
       state.stallTimer = null;
-      if (state.ticket && video.readyState < 3) stageScreen(navigator.onLine ? 'wait' : 'offline');
+      if (!state.ticket || video.readyState >= 3) return;
+      const cause = stallCause();
+      stageScreen(cause.kind);
+      if (cause.kind === 'slow') {
+        connectionPill(cause.mbps, cause.advice, 'insuffisante');
+        // La mesure prise au demarrage n'est plus vraie : on la remplace.
+        store.set('net', JSON.stringify({mbps: cause.mbps, at: Date.now()}));
+      }
     }, 3000);
   }
 });

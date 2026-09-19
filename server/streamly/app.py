@@ -32,6 +32,8 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 # Un appareil associe ne fait que lire : rien d'autre de l'API ne lui est ouvert.
 DEVICE_GET = ("/api/me", "/api/playback")
 DEVICE_POST = ("/api/relay", "/api/stop")
+# Donnees aleatoires, donc incompressibles : un proxy qui compresse ne fausse pas la mesure.
+SPEEDTEST_PAYLOAD = os.urandom(200000)
 GZIP_MIN_BYTES = 1400     # en dessous, l'en-tete gzip coute plus qu'il ne gagne
 PLAYER_PATHS = ("/get.php", "/player_api.php", "/panel_api.php", "/xmltv.php")
 # Tickets, chemins de lecteur et identifiants en query ne vont jamais au journal.
@@ -940,6 +942,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/favorites":
             return self._json(cat.favorites())
 
+        if path == '/api/speedtest':
+            # Mesure du debit du spectateur pendant que l'encodeur demarre.
+            # Derriere une session : servi a tous, ce serait de la bande
+            # passante offerte a n'importe qui.
+            return self._raw(200, SPEEDTEST_PAYLOAD, 'application/octet-stream',
+                             {'Cache-Control': 'no-store', 'Timing-Allow-Origin': '*'})
         if path == '/api/logo':
             found = STATE.logos.get(one('u'))
             if not found:

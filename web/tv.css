@@ -165,6 +165,26 @@
   animation: stage-loading 1.3s ease-in-out infinite;
 }
 
+.stage-net {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 6px;
+  margin: 2px 0 4px;
+  padding: 8px 16px;
+  border: 1px solid var(--line-light);
+  border-radius: 999px;
+  background: rgba(18, 18, 31, 0.7);
+  font-size: 0.85rem;
+  animation: net-in 0.35s ease both;
+}
+
+.stage-net strong { color: var(--accent-hover); }
+.stage-net .net-faible { color: #ffb86b; }
+.stage-net .net-advice { flex-basis: 100%; color: var(--muted); font-size: 0.72rem; }
+
+@keyframes net-in { from { opacity: 0; transform: translateY(6px); } }
+
 .stage-loader small { max-width: min(560px, 86%); line-height: 1.6; }
 .stage-loader.settled .stage-loader-bar { display: none; }
 .stage-loader #stage-retry { margin-top: 10px; pointer-events: auto; }

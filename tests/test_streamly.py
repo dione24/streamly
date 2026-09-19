@@ -946,6 +946,10 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(len(json.loads(posted.read())), 4)
         xml = self.request('/xmltv.php?username=tv&password=salon2024xyz')
         self.assertEqual(xml.status, 200); self.assertIn(b'<tv', xml.read())
+    def test_speedtest_payload_is_private_and_uncacheable(self):
+        self.assertEqual(self.request('/api/speedtest').status, 401)
+        r = self.request('/api/speedtest', cookie=self.login('test-viewer'))
+        self.assertEqual((r.status, len(r.read()), r.headers['Cache-Control']), (200, 200000, 'no-store'))
     def test_logo_route_needs_a_session_and_a_catalog_icon(self):
         seed_live(self.state.catalog)
         cookie = self.login('test-viewer')
