@@ -525,6 +525,13 @@ class GuideTests(unittest.TestCase):
         guide = self.guide([self.source('a.xml', XMLTV[:XMLTV.index('<programme start="20260919120000 +0000" stop="20260919140000')])])
         self.assertTrue(guide.rebuild(now=NOW))
         self.assertEqual([p.findtext('title') for p in self.parsed(guide).iter('programme')], ['JT & meteo'])
+    def test_a_sync_forces_a_rebuild_even_when_fresh(self):
+        guide = self.guide([self.source('a.xml', XMLTV)]); guide.rebuild(now=NOW)
+        with patch.object(guide, 'rebuild') as rebuild:
+            guide.ensure_fresh()
+            time.sleep(.1); rebuild.assert_not_called()
+            guide.ensure_fresh(force=True)
+            time.sleep(.2); rebuild.assert_called_once()
     def test_failed_download_keeps_the_previous_guide(self):
         guide = self.guide([self.source('a.xml', XMLTV)]); guide.rebuild(now=NOW); before = guide.read()
         guide.sources = lambda: [('p', (self.root / 'absent.xml').as_uri(), 'VLC')]

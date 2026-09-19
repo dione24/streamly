@@ -72,10 +72,14 @@ class Guide:
         except OSError:
             return None
 
-    def ensure_fresh(self):
-        """Relance la construction en tache de fond si le guide a vieilli."""
+    def ensure_fresh(self, force=False):
+        """Relance la construction en tache de fond si le guide a vieilli.
+
+        force : apres une synchro, les chaines ont change ; un guide bati sur
+        un catalogue encore vide resterait vide jusqu'au prochain cycle.
+        """
         age = self.age()
-        if age is not None and age < self.refresh_seconds:
+        if not force and age is not None and age < self.refresh_seconds:
             return
         with self._lock:
             if self._running:

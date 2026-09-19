@@ -1331,6 +1331,7 @@ def _run_sync(only_id=None):
             log("[%s] termine : %d chaines, %d films, %d series" %
                 (provider["id"], count, nvod, nseries))
         STATE.player.invalidate()
+        STATE.guide.ensure_fresh(force=True)
 
 
 def main():
