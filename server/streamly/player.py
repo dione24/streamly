@@ -16,6 +16,87 @@ ZAP_SECONDS = 0.8      # attente apres le master : un zap rapide n'encode rien
 PLAYER_IDLE = 45       # sans requete, la chaine s'arrete et libere l'abonnement
 
 
+SLATE_SECONDS = 2.027  # duree des ecrans d'attente (assets/slate*.ts)
+SLATES = {'slate': '/slate.ts', 'wait': '/slate-wait.ts', 'source': '/slate-source.ts'}
+
+
+class LiveTimeline:
+    """Fil d'une lecture servie a un lecteur externe.
+
+    Un lecteur tiers ne sait afficher que ce que la playlist contient. On y
+    enchaine donc, dans l'ordre et sans jamais renumeroter : l'ecran de
+    preparation tant que l'encodeur n'a rien produit, les segments du direct,
+    un ecran « reprise » si la source se fige, un ecran « la chaine ne repond
+    pas chez votre fournisseur » si toutes ses sources ont echoue. La playlist
+    envoyee est la fin de ce fil ; tout changement de nature est une
+    discontinuite.
+    """
+    WINDOW = 12
+    KEEP = 60
+
+    def __init__(self, now):
+        self.lock = threading.Lock()
+        self.entries = []            # (disc, 'slate', kind, n) ou (disc, 'real', gen, numero, duree, niveau force)
+        self.base = self.base_discs = 0
+        self.last_real = None
+        self.started = self.progress = now
+        self.run = 0                 # ecrans d'attente depuis le dernier segment reel
+        self.run_start = now
+
+    def _push(self, entry):
+        previous = self.entries[-1] if self.entries else None
+        disc = bool(previous) and (entry[0] == 'slate' or previous[1] == 'slate' or previous[2] != entry[1])
+        self.entries.append((disc,) + entry)
+        if len(self.entries) > self.KEEP:
+            gone = self.entries.pop(0)
+            self.base += 1
+            self.base_discs += gone[0]
+
+    def sync(self, now, failed, reals, stale_after, forced_level=None):
+        """reals : [(generation, numero, duree)] de la playlist courante de l'encodeur."""
+        new = [r for r in reals if self.last_real is None or r[1] > self.last_real]
+        if new:
+            if self.last_real is None:
+                # FFmpeg livre ses premiers segments en rafale : repartir des
+                # trois derniers evite de demarrer dix secondes derriere le direct.
+                new = new[-3:]
+            for gen, number, duration in new:
+                self._push(('real', gen, number, duration, forced_level))
+            self.last_real, self.progress, self.run = new[-1][1], now, 0
+            return
+        if self.run == 0:
+            if self.last_real is None:
+                self.run_start = self.started
+            elif failed:
+                self.run_start = now
+            else:
+                self.run_start = self.progress + stale_after
+        if now < self.run_start:
+            return
+        kind = 'source' if failed else ('slate' if self.last_real is None else 'wait')
+        # Deux ecrans d'emblee au demarrage : avec un seul, VLC attend la suite.
+        due = (2 if self.last_real is None else 1) + int((now - self.run_start) // 2)
+        while self.run < due:
+            self._push(('slate', kind, self.base + len(self.entries)))
+            self.run += 1
+
+    def render(self, real_uri):
+        window = self.entries[-self.WINDOW:]
+        hidden = self.entries[:len(self.entries) - len(window)]
+        longest = max([e[4] for e in window if e[1] == 'real'] + [SLATE_SECONDS])
+        lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:%d' % int(-(-longest // 1)),
+                 '#EXT-X-MEDIA-SEQUENCE:%d' % (self.base + len(hidden)),
+                 '#EXT-X-DISCONTINUITY-SEQUENCE:%d' % (self.base_discs + sum(e[0] for e in hidden))]
+        for entry in window:
+            if entry[0]:
+                lines.append('#EXT-X-DISCONTINUITY')
+            if entry[1] == 'slate':
+                lines += ['#EXTINF:%.3f,' % SLATE_SECONDS, '%s?n=%d' % (SLATES[entry[2]], entry[3])]
+            else:
+                lines += ['#EXTINF:%.6f,' % entry[4], real_uri(entry[2], entry[3], entry[5])]
+        return '\n'.join(lines) + '\n'
+
+
 class Evicted(Exception):
     """Un autre appareil du meme compte a ouvert une autre chaine."""
 
@@ -55,7 +136,7 @@ class PlayerFacade:
         self._intents = {}      # owner -> (id de chaine, instant du master)
         self._bindings = {}     # owner -> (id de chaine, ticket)
         self._owner_locks = {}
-        self._slates = {}       # ticket -> ecran d'attente (voir slate())
+        self._slates = {}       # ticket -> LiveTimeline
 
     def invalidate(self):
         with self._lock:
@@ -150,15 +231,13 @@ class PlayerFacade:
                     self._intents.pop(owner, None)
             return ticket
 
-    def slate(self, ticket):
-        """Etat de l'ecran d'attente d'une lecture : debut, segments d'attente
-        montres, premier vrai segment servi. Sert a numeroter la playlist sans
-        rupture entre l'attente et le direct."""
+    def timeline(self, ticket):
+        """Fil de lecture d'un ticket (voir LiveTimeline)."""
         with self._live_lock:
             if ticket not in self._slates and len(self._slates) > 64:
                 alive = {t for _, t in self._bindings.values()}
                 self._slates = {k: v for k, v in self._slates.items() if k in alive}
-            return self._slates.setdefault(ticket, {'opened': time.time(), 'count': 0, 'first': None})
+            return self._slates.setdefault(ticket, LiveTimeline(time.time()))
 
     # ---------------------------------------------------------- M3U
 

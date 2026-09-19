@@ -238,8 +238,12 @@ class PassthroughTests(unittest.TestCase):
         # encode, sinon la source part a plein debit le temps de la mesure.
         blind = dict(self.H264, video_bitrate=0, bitrate=0)
         self.assertIsNone(self.t.passthrough_plan(blind, ceiling=2000000))
-        # Sans plafond (Sport), le remux reste permis et sera mesure.
-        self.assertFalse(self.t.passthrough_plan(blind, ceiling=0)['measured'])
+        # Sport promet du 720p compresse, pas la source brute : sans mesure
+        # on encode, et une source plus lourde que le 720p n'est pas remuxee.
+        self.assertIsNone(self.t.passthrough_plan(blind, ceiling=0))
+        self.assertIsNone(self.t.passthrough_plan(dict(self.H264, video_bitrate=4800000), ceiling=0))
+        # Deja plus legere que notre 720p : la recopier ne coute rien a personne.
+        self.assertIsNotNone(self.t.passthrough_plan(dict(self.H264, video_bitrate=900000), ceiling=0))
 
     def test_remuxed_worker_exposes_one_level_and_source_resolution(self):
         ticket = self.t.open('a', 'one', [{'provider':'p','url':'http://s'}], ceiling=0)
@@ -344,14 +348,17 @@ class BitrateCacheTests(unittest.TestCase):
         try:
             media = {'height':1080, 'width':1920, 'fps':25, 'codec':'h264', 'pix_fmt':'yuv420p',
                      'video_bitrate':0, 'bitrate':0, 'audio_codec':'aac', 'streams':[]}
-            # Sans mesure : pas de remux sous plafond, remux permis en Sport.
+            # Sans mesure : pas de remux, mode Sport compris.
             self.assertIsNone(t.passthrough_plan(media, ceiling=1150000))
-            self.assertFalse(t.passthrough_plan(media, ceiling=0)['measured'])
+            self.assertIsNone(t.passthrough_plan(media, ceiling=0))
             # Avec la mesure d'une lecture precedente : decision immediate.
             t._remember_bitrate('http://s/1', 2900000)
             known = dict(media, bitrate=t._known_bitrate('http://s/1'), video_bitrate=0)
             self.assertIsNone(t.passthrough_plan(known, ceiling=1150000))
-            self.assertTrue(t.passthrough_plan(known, ceiling=0)['measured'])
+            self.assertIsNone(t.passthrough_plan(known, ceiling=0))          # 2,9 Mb/s > 720p
+            t._remember_bitrate('http://s/1', 1200000)
+            light = dict(media, bitrate=t._known_bitrate('http://s/1'), video_bitrate=0)
+            self.assertTrue(t.passthrough_plan(light, ceiling=0)['measured'])
         finally:
             t.close(); patch.stopall()
 
@@ -464,6 +471,42 @@ XMLTV = '''<?xml version="1.0" encoding="UTF-8"?>
 </tv>
 '''
 NOW = 1789819200  # 2026-09-19 12:00 UTC
+
+
+class LiveTimelineTests(unittest.TestCase):
+    def uris(self, timeline):
+        return [l for l in timeline.render(lambda g, n, f: 'g%d_%s_%d' % (g, 'x' if f is None else f, n)).splitlines() if not l.startswith('#')]
+    def header(self, timeline, name):
+        text = timeline.render(lambda g, n, f: 'r%d' % n)
+        return int(next(l for l in text.splitlines() if l.startswith(name)).split(':')[1])
+    def test_window_slides_without_ever_renumbering(self):
+        tl = playermod.LiveTimeline(1000)
+        tl.sync(1000, False, [], 8)
+        self.assertEqual(self.uris(tl), ['/slate.ts?n=0', '/slate.ts?n=1'])
+        tl.sync(1004.5, False, [], 8)
+        self.assertEqual(len(self.uris(tl)), 4)
+        # Premiers segments livres en rafale : on repart des trois derniers.
+        tl.sync(1006, False, [(0, n, 2.0) for n in range(500, 507)], 8)
+        self.assertEqual(self.uris(tl)[-3:], ['g0_x_504', 'g0_x_505', 'g0_x_506'])
+        seen = {}
+        for step in range(40):
+            tl.sync(1008 + 2 * step, False, [(0, n, 2.0) for n in range(507 + step - 5, 508 + step)], 8)
+            first, text = self.header(tl, '#EXT-X-MEDIA-SEQUENCE'), self.uris(tl)
+            for offset, uri in enumerate(text):
+                self.assertEqual(seen.setdefault(first + offset, uri), uri)   # un numero = un segment, a jamais
+        self.assertEqual(len(self.uris(tl)), playermod.LiveTimeline.WINDOW)
+        # Toutes les discontinuites sorties de la fenetre sont comptees : 3 entre ecrans, 1 avant le direct.
+        self.assertEqual(self.header(tl, '#EXT-X-DISCONTINUITY-SEQUENCE'), 4)
+    def test_failure_before_any_picture_blames_the_source(self):
+        tl = playermod.LiveTimeline(1000)
+        tl.sync(1000, False, [], 8); tl.sync(1004, True, [], 8)
+        self.assertEqual(self.uris(tl), ['/slate.ts?n=0', '/slate.ts?n=1', '/slate-source.ts?n=2', '/slate-source.ts?n=3'])
+    def test_remuxed_generation_keeps_its_own_level(self):
+        tl = playermod.LiveTimeline(1000)
+        tl.sync(1000, False, [(0, 10, 6.0)], 18, forced_level=0)
+        tl.sync(1006, False, [(1, 11, 2.0)], 8)
+        self.assertEqual(self.uris(tl), ['g0_0_10', 'g1_x_11'])
+        self.assertIn('#EXT-X-TARGETDURATION:6', tl.render(lambda g, n, f: 'r'))
 
 
 class RelaySourceTests(unittest.TestCase):
@@ -1009,20 +1052,47 @@ class HTTPTests(unittest.TestCase):
         status, _, body = self.raw(base + '/2.m3u8')
         self.assertEqual(status, 200)
         self.assertEqual([l for l in body.splitlines() if not l.startswith('#')], ['/slate.ts?n=0', '/slate.ts?n=1'])
-        slate = self.request('/slate.ts')
-        self.assertEqual((slate.status, slate.headers['Content-Type']), (200, 'video/mp2t'))
-        self.assertGreater(len(slate.read()), 10000)
-        # Deux secondes plus tard, un second ecran d'attente, derriere une discontinuite.
-        ticket = next(iter(tc.tickets))
-        self.state.player.slate(ticket)['opened'] -= 2
-        body = self.raw(base + '/2.m3u8')[2]
-        self.assertIn('#EXT-X-DISCONTINUITY\n#EXTINF:2.027,\n/slate.ts?n=2', body)
-        # L'encodeur produit : le direct prend la suite, numerote apres l'attente.
+        for name in ('/slate.ts', '/slate-wait.ts', '/slate-source.ts'):
+            slate = self.request(name)
+            self.assertEqual((slate.status, slate.headers['Content-Type']), (200, 'video/mp2t'))
+            self.assertGreater(len(slate.read()), 10000)
+        # L'encodeur produit : le direct prend la suite dans la meme playlist.
         writer(next(iter(tc.workers)))
         lines = self.raw(base + '/2.m3u8')[2].splitlines()
-        self.assertIn('#EXT-X-MEDIA-SEQUENCE:3', lines); self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:2', lines)
-        self.assertEqual(lines[lines.index('#EXT-X-DISCONTINUITY') + 2].rsplit('/', 1)[-1], 'g0_2_1758000000.ts')
-        self.assertNotIn('/slate.ts', '\n'.join(lines))
+        uris = [l.rsplit('/', 1)[-1] for l in lines if not l.startswith('#')]
+        self.assertEqual(uris, ['slate.ts?n=0', 'slate.ts?n=1', 'g0_2_1758000000.ts', 'g0_2_1758000001.ts'])
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:0', lines)
+        self.assertEqual(lines[lines.index([l for l in lines if 'g0_2_1758000000' in l][0]) - 2], '#EXT-X-DISCONTINUITY')
+    def test_dead_source_tells_the_viewer_to_check_the_provider(self):
+        ids = self.fake_ffmpeg()
+        base = '/live/tv/salon2024xyz/%d' % ids['TF1']
+        self.raw(base + '.m3u8'); self.media(base + '/2.m3u8')
+        tc = self.state.transcoder
+        with tc._lock:
+            next(iter(tc.workers.values()))['state'] = 'failed'
+        status, _, body = self.raw(base + '/2.m3u8')
+        # Plus d'erreur brute : un ecran qui dit quoi faire.
+        self.assertEqual(status, 200)
+        self.assertIn('/slate-source.ts?n=', body)
+        self.assertIn('g0_2_1758000001.ts', body)         # la fin du direct reste devant
+    def test_frozen_source_shows_a_wait_screen_then_resumes(self):
+        ids = self.fake_ffmpeg()
+        base = '/live/tv/salon2024xyz/%d' % ids['TF1']
+        self.raw(base + '.m3u8'); self.media(base + '/2.m3u8')
+        tc = self.state.transcoder
+        timeline = self.state.player.timeline(next(iter(tc.tickets)))
+        timeline.progress -= 9                             # rien de neuf depuis 9 s
+        body = self.raw(base + '/2.m3u8')[2]
+        self.assertIn('/slate-wait.ts?n=', body); self.assertNotIn('slate-source', body)
+        # Le flux repart dans une nouvelle generation, numerotee a la suite.
+        with tc._lock:
+            w = next(iter(tc.workers.values())); w['generation'] = 1
+        tc._spawn.side_effect(w['key'])
+        lines = self.raw(base + '/2.m3u8')[2].splitlines()
+        uris = [l.rsplit('/', 1)[-1] for l in lines if not l.startswith('#')]
+        self.assertEqual(uris[-2:], ['g1_2_1758000002.ts', 'g1_2_1758000003.ts'])
+        self.assertTrue(any(u.startswith('slate-wait.ts') for u in uris))
+        self.assertEqual(lines[lines.index([l for l in lines if 'g1_2_1758000002' in l][0]) - 2], '#EXT-X-DISCONTINUITY')
     def test_master_is_synthetic_and_starts_nothing(self):
         ids = self.fake_ffmpeg()
         for method in ('HEAD', 'GET'):
@@ -1103,23 +1173,15 @@ class HTTPTests(unittest.TestCase):
         base = '/live/tv/salon2024xyz/%d' % ids['TF1']
         self.raw(base + '.m3u8'); self.media(base + '/2.m3u8')
         tc = self.state.transcoder
-        shown = self.state.player.slate(next(iter(tc.tickets)))['count']
         with tc._lock:
             w = next(iter(tc.workers.values())); w['generation'] = 1
         tc._spawn.side_effect(w['key'])
-        status, _, body = self.raw(base + '/2.m3u8')
-        uris = [l.rsplit('/', 1)[-1] for l in body.splitlines() if not l.startswith('#')]
+        lines = self.raw(base + '/2.m3u8')[2].splitlines()
+        reals = [l.rsplit('/', 1)[-1] for l in lines if '/s/' in l]
         # La fin de l'ancienne generation, une discontinuite, puis la nouvelle,
         # numerotees a la suite : le lecteur franchit la bascule sans se figer.
-        self.assertEqual(uris, ['g0_2_1758000000.ts', 'g0_2_1758000001.ts', 'g1_2_1758000002.ts', 'g1_2_1758000003.ts'])
-        self.assertIn('#EXT-X-MEDIA-SEQUENCE:%d' % shown, body)
-        marks = [i for i, l in enumerate(body.splitlines()) if l == '#EXT-X-DISCONTINUITY']
-        self.assertEqual(body.splitlines()[marks[-1] + 2].rsplit('/', 1)[-1], 'g1_2_1758000002.ts')
-        # Une fois la nouvelle generation assez longue, l'ancienne sort de la fenetre.
-        with patch.object(app, 'LIVE_OVERLAP_SEGMENTS', 2):
-            body = self.raw(base + '/2.m3u8')[2]
-        self.assertNotIn('g0_2_', body)
-        self.assertIn('#EXT-X-MEDIA-SEQUENCE:%d' % (shown + 2), body)
+        self.assertEqual(reals, ['g0_2_1758000000.ts', 'g0_2_1758000001.ts', 'g1_2_1758000002.ts', 'g1_2_1758000003.ts'])
+        self.assertEqual(lines[lines.index([l for l in lines if 'g1_2_1758000002' in l][0]) - 2], '#EXT-X-DISCONTINUITY')
     def test_full_server_answers_503_to_players(self):
         ids = self.fake_ffmpeg()
         with patch.dict(self.state.transcoder.cfg, {'max_concurrent_streams': 1}):

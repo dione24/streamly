@@ -294,6 +294,17 @@ class Transcoder:
         except OSError:
             pass
 
+    def _remux_limit(self, ceiling):
+        """Debit au-dela duquel on encode plutot que de remuxer.
+
+        Sans plafond (mode Sport), la limite est le poids du barreau le plus
+        haut : « Sport » promet du 720p compresse, pas la source brute. Sans
+        cette borne, une chaine a 5 Mb/s partait telle quelle vers le
+        spectateur — aucune economie, et des saccades sur une connexion moyenne.
+        """
+        top = int((_bps(self.ladder[0]['maxrate']) + _bps(self.cfg.get('audio_bitrate', '96k'))) * 1.08)
+        return int(ceiling) if ceiling else top
+
     def passthrough_plan(self, media, ceiling=0):
         """Decide si la source peut etre remultiplexee telle quelle.
 
@@ -335,15 +346,15 @@ class Transcoder:
             # seconde fois compterait double.
             effective = total_bps
 
-        if ceiling and effective and effective * 1.08 > ceiling:
+        limit = self._remux_limit(ceiling)
+        if effective and effective * 1.08 > limit:
             return None
         # Debit inconnu : c'est le cas courant, un flux TS servi en HTTP
         # n'annonce rien. Partir en remux pour mesurer ensuite servait la
         # source a plein debit le temps de la mesure : 13 Mo constates sur une
         # chaine a 3,9 Mb/s, a chaque premiere lecture, pour un spectateur en
-        # mode plafonne. Sous plafond, sans mesure, on encode. Le mode Sport
-        # (sans plafond) continue de remuxer et alimente le cache de debits.
-        if ceiling and not effective and not self.cfg.get('passthrough_unmeasured', False):
+        # mode plafonne. Sans mesure, on encode, mode Sport compris.
+        if not effective and not self.cfg.get('passthrough_unmeasured', False):
             return None
         return {'audio': has_audio, 'copy_audio': copy_audio,
                 'bitrate': effective or _estimated_bitrate(media),
@@ -853,8 +864,8 @@ class Transcoder:
                         # evite de refaire le tour a la prochaine lecture.
                         self._remember_bitrate(w['sources'][w['index']]['url'], measured)
                         w['passthrough'] = dict(w['passthrough'], bitrate=measured, measured=True)
-                        ceiling = self._ticket_ceiling_locked(key)
-                        if ceiling and measured * 1.08 > ceiling:
+                        limit = self._remux_limit(self._ticket_ceiling_locked(key))
+                        if measured * 1.08 > limit:
                             # Le remux depasse le plafond du mode : on repasse
                             # a l'echelle encodee plutot que de laisser filer
                             # le budget du spectateur.

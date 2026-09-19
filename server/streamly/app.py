@@ -28,9 +28,7 @@ from .xtream import XtreamClient, parse_series_info
 STARTUP_TIMEOUT = 25      # secondes d'attente de la premiere playlist
 ACCESS_LOG = []           # journal d'acces circulaire, expose via /api/access
 LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
-SLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "slate.ts")
-SLATE_SECONDS = 2         # duree de l'ecran d'attente, rejoue en boucle
-LIVE_OVERLAP_SEGMENTS = 6  # fin de l'ancienne generation gardee tant que la nouvelle est plus courte
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 # Un appareil associe ne fait que lire : rien d'autre de l'API ne lui est ouvert.
 DEVICE_GET = ("/api/me", "/api/playback")
 DEVICE_POST = ("/api/relay", "/api/stop")
@@ -450,25 +448,24 @@ class Handler(BaseHTTPRequestHandler):
         return self._live_media(ticket, int(level[1]))
 
     def _live_media(self, ticket, level):
-        """Playlist d'un niveau : ecran d'attente, puis segments sous /s/{ticket}/.
+        """Playlist d'un niveau pour un lecteur externe (voir LiveTimeline).
 
-        L'encodeur met 4 a 11 s a produire. Plutot que de faire patienter le
-        lecteur sur un ecran noir (certains abandonnent avant), la playlist
-        repond tout de suite avec un court ecran Streamly, repete au rythme
-        du direct, puis raccorde le flux reel derriere une discontinuite.
+        Repond toujours tout de suite : ecran de preparation pendant les 4 a
+        11 s de demarrage de l'encodeur, direct ensuite, ecran de reprise si
+        la source se fige, et ecran « fournisseur » si toutes les sources de
+        la chaine ont echoue — plutot qu'une erreur brute ou une image figee.
         """
         t = STATE.transcoder.ticket(ticket, touch=False)
         status = STATE.transcoder.status(ticket)
         if not t or not status:
             return self._err(410, "lecture arrêtée")
-        if status["state"] == "failed":
-            return self._err(502, "sources indisponibles")
-        generation, served, head, segments = status["generation"], level, [], []
+        failed = status["state"] == "failed"
+        generation, served, reals, target = status["generation"], level, [], 2
         if status["state"] != "starting":
             # Un remux n'a qu'une variante : on la sert quel que soit le
             # niveau annonce, faute de quoi le lecteur n'aurait rien.
             served = 0 if status["passthrough"] else level
-            if served not in STATE.transcoder.allowed_levels(t):
+            if served not in STATE.transcoder.allowed_levels(t) and not failed:
                 return self._err(404, "qualité indisponible")
             try:
                 with open(os.path.join(STATE.transcoder.hls_dir, t["key"],
@@ -476,74 +473,25 @@ class Handler(BaseHTTPRequestHandler):
                     head, segments = _hls_segments(fh.read())
             except OSError:
                 head, segments = [], []
-        slate = STATE.player.slate(ticket)
-        mpegurl = "application/vnd.apple.mpegurl"
-        if not segments and slate["first"] is None:
-            waited = time.time() - slate["opened"]
-            if waited > STARTUP_TIMEOUT + 10:
-                return self._err(504, "source trop lente")
-            # Deux segments d'emblee : avec un seul, VLC attend la suite au lieu
-            # d'afficher. Pas davantage : ce que le lecteur a deja mis en
-            # tampon se joue encore quand le direct est pret.
-            slate["count"] = max(slate["count"], 2 + int(waited // SLATE_SECONDS))
-            lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:3",
-                     "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-DISCONTINUITY-SEQUENCE:0"]
-            for i in range(slate["count"]):
-                # Le meme segment rejoue : ses horodatages repartent de zero.
-                lines += (["#EXT-X-DISCONTINUITY"] if i else []) + ["#EXTINF:2.027,", "/slate.ts?n=%d" % i]
-            return self._raw(200, "\n".join(lines) + "\n", mpegurl, {"Cache-Control": "no-store"})
-        if not segments:
-            return self._err(504, "source trop lente")
+            for line in head:
+                if line.startswith("#EXT-X-TARGETDURATION:"):
+                    target = int(line.split(":")[1])
+            for segment in segments:
+                number = re.search(r"_(\d+)\.ts$", segment[-1])
+                duration = re.search(r"#EXTINF:([\d.]+)", "\n".join(segment))
+                if number and duration:
+                    reals.append((generation, int(number[1]), float(duration[1])))
+        timeline = STATE.player.timeline(ticket)
+        with timeline.lock:
+            # Fige au-dela de trois segments sans nouveaute : la source hoquette.
+            timeline.sync(time.time(), failed, reals, max(8, 3 * target),
+                          forced_level=0 if status["passthrough"] else None)
+            body = timeline.render(lambda gen, number, forced: "/s/%s/g%d_%d_%09d.ts" % (
+                ticket, gen, level if forced is None else forced, number))
+        return self._raw(200, body, "application/vnd.apple.mpegurl", {"Cache-Control": "no-store"})
 
-        previous = []
-        if generation and len(segments) < LIVE_OVERLAP_SEGMENTS:
-            # Juste apres une bascule (source de secours, barreaux ajoutes),
-            # la nouvelle generation n'a que quelques secondes. On garde la
-            # fin de la precedente devant une discontinuite : le lecteur finit
-            # son tampon et franchit la frontiere comme une coupure pub. Sans
-            # cela, VLC mettait plus de vingt secondes a se recaler.
-            for old in (served, 0):
-                path = os.path.join(STATE.transcoder.hls_dir, t["key"], "g%d_s_%d.m3u8" % (generation - 1, old))
-                if old in STATE.transcoder.allowed_levels(t) and os.path.isfile(path):
-                    try:
-                        with open(path, encoding="utf-8") as fh:
-                            previous = _hls_segments(fh.read())[1]
-                    except OSError:
-                        previous = []
-                    break
-        number = re.search(r"_(\d+)\.ts$", (previous or segments)[0][-1])
-        listed = int(number[1]) if number else 0
-        if slate["first"] is None:
-            slate["first"] = listed
-        # La numerotation continue celle de l'ecran d'attente : pour le
-        # lecteur, c'est une seule playlist qui avance.
-        shown = slate["count"]
-        after_slate = shown > 0 and listed == slate["first"]
-        gone = (shown - 1 if shown else 0) + (1 if shown and not after_slate else 0)
-        longest = max([float(m) for seg in previous + segments for l in seg
-                       for m in re.findall(r"^#EXTINF:([\d.]+)", l)] or [0])
-        lines = []
-        for l in head:
-            if l.startswith("#EXT-X-TARGETDURATION:"):
-                # Un remux peut avoir des segments plus longs que l'encodage.
-                l = "#EXT-X-TARGETDURATION:%d" % max(int(l.split(":")[1]), int(-(-longest // 1)))
-            if not l.startswith(("#EXT-X-MEDIA-SEQUENCE", "#EXT-X-DISCONTINUITY-SEQUENCE")):
-                lines.append(l)
-        lines += ["#EXT-X-MEDIA-SEQUENCE:%d" % (shown + listed - slate["first"]),
-                  "#EXT-X-DISCONTINUITY-SEQUENCE:%d" % (gone + (generation - 1 if previous else generation))]
-        if after_slate:
-            lines.append("#EXT-X-DISCONTINUITY")
-        for segment in previous:
-            lines += segment
-        if previous:
-            lines.append("#EXT-X-DISCONTINUITY")
-        for segment in segments:
-            lines += segment
-        body = "\n".join(l if l.startswith("#") else "/s/%s/%s" % (ticket, l) for l in lines)
-        return self._raw(200, body + "\n", mpegurl, {"Cache-Control": "no-store"})
-
-    def _serve_slate(self):
-        with open(SLATE_PATH, "rb") as fh:
+    def _serve_slate(self, name):
+        with open(os.path.join(ASSETS_DIR, name), "rb") as fh:
             self._raw(200, fh.read(), "video/mp2t", {"Cache-Control": "public, max-age=86400"})
 
     def _player_credentials(self, player):
@@ -634,8 +582,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_vod(path)
         if path in PLAYER_PATHS:
             return self._serve_player(path, params)
-        if path == "/slate.ts":
-            return self._serve_slate()
+        if path in playermod.SLATES.values():
+            return self._serve_slate(path.lstrip("/"))
         if path.startswith("/live/"):
             return self._serve_live(path)
         if re.fullmatch(r"/[^/]+/[^/]+/\d{1,10}(?:\.(?:ts|m3u8))?", path):
@@ -746,7 +694,11 @@ class Handler(BaseHTTPRequestHandler):
         if not t:
             return self._err(401, 'session de lecture expirée')
         status = STATE.transcoder.status(ticket)
-        if not status or status['state'] == 'failed':
+        # Source en echec : les segments deja produits restent servis. Le
+        # lecteur les a encore en file ; les refuser le faisait abandonner
+        # avant d'atteindre l'ecran qui explique la panne.
+        produced = fname != 'master.m3u8' and os.path.isfile(os.path.join(cfgmod.HLS_DIR, t['key'], fname))
+        if not status or (status['state'] == 'failed' and not produced):
             return self._err(502, 'sources indisponibles')
         if fname == 'master.m3u8':
             deadline = time.time() + 10
