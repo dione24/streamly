@@ -256,7 +256,7 @@ async function stop() {
   state.job = null;
   clearZapOverlay();
   $('#player-wrap').hidden = true;
-  $('#stage-loader').hidden = true;
+  stageScreen(null);
   $('#program-info').hidden = true;
   $('#idle-hero').hidden = false;
   document.body.classList.remove('is-playing', 'reader-focus', 'catalogue-collapsed');
@@ -313,6 +313,33 @@ if (toggleTelemBtn) {
   toggleTelemBtn.onclick = toggleTelemetry;
 }
 
+// Ecran Streamly par-dessus la video : on dit ce qui se passe, et a qui s'adresser.
+// Le renvoi vers le fournisseur n'apparait que si le serveur a constate que
+// toutes les sources de la chaine ont echoue.
+const STAGE_SCREENS = {
+  prepare: ['Préparation du direct…', 'COMPRESSION ADAPTÉE À VOTRE CONNEXION'],
+  movie: ['Ouverture du film…', 'VERSION ADAPTÉE À VOTRE FORFAIT'],
+  wait: ['Reprise du direct…', 'LA SOURCE EST INSTABLE · MERCI DE PATIENTER QUELQUES SECONDES'],
+  offline: ['Votre connexion Internet est interrompue', 'LA LECTURE REPRENDRA DÈS SON RETOUR'],
+  source: ['Cette chaîne ne répond pas chez votre fournisseur', 'ESSAYEZ UNE AUTRE CHAÎNE · SI LE PROBLÈME DURE, CONTACTEZ VOTRE FOURNISSEUR IPTV']
+};
+
+function stageScreen(kind) {
+  const box = $('#stage-loader');
+  clearTimeout(state.stallTimer);
+  state.stallTimer = null;
+  if (!kind) { box.hidden = true; return; }
+  const [title, sub] = STAGE_SCREENS[kind];
+  $('#stage-loader-text').textContent = title;
+  $('#stage-loader-sub').textContent = sub;
+  // Une panne de source n'avance pas toute seule : pas de barre animee, un bouton.
+  box.classList.toggle('settled', kind === 'source');
+  $('#stage-retry').hidden = kind !== 'source';
+  box.hidden = false;
+}
+
+$('#stage-retry').onclick = () => { if (state.current) play(state.current).catch(failure); };
+
 function playbackUI(title, live) {
   $('#player-wrap').hidden = false;
   $('#idle-hero').hidden = true;
@@ -338,8 +365,7 @@ function playbackUI(title, live) {
   $('#back-live').hidden = !live;
   $('#player-status').textContent = 'Préparation de la lecture…';
   // L'encodeur met quelques secondes a produire : on le dit, plutot qu'un ecran noir.
-  $('#stage-loader-text').textContent = live ? 'Préparation du direct…' : 'Ouverture du film…';
-  $('#stage-loader').hidden = false;
+  stageScreen(live ? 'prepare' : 'movie');
   $('#usage').textContent = live ? '0 Mo de vidéo' : 'Version préparée';
   $('#bitrate').textContent = 'Qualité automatique';
   $('#budget-meter').hidden = true;
@@ -383,7 +409,7 @@ async function play(channel) {
     remember(channel);
   } catch (err) {
     if (attempt === state.playback) {
-      $('#stage-loader').hidden = true;
+      stageScreen(null);
       $('#player-status').textContent = err.message;
       message(err.message);
     }
@@ -487,9 +513,19 @@ $('#pip').onclick = () => {
 };
 
 const video = $('#video');
-video.addEventListener('waiting', () => { if (state.frames) state.stalls++; $('#player-status').textContent = 'Mise en réserve…'; });
+video.addEventListener('waiting', () => {
+  if (state.frames) state.stalls++;
+  $('#player-status').textContent = 'Mise en réserve…';
+  // Un court passage a vide est normal ; au-dela, on l'explique.
+  if (state.frames && !state.job && !state.stallTimer && $('#stage-loader').hidden) {
+    state.stallTimer = setTimeout(() => {
+      state.stallTimer = null;
+      if (state.ticket && video.readyState < 3) stageScreen(navigator.onLine ? 'wait' : 'offline');
+    }, 3000);
+  }
+});
 video.addEventListener('playing', () => {
-  $('#stage-loader').hidden = true;
+  stageScreen(null);
   $('#player-status').textContent = state.frames ? 'Lecture en cours' : 'Image en ' + ((performance.now() - state.started) / 1000).toFixed(1) + ' s';
   state.frames = true;
 });
@@ -519,11 +555,13 @@ setInterval(async () => {
     }
     if (st.state === 'failed') {
       destroyPlayer();
+      stageScreen('source');
       $('#player-status').textContent = st.error ? ('Aucune source disponible : ' + st.error) : 'Aucune source disponible. Réessayez plus tard.';
       return;
     }
     if ((state.generation === null && st.generation > 0) || (state.generation !== null && state.generation !== st.generation)) {
       $('#player-status').textContent = 'Passage à une source de secours…';
+      if (state.frames) stageScreen('wait');
       state.retries = 0;
       attach(state.url + '?generation=' + st.generation, true, state.playback);
     }

@@ -165,6 +165,10 @@
   animation: stage-loading 1.3s ease-in-out infinite;
 }
 
+.stage-loader small { max-width: min(560px, 86%); line-height: 1.6; }
+.stage-loader.settled .stage-loader-bar { display: none; }
+.stage-loader #stage-retry { margin-top: 10px; pointer-events: auto; }
+
 @keyframes stage-loading {
   from { transform: translateX(-110%); }
   to { transform: translateX(300%); }
