@@ -20,6 +20,9 @@ from streamly.xtream import parse_name, parse_series_info
 from streamly import m3u
 from streamly import app, config
 from streamly import player as playermod
+from streamly.epg import Guide
+import gzip
+import xml.etree.ElementTree as ET
 from streamly.vod import Movies
 
 CFG = json.loads((pathlib.Path(__file__).resolve().parents[1] / 'server/config.example.json').read_text())
@@ -447,6 +450,56 @@ class PlayerAccountTests(unittest.TestCase):
         self.assertIsNotNone(sessions.player('tv', 'salon2024xyz', '1.2.3.4'))
 
 
+XMLTV = '''<?xml version="1.0" encoding="UTF-8"?>
+<tv generator-info-name="panel">
+<channel id="tf1.fr"><display-name>TF1</display-name></channel>
+<channel id="m6.fr"><display-name>M6</display-name></channel>
+<channel id="inconnue.fr"><display-name>Hors catalogue</display-name></channel>
+<programme start="20260919060000 +0200" stop="20260919070000 +0200" channel="tf1.fr"><title>Termine</title></programme>
+<programme start="20260919120000 +0000" stop="20260919130000 +0000" channel="tf1.fr"><title>JT &amp; meteo</title></programme>
+<programme start="20260919120000 +0000" stop="20260919130000 +0000" channel="inconnue.fr"><title>Ignore</title></programme>
+<programme start="20260919120000 +0000" stop="20260919140000 +0000" channel="m6.fr"><title>Film</title></programme>
+</tv>
+'''
+NOW = 1789819200  # 2026-09-19 11:20 UTC
+
+
+class GuideTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.root = pathlib.Path(self.tmp.name)
+        self.logs = []
+    def tearDown(self): self.tmp.cleanup()
+    def source(self, name, text):
+        path = self.root / name; path.write_text(text)
+        return (name, path.as_uri(), 'VLC')
+    def guide(self, sources):
+        return Guide(str(self.root / 'guide.xml.gz'), lambda: sources, lambda: {'tf1.fr', 'm6.fr'}, log=self.logs.append)
+    def parsed(self, guide):
+        return ET.fromstring(gzip.decompress(guide.read()))
+    def test_keeps_catalog_channels_and_current_programmes(self):
+        guide = self.guide([self.source('a.xml', XMLTV)])
+        self.assertTrue(guide.rebuild(now=NOW))
+        tv = self.parsed(guide)
+        self.assertEqual([c.get('id') for c in tv.iter('channel')], ['tf1.fr', 'm6.fr'])
+        self.assertEqual([p.findtext('title') for p in tv.iter('programme')], ['JT & meteo', 'Film'])
+    def test_first_provider_owns_a_shared_channel(self):
+        other = XMLTV.replace('JT &amp; meteo', 'Doublon').replace('Film', 'Doublon')
+        guide = self.guide([self.source('a.xml', XMLTV), self.source('b.xml', other)])
+        guide.rebuild(now=NOW)
+        titles = [p.findtext('title') for p in self.parsed(guide).iter('programme')]
+        self.assertNotIn('Doublon', titles); self.assertEqual(len(titles), 2)
+    def test_truncated_guide_keeps_what_was_read(self):
+        guide = self.guide([self.source('a.xml', XMLTV[:XMLTV.index('<programme start="20260919120000 +0000" stop="20260919140000')])])
+        self.assertTrue(guide.rebuild(now=NOW))
+        self.assertEqual([p.findtext('title') for p in self.parsed(guide).iter('programme')], ['JT & meteo'])
+    def test_failed_download_keeps_the_previous_guide(self):
+        guide = self.guide([self.source('a.xml', XMLTV)]); guide.rebuild(now=NOW); before = guide.read()
+        guide.sources = lambda: [('p', (self.root / 'absent.xml').as_uri(), 'VLC')]
+        self.assertFalse(guide.rebuild(now=NOW))
+        self.assertEqual(guide.read(), before)
+        self.assertEqual(sorted(f.name for f in self.root.iterdir()), ['a.xml', 'guide.xml.gz'])
+
+
 class PlaylistTests(unittest.TestCase):
     """Lien M3U direct : une playlist doit s'importer comme un panel."""
     SAMPLE = """#EXTM3U
@@ -631,6 +684,7 @@ class HTTPTests(unittest.TestCase):
         state.catalog = Catalog(root + '/catalog.db')
         state.movies = Movies(CFG, root + '/movies', state.catalog, state.transcoder)
         state.player = playermod.PlayerFacade(state.catalog, state.transcoder)
+        state.guide = Guide(root + '/guide.xml.gz', lambda: [], lambda: set(), log=lambda _: None)
         state.sync_log = []; self.state = app.STATE = state
         app.STATE.provider.side_effect = lambda pid: CFG['providers'][0] if pid == 'p' else None
         with patch('socket.getfqdn', return_value='localhost'):
@@ -738,6 +792,33 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(len(json.loads(posted.read())), 4)
         xml = self.request('/xmltv.php?username=tv&password=salon2024xyz')
         self.assertEqual(xml.status, 200); self.assertIn(b'<tv', xml.read())
+    def test_guide_is_served_to_players(self):
+        seed_live(self.state.catalog)
+        self.state.guide.sources = lambda: [('p', pathlib.Path(self.tmp.name, 'x.xml').as_uri(), 'VLC')]
+        pathlib.Path(self.tmp.name, 'x.xml').write_text(XMLTV)
+        self.state.guide.wanted = lambda: {c['epg_id'] for c in self.state.player.index()[0]}
+        self.state.guide.rebuild(now=NOW)
+        packed = self.request('/xmltv.php?username=tv&password=salon2024xyz', headers={'Accept-Encoding': 'gzip'})
+        self.assertEqual(packed.headers['Content-Encoding'], 'gzip')
+        tv = ET.fromstring(gzip.decompress(packed.read()))
+        # Seul TF1 a un identifiant de guide dans le catalogue de test.
+        self.assertEqual([c.get('id') for c in tv.iter('channel')], ['tf1.fr'])
+        plain = self.request('/xmltv.php?username=tv&password=salon2024xyz').read()
+        self.assertIn(b'JT &amp; meteo', plain)
+        self.assertEqual(self.request('/xmltv.php?username=tv&password=nope').status, 401)
+    def test_short_epg_comes_from_the_chosen_source(self):
+        seed_live(self.state.catalog)
+        tf1 = next(c for c in self.state.player.index()[0] if c['canonical'] == 'TF1')
+        self.state.client.return_value.live_epg.return_value = [{'title': 'SlQ=', 'start': '1'}, {'title': 'eA==', 'start': '2'}]
+        body = json.loads(self.request('/player_api.php?username=tv&password=salon2024xyz'
+                                       '&action=get_short_epg&limit=1&stream_id=%d' % tf1['id']).read())
+        self.assertEqual(body, {'epg_listings': [{'title': 'SlQ=', 'start': '1'}]})
+        # Source HD choisie (720p), identifiant de guide du panel.
+        self.state.client.return_value.live_epg.assert_called_with(1, epg_channel_id='tf1.fr')
+        self.state.client.return_value.live_epg.side_effect = OSError('panel muet')
+        self.assertEqual(json.loads(self.request('/player_api.php?username=tv&password=salon2024xyz'
+                                                 '&action=get_short_epg&stream_id=%d' % tf1['id']).read()),
+                         {'epg_listings': []})
     def test_forwarded_address_only_trusted_behind_local_proxy(self):
         bad = lambda ip: self.request('/get.php?username=tv&password=nope', headers={'X-Forwarded-For': ip})
         good = lambda ip: self.request('/get.php?username=tv&password=salon2024xyz', headers={'X-Forwarded-For': ip}).status

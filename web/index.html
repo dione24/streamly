@@ -4,8 +4,8 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a14"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="style.css?v=20260918-v22">
-<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260918-v22"></script>
+<link rel="stylesheet" href="style.css?v=20260919-v23">
+<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260919-v23"></script>
 </head>
 <body>
 <!-- Masque au depart, comme #app : c'est /api/me qui tranche. Sans cela, le
@@ -184,6 +184,10 @@
     <button id="viewer-token" class="quiet">Afficher le jeton lecture seule</button>
    </div>
    <p id="viewer-value" class="token-value" hidden></p>
+   <h3>Lecteur externe</h3>
+   <p class="label-hint">TiviMate, IPTV Smarters, VLC… : collez ces identifiants dans votre lecteur. Le direct passe par ce serveur, compressé et adapté à la connexion.</p>
+   <div id="player-access" class="player-access"></div>
+   <p id="player-msg" role="status"></p>
    <h3>Lectures et charge du serveur</h3>
    <pre id="status"></pre>
    <details><summary>Journal de synchronisation</summary><pre id="sync-log"></pre></details>

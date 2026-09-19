@@ -941,6 +941,8 @@ async function openSettings() {
   $('#config').hidden = false;
   clearInterval(state.configTimer);
   await refreshConfig();
+  // Hors du rafraichissement de 8 s : il remettrait a zero le choix en cours.
+  loadPlayerAccess().catch(failure);
   $('#config').scrollIntoView({behavior: 'smooth', block: 'start'});
   state.configTimer = setInterval(() => refreshConfig().catch(failure), 8000);
 }
@@ -1349,6 +1351,102 @@ $('#provider-form').onsubmit = async e => {
   }
 };
 $('#sync-all').onclick = async () => { await post('/sync'); message('Synchronisation démarrée sur le serveur.'); };
+// Lecteurs externes : identifiants Xtream et lien M3U, a copier dans l'app.
+const PLAYER_MODES = [
+  ['eco', 'Économie · 360p max'],
+  ['balanced', 'Équilibré · 480p max'],
+  ['sport', 'Sport · 720p max']
+];
+
+async function copyText(text) {
+  // navigator.clipboard n'existe qu'en HTTPS : repli pour un serveur en HTTP.
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (err) {
+      // Page sans focus ou permission refusee : on tente la methode ancienne.
+    }
+  }
+  const area = el('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.append(area);
+  area.select();
+  const copied = document.execCommand('copy');
+  area.remove();
+  if (!copied) throw new Error('Copie impossible : sélectionnez le texte à la main.');
+}
+
+function accessRow(label, value, shown) {
+  const row = el('div', 'access-row');
+  const text = el('code', 'access-value', shown);
+  text.title = shown;
+  const copy = el('button', 'quiet', 'Copier');
+  copy.type = 'button';
+  copy.onclick = async () => {
+    try {
+      await copyText(value);
+      copy.textContent = 'Copié ✓';
+      setTimeout(() => { copy.textContent = 'Copier'; }, 1600);
+    } catch (err) { failure(err); }
+  };
+  row.append(el('span', 'access-label', label), text, copy);
+  return row;
+}
+
+async function loadPlayerAccess() {
+  const data = await api('/player-credentials');
+  const box = $('#player-access');
+  box.replaceChildren();
+  (data.players || []).forEach(player => {
+    const card = el('div', 'access-card');
+    const reveal = !!state.revealPlayer;
+    const hidden = '•'.repeat(player.password.length);
+    const secret = value => reveal ? value : value.split(player.password).join(hidden);
+    card.append(
+      accessRow('Serveur', player.server, player.server),
+      accessRow('Identifiant', player.username, player.username),
+      accessRow('Mot de passe', player.password, secret(player.password)),
+      accessRow('Lien M3U', player.m3u_url, secret(player.m3u_url))
+    );
+
+    const tools = el('div', 'access-tools');
+    const mode = el('select');
+    mode.setAttribute('aria-label', 'Qualité maximale proposée au lecteur');
+    PLAYER_MODES.forEach(([value, label]) => {
+      const option = el('option', '', label);
+      option.value = value;
+      option.selected = value === player.mode;
+      mode.append(option);
+    });
+    mode.onchange = async () => {
+      try {
+        await post('/player-credentials', {username: player.username, mode: mode.value});
+        $('#player-msg').textContent = 'Qualité enregistrée. Elle s’applique à la prochaine chaîne ouverte.';
+      } catch (err) { failure(err); }
+    };
+    const toggle = el('button', 'quiet', reveal ? 'Masquer' : 'Afficher');
+    toggle.type = 'button';
+    toggle.onclick = () => { state.revealPlayer = !reveal; loadPlayerAccess().catch(failure); };
+    const renew = el('button', 'quiet', 'Nouveau mot de passe');
+    renew.type = 'button';
+    renew.onclick = async () => {
+      if (!confirm('L’ancien mot de passe cessera aussitôt de fonctionner : chaque lecteur devra être reconfiguré. Continuer ?')) return;
+      try {
+        await post('/player-credentials', {username: player.username, regenerate: true});
+        $('#player-msg').textContent = 'Nouveau mot de passe généré.';
+        await loadPlayerAccess();
+      } catch (err) { failure(err); }
+    };
+    tools.append(mode, toggle, renew);
+    card.append(tools);
+    box.append(card);
+  });
+}
+
 $('#viewer-token').onclick = async () => {
   const data = await post('/viewer-token');
   $('#viewer-value').textContent = data.token;

@@ -80,6 +80,8 @@
   "players": [
     {"username": "streamly", "password": "", "mode": "balanced"}
   ],
+  "_comment_epg": "Guide des programmes servi aux lecteurs externes (xmltv.php) : telecharge depuis les panels Xtream toutes les N heures, reduit aux chaines du catalogue et aux programmes a venir.",
+  "epg_refresh_hours": 6,
   "_comment_public_url": "Adresse publique vue par les lecteurs (ex. https://tv.exemple.fr). Vide = deduite de la requete.",
   "public_url": "",
   "_comment_capacity": "Limite globale de traitements (direct + preparation). Respecte aussi max_connections par provider."

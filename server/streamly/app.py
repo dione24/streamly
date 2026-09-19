@@ -18,6 +18,7 @@ from .catalog import Catalog
 from .transcoder import Transcoder, CapacityError, MODE_CEILINGS
 from .auth import Sessions
 from . import player as playermod
+from .epg import Guide
 from .vod import Movies
 from .m3u import M3UClient, PlaylistError, detect_xtream
 from .xtream import XtreamClient, parse_series_info
@@ -93,6 +94,11 @@ class State:
         self.transcoder = Transcoder(self.cfg, cfgmod.HLS_DIR, cfgmod.LOG_DIR, state_dir=cfgmod.DATA_DIR)
         self.sessions = Sessions(self.cfg)
         self.player = playermod.PlayerFacade(self.catalog, self.transcoder)
+        self.guide = Guide(os.path.join(cfgmod.DATA_DIR, "guide.xml.gz"), self.guide_sources,
+                           lambda: {c["epg_id"] for c in self.player.index()[0]},
+                           self.cfg.get("epg_refresh_hours", 6),
+                           log=lambda msg: print(msg, flush=True))
+        self.guide.ensure_fresh()
         self.movies = Movies(self.cfg, os.path.join(cfgmod.DATA_DIR, "movies"), self.catalog, self.transcoder)
         self.sync_lock = threading.Lock()
         self.sync_log = []
@@ -149,6 +155,12 @@ class State:
         with self._details_lock:
             self._details[pid] = {"at": time.time(), "data": data}
         return data
+
+    def guide_sources(self):
+        """Guides XMLTV des panels Xtream actifs. Une playlist M3U n'en a pas."""
+        return [(p["id"], self.client(p).xmltv_url(), self.cfg.get("user_agent", "VLC/3.0.20"))
+                for p in self.cfg.get("providers", [])
+                if p.get("enabled", True) and p.get("kind") != "m3u"]
 
     def candidate_urls(self, provider_id, stream_id):
         """URLs a essayer pour une chaine, dans l'ordre.
@@ -304,6 +316,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Contrat Xtream : un refus reste un 200. Smarters traite un
                 # 401 comme un serveur injoignable.
                 return self._compact({"user_info": {"auth": 0}})
+            if one("action") in ("get_short_epg", "get_simple_data_table"):
+                return self._compact({"epg_listings": self._player_epg(one("stream_id"), one("limit"))})
             active = STATE.transcoder.owner_streams(playermod.owner(player))
             return self._compact(STATE.player.api(player, one("action"), params,
                                                   self._public_base(), active))
@@ -314,7 +328,41 @@ class Handler(BaseHTTPRequestHandler):
             return self._listing(STATE.player.m3u(player, self._public_base()),
                                  "audio/x-mpegurl; charset=utf-8",
                                  {"Content-Disposition": 'inline; filename="streamly.m3u"'})
-        return self._listing(STATE.player.xmltv(), "application/xml; charset=utf-8")
+        STATE.guide.ensure_fresh()
+        packed = STATE.guide.read()
+        if packed is None:
+            # Premier demarrage : le guide se construit en tache de fond.
+            return self._listing(STATE.player.xmltv(), "application/xml; charset=utf-8")
+        headers = {"Cache-Control": "no-store", "Vary": "Accept-Encoding"}
+        if "gzip" in (self.headers.get("Accept-Encoding") or "").lower():
+            headers["Content-Encoding"] = "gzip"
+            return self._raw(200, packed, "application/xml; charset=utf-8", headers)
+        return self._raw(200, gzip.decompress(packed), "application/xml; charset=utf-8", headers)
+
+    def _player_epg(self, sid, limit):
+        """Guide court d'une chaine, tel que le panel le renvoie (titres en
+        base64, comme l'attendent les lecteurs Xtream). Vide en cas d'echec :
+        un guide absent ne doit pas bloquer la lecture."""
+        try:
+            channel = STATE.player.channel(sid)
+        except (TypeError, ValueError):
+            channel = None
+        if not channel:
+            return []
+        best = STATE.catalog.pick_source(channel["lang"], channel["canonical"],
+                                         int(STATE.cfg.get("preferred_source_height", 720)))
+        provider = STATE.provider(best["provider_id"]) if best else None
+        if not provider or provider.get("kind") == "m3u":
+            return []
+        try:
+            items = STATE.client(provider).live_epg(best["stream_id"], epg_channel_id=channel["epg_id"] or None)
+        except Exception:
+            return []
+        try:
+            count = int(limit)
+        except (TypeError, ValueError):
+            count = 0
+        return items[:count] if count > 0 else items
 
     def _serve_live(self, path):
         """/live/{user}/{pass}/{id}.m3u8 et /live/{user}/{pass}/{id}/{niveau}.m3u8.

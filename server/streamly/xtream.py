@@ -107,6 +107,10 @@ class XtreamClient:
     def live_url(self, stream_id):
         return "%s/%s/%s/%s" % (self.host, self.username, self.password, stream_id)
 
+    def xmltv_url(self):
+        q = urllib.parse.urlencode({"username": self.username, "password": self.password})
+        return "%s/xmltv.php?%s" % (self.host, q)
+
     def hls_url(self, stream_id):
         return "%s/live/%s/%s/%s.m3u8" % (self.host, self.username, self.password, stream_id)
 

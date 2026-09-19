@@ -502,7 +502,7 @@ JSON : `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` pour rester 
 
 Le catalogue n’a **pas** de grille persistée, seulement `channels.epg_id`. Un xmltv d’origine est volumineux et lierait le pull provider à un scan lecteur — interdit.
 
-v1 : XMLTV **valide et vide** (ou uniquement les `channel id` + `display-name` sans `programme`), HTTP 200, génération SQLite. TiviMate fonctionne ; le guide sera pauvre.
+*(Remplacé : voir « Plan de livraison », guide XMLTV mis en cache.)* v1 : XMLTV **valide et vide** (ou uniquement les `channel id` + `display-name` sans `programme`), HTTP 200, génération SQLite. TiviMate fonctionne ; le guide sera pauvre.
 
 `get_short_epg` / `get_simple_data_table` : **un** appel provider à l’ouverture d’une fiche, déjà le modèle de `/api/epg`. Timeout court. Échec → liste vide, pas 502 bloquant le lecteur. Ne **jamais** préfetcher 26 k grilles.
 
@@ -798,7 +798,14 @@ Trois étapes au lieu des sept PR ci-dessous, conservées pour le détail :
 
 1. **Fait le 2026-09-19** — index catalogue + comptes `players` + `get.php` / `player_api.php` / `xmltv.php` + API Réglages (`/api/player-credentials`) + adresse client derrière proxy + gzip. Aucune route `/live` : aucun FFmpeg possible depuis la façade. Correspond aux PR 1, 2, 3.
 2. **`/live` HLS paresseux** avec R1, R2, R3 et l’amendement worker `failed`. Correspond aux PR 4 et 5.
-3. **Interface Réglages + README**. Correspond aux PR 6 et 7.
+3. **Fait le 2026-09-19** — bloc « Lecteur externe » dans Réglages (copie, qualité max, nouveau mot de passe) et guide des programmes. README restant.
+
+Ajouts constatés en test réel (lecteur IPTV macOS sur le VPS) :
+
+- **Forme courte Xtream** `/{user}/{pass}/{id}` sans `/live/` ni extension : c'est celle qu'emploie le lecteur testé. Redirigée en 302 vers `/live/…/{id}.m3u8`, masquée dans le journal.
+- **Guide XMLTV** (`epg.py`) : le guide du panel (77 Mo, 233 740 programmes) est téléchargé toutes les `epg_refresh_hours` (6 h), réduit aux chaînes du catalogue et aux programmes non terminés (5 343 chaînes, 91 395 programmes, 5,7 Mo gzip, ~7 s, 63 Mo de mémoire pour tout le service), puis servi depuis le disque. En cas d'échec, l'ancien guide reste servi.
+- **`get_short_epg`** relaie le guide court du panel pour la source choisie (titres en base64, format Xtream), en moins d'une seconde.
+- Mesures : démarrage d'une chaîne en ~4 s, zapping sans second encodeur.
 
 ## PR Plan (détail d’origine)
 
