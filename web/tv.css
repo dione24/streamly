@@ -564,7 +564,7 @@
   body.mode-favorites #app.tv #catalogue { grid-column: 1 / 3; padding-left: 26px; }
 
   /* --- Films prets et reglages : pleine scene, defilement propre */
-  body.mode-prepared #app.tv #viewer { display: none; }
+  body.mode-prepared #app.tv #viewer, body.mode-prepared #app.tv #filters { display: none; }
   #app.tv #preparations, #app.tv #config {
     grid-column: 1 / -1;
     margin: 0;

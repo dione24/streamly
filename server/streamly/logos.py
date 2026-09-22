@@ -12,9 +12,7 @@ import hashlib
 import os
 import threading
 import time
-import urllib.request
-
-from .relay import check_source
+from .egress import open_public
 
 MAX_BYTES = 1500000
 CACHE_BYTES = 500 * 1000000
@@ -37,15 +35,6 @@ def _kind(data):
     return None
 
 
-class _CheckedRedirects(urllib.request.HTTPRedirectHandler):
-    def __init__(self, allow_private):
-        self.allow_private = allow_private
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        check_source(newurl, self.allow_private)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
 class Logos:
     def __init__(self, root, known, user_agent='VLC/3.0.20', allow_private=False):
         """known(url) -> bool : l'adresse figure-t-elle dans le catalogue ?"""
@@ -54,7 +43,6 @@ class Logos:
         self._slots = threading.Semaphore(8)
         self._lock = threading.Lock()
         self._size = sum(e.stat().st_size for e in os.scandir(root) if e.is_file())
-        self._opener = urllib.request.build_opener(_CheckedRedirects(allow_private))
 
     def get(self, url):
         """(octets, type) d'un logo, ou None."""
@@ -99,9 +87,9 @@ class Logos:
 
     def _fetch(self, url):
         try:
-            check_source(url, self.allow_private)
-            request = urllib.request.Request(url, headers={'User-Agent': self.user_agent})
-            with self._opener.open(request, timeout=6) as response:
+            with open_public(url, self.user_agent, self.allow_private, timeout=6) as (response, _):
+                if response.status != 200:
+                    return None
                 data = response.read(MAX_BYTES + 1)
         except Exception:
             return None

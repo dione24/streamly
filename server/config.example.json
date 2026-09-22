@@ -87,6 +87,8 @@
   ],
   "_comment_epg": "Guide des programmes servi aux lecteurs externes (xmltv.php) : telecharge depuis les panels Xtream toutes les N heures, reduit aux chaines du catalogue et aux programmes a venir.",
   "epg_refresh_hours": 6,
+  "_comment_catalog_refresh": "Rafraichissement automatique des catalogues (direct, films, series), meme sans navigateur ouvert. Defaut : 6 heures ; minimum : 1 heure ; 0 desactive uniquement la periodicite (l'ajout et le bouton Synchroniser restent actifs). Les imports sont serialises ; une panne de recuperation du direct est reessayee apres 15 minutes.",
+  "catalog_refresh_hours": 6,
   "_comment_trust_proxy": "true si un proxy HTTPS local (Apache) precede Streamly alors que listen_host reste public : ses en-tetes X-Forwarded-* sont crus pour les requetes venues de 127.0.0.1. Inutile quand listen_host vaut 127.0.0.1.",
   "trust_proxy": false,
   "_comment_public_url": "Adresse publique vue par les lecteurs (ex. https://tv.exemple.fr). Vide = deduite de la requete.",

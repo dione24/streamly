@@ -438,7 +438,7 @@ function playbackUI(title, live) {
     updateTelemetryUI();
   }
 
-  $('#live-badge').innerHTML = live ? '<span class="pulse-dot" aria-hidden="true"></span> DIRECT' : '● FILM PRÊT';
+  $('#live-badge').innerHTML = live ? '<span class="pulse-dot" aria-hidden="true"></span> DIRECT' : '● FILM';
   $('#back-live').hidden = !live;
   $('#player-status').textContent = 'Préparation de la lecture…';
   // L'encodeur met quelques secondes a produire : on le dit, plutot qu'un ecran noir.
@@ -515,7 +515,15 @@ function attach(url, live, attempt) {
       liveMaxLatencyDuration: unstable ? 65 : 25,
       maxLiveSyncPlaybackRate: 1,
       abrEwmaDefaultEstimate: 450000,
-      capLevelToPlayerSize: true
+      capLevelToPlayerSize: true,
+      // Film en preparation : apres un saut, le serveur encode le passage
+      // demande avant de repondre. On attend plutot que d'abandonner.
+      ...(live ? {} : {startPosition: 0, fragLoadPolicy: {default: {
+        maxTimeToFirstByteMs: 30000,
+        maxLoadTimeMs: 120000,
+        timeoutRetry: {maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 4000},
+        errorRetry: {maxNumRetry: 20, retryDelayMs: 1500, maxRetryDelayMs: 4000}
+      }}})
     });
     state.hls = hls;
     hls.attachMedia(v);
@@ -592,7 +600,8 @@ $('#pip').onclick = () => {
 const video = $('#video');
 video.addEventListener('waiting', () => {
   if (state.frames) state.stalls++;
-  $('#player-status').textContent = 'Mise en réserve…';
+  $('#player-status').textContent = state.job && state.job.state === 'preparing'
+    ? 'Encodage de ce passage sur le serveur…' : 'Mise en réserve…';
   // Un court passage a vide est normal ; au-dela, on l'explique.
   if (state.frames && !state.job && !state.stallTimer && $('#stage-loader').hidden) {
     state.stallTimer = setTimeout(() => {
@@ -1096,7 +1105,7 @@ async function setMode(mode) {
   $('#config').hidden = true;
   $('#preparations').hidden = mode !== 'prepared';
   $('#catalogue').hidden = mode === 'prepared';
-  $('#filters').hidden = mode === 'favorites';
+  $('#filters').hidden = mode === 'favorites' || mode === 'prepared';
   $('#recent-wrap').hidden = mode !== 'live' || !store.json('recents', []).length;
   
   const modeClass = 'mode-' + (mode === 'favorites' ? 'favorites' : mode);
@@ -1263,7 +1272,11 @@ async function seriesDialog(show) {
 function episodeDialog(show, episode) {
   const numero = (episode.season ? 'S' + String(episode.season).padStart(2, '0') : '')
     + (episode.episode ? 'E' + String(episode.episode).padStart(2, '0') : '');
-  const label = [show.title, numero, episode.title].filter(Boolean).join(' · ');
+  // Beaucoup de panels donnent comme titre d'épisode le numéro seul, ou le nom
+  // de la série suivi du numéro : on ne le garde que s'il apporte autre chose.
+  const brut = String(episode.title || '').trim();
+  const reste = brut.replace(show.title || '', '').replace(/S\d+\s*E\d+/gi, '').replace(/[\s·:|\-\[\]()]+/g, '');
+  const label = [show.title, numero, reste ? brut : ''].filter(Boolean).join(' · ');
   state.movie = {
     kind: 'episode',
     provider_id: show.provider_id,
@@ -1272,14 +1285,15 @@ function episodeDialog(show, episode) {
     duration: episode.duration || '',
     plot: episode.plot || show.plot || ''
   };
+  movieWording('episode');
   $('#movie-title').textContent = label;
-  $('#movie-details').textContent = [episode.duration, 'Taille source inconnue'].filter(Boolean).join(' · ');
+  $('#movie-details').textContent = readableDuration(episode.duration);
   $('#movie-plot').textContent = state.movie.plot;
   $('#movie-message').textContent = '';
   $('#track-fields').hidden = true;
-  $('#prepare-movie').disabled = false;
+  movieButtons(true);
   movieEstimate();
-  $('#movie-dialog').showModal();
+  openMovieDialog();
 }
 
 async function movieDialog(c) {
@@ -1288,13 +1302,14 @@ async function movieDialog(c) {
   $('#movie-details').textContent = '';
   $('#movie-plot').textContent = '';
   $('#track-fields').hidden = true;
-  $('#prepare-movie').disabled = true;
-  $('#movie-dialog').showModal();
+  movieButtons(false);
+  movieWording('movie');
+  openMovieDialog();
   try {
     const info = await api('/vod/info?provider=' + encodeURIComponent(c.provider_id) + '&id=' + c.stream_id);
     state.movie = {...info, kind: 'movie'};
     $('#movie-title').textContent = info.title;
-    $('#movie-details').textContent = [info.duration, info.size_bytes ? 'Source : ≈ ' + size(info.size_bytes) : 'Taille source inconnue'].filter(Boolean).join(' · ');
+    $('#movie-details').textContent = [readableDuration(info.duration), info.size_bytes ? 'Source : ≈ ' + size(info.size_bytes) : ''].filter(Boolean).join(' · ');
     $('#movie-plot').textContent = info.plot || '';
     $('#movie-message').textContent = '';
     movieEstimate();
@@ -1302,12 +1317,43 @@ async function movieDialog(c) {
     $('#movie-message').textContent = err.message;
     return;
   }
-  $('#prepare-movie').disabled = false;
+  movieButtons(true);
+}
+
+function durationSeconds(text) {
+  const parts = String(text || '').split(':').map(Number);
+  if (parts.length < 2 || parts.some(n => !Number.isFinite(n))) return 0;
+  return parts.reduce((total, n) => total * 60 + n, 0);
+}
+
+// « 00:57:00 » devient « 57 min », « 01:42:10 » devient « 1 h 42 ».
+function readableDuration(text) {
+  const seconds = durationSeconds(text);
+  if (!seconds) return text || '';
+  const h = Math.floor(seconds / 3600), m = Math.round((seconds % 3600) / 60);
+  return h ? h + ' h ' + String(m).padStart(2, '0') : m + ' min';
+}
+
+function movieWording(kind) {
+  const what = kind === 'episode' ? 'l’épisode' : 'le film';
+  $('#movie-note').textContent = 'La lecture démarre pendant que le serveur compresse ' + what
+    + '. Il reste ensuite dans « Mes films prêts », téléchargeable une fois la préparation terminée.';
+}
+
+function openMovieDialog() {
+  $('#movie-dialog').showModal();
+  // Focus sur l'action principale plutôt que sur la croix de fermeture.
+  const watch = $('#watch-movie');
+  if (!watch.disabled) watch.focus();
 }
 
 function movieEstimate() {
   const rates = {240: 346000, 360: 496000, 480: 896000, 720: 1596000};
-  $('#movie-estimate').textContent = 'Environ ' + size(rates[$('#movie-height').value] * 3600 / 8) + '/h après préparation.';
+  const rate = rates[$('#movie-height').value] / 8;
+  const seconds = durationSeconds(state.movie && state.movie.duration);
+  $('#movie-estimate').textContent = seconds
+    ? 'Environ ' + size(rate * seconds) + ' après préparation.'
+    : 'Environ ' + size(rate * 3600) + '/h après préparation.';
 }
 $('#movie-height').onchange = movieEstimate;
 
@@ -1330,26 +1376,81 @@ $('#check-tracks').onclick = async () => {
   }
 };
 
+function movieButtons(enabled) {
+  $('#watch-movie').disabled = !enabled;
+  $('#prepare-movie').disabled = !enabled;
+}
+
+async function requestPreparation() {
+  return post('/prepare', {
+    kind: state.movie.kind || 'movie',
+    provider: state.movie.provider_id,
+    id: state.movie.stream_id,
+    height: Number($('#movie-height').value),
+    audio: $('#track-fields').hidden || $('#movie-audio').value === '' ? null : Number($('#movie-audio').value),
+    subtitle: $('#track-fields').hidden || $('#movie-subtitle').value === '' ? null : Number($('#movie-subtitle').value)
+  });
+}
+
 $('#prepare-movie').onclick = async () => {
   if (!state.movie) return;
-  $('#prepare-movie').disabled = true;
+  movieButtons(false);
   try {
-    await post('/prepare', {
-      kind: state.movie.kind || 'movie',
-      provider: state.movie.provider_id,
-      id: state.movie.stream_id,
-      height: Number($('#movie-height').value),
-      audio: $('#track-fields').hidden || $('#movie-audio').value === '' ? null : Number($('#movie-audio').value),
-      subtitle: $('#track-fields').hidden || $('#movie-subtitle').value === '' ? null : Number($('#movie-subtitle').value)
-    });
+    await requestPreparation();
     $('#movie-dialog').close();
     await setMode('prepared');
   } catch (err) {
     $('#movie-message').textContent = err.message;
   } finally {
-    $('#prepare-movie').disabled = false;
+    movieButtons(true);
   }
 };
+
+$('#watch-movie').onclick = async () => {
+  if (!state.movie) return;
+  movieButtons(false);
+  let job;
+  try {
+    job = await requestPreparation();
+    $('#movie-dialog').close();
+  } catch (err) {
+    $('#movie-message').textContent = err.message;
+    return;
+  } finally {
+    movieButtons(true);
+  }
+  watchWhenPlayable(job).catch(err => {
+    stageScreen(null);
+    $('#player-status').textContent = err.message;
+  });
+};
+
+// Le serveur sonde la source avant de connaitre la duree du film : quelques
+// secondes pendant lesquelles on affiche l'ecran d'ouverture.
+async function watchWhenPlayable(job) {
+  const stopping = stop();
+  const attempt = state.playback;
+  await stopping;
+  if (attempt !== state.playback) return;
+  state.current = {label: job.title};
+  playbackUI(job.title, false);
+  $('#player-status').textContent = 'Analyse du film sur le serveur…';
+  let deadline = Date.now() + 60000;
+  while (attempt === state.playback && Date.now() < deadline) {
+    const jobs = await api('/preparations').catch(() => []);
+    const fresh = jobs.find(j => j.id === job.id);
+    if (fresh && fresh.state === 'failed') throw new Error(fresh.error || 'Échec de la préparation.');
+    if (fresh && (fresh.state === 'ready' || fresh.playable)) return playJob(fresh);
+    if (fresh && fresh.stage === 'subtitles') {
+      // Abonnement a une seule connexion : le serveur lit d'abord tout le
+      // fichier pour en extraire les sous-titres.
+      $('#player-status').textContent = 'Récupération des sous-titres sur le serveur…';
+      deadline = Math.max(deadline, Date.now() + 30000);
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  if (attempt === state.playback) throw new Error('Le serveur n’a pas pu ouvrir ce film. Retrouvez-le dans « Mes films prêts ».');
+}
 
 async function refreshJobs() {
   const jobs = await api('/preparations').catch(() => []);
@@ -1358,7 +1459,9 @@ async function refreshJobs() {
   jobs.forEach(job => {
     const card = el('article', 'job');
     const status = (job.state === 'ready' ? size(job.size_bytes) + ' · prêt à regarder' :
-      job.state === 'failed' ? (job.error || 'Échec de la préparation.') : 'Préparation sur le serveur · ' + job.progress + ' %');
+      job.state === 'failed' ? (job.error || 'Échec de la préparation.') :
+      job.stage === 'subtitles' ? 'Récupération des sous-titres…' :
+      'Préparation sur le serveur · ' + job.progress + ' %' + (job.playable ? ' · lisible dès maintenant' : ''));
     card.append(el('h3', '', job.title), el('p', 'muted small', job.height + 'p · ' + status));
     if (job.state === 'preparing') {
       const p = el('progress');
@@ -1368,22 +1471,44 @@ async function refreshJobs() {
       card.append(p);
     }
     const actions = el('div', 'job-actions');
-    if (job.state === 'ready') {
+    if (job.state === 'ready' || (job.state === 'preparing' && job.playable)) {
       const playButton = el('button', 'primary', store.get('position_' + job.id) ? 'Reprendre ▶' : 'Regarder ▶');
       playButton.onclick = () => playJob(job).catch(failure);
+      actions.append(playButton);
+    }
+    if (job.state === 'ready') {
       const download = el('a', '', 'Télécharger ↓');
       download.href = '/media/' + job.id + '/' + job.download + '?download=1';
       download.setAttribute('download', '');
-      actions.append(playButton, download);
+      actions.append(download);
     }
     if (job.state === 'failed') {
       const retry = el('button', '', 'Relancer');
       retry.onclick = () => retryPreparation(job, retry).catch(failure);
       actions.append(retry);
     }
+    const remove = el('button', 'quiet', 'Supprimer');
+    remove.onclick = () => deletePreparation(job, remove).catch(failure);
+    actions.append(remove);
     if (actions.children.length) card.append(actions);
     $('#jobs').append(card);
   });
+}
+
+async function deletePreparation(job, button) {
+  const question = job.state === 'preparing'
+    ? 'Arrêter la préparation de « ' + job.title + ' » et la supprimer ?'
+    : 'Supprimer « ' + job.title + ' » ? Il faudra le préparer à nouveau pour le regarder.';
+  if (!confirm(question)) return;
+  button.disabled = true;
+  try {
+    if (state.job && state.job.id === job.id) await stop();
+    await post('/prepare/delete', {id: job.id});
+    store.remove('position_' + job.id);
+    await refreshJobs();
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function retryPreparation(job, button) {
@@ -1411,17 +1536,47 @@ async function playJob(job) {
   state.current = {label: job.title};
   playbackUI(job.title, false);
   attach('/media/' + job.id + '/master.m3u8', false, attempt);
-  $('#usage').textContent = 'Téléchargement complet : ' + size(job.size_bytes);
-  if (job.subtitles) {
-    const track = el('track');
-    track.kind = 'subtitles';
-    track.label = 'Sous-titres sélectionnés';
-    track.srclang = 'und';
-    track.src = '/media/' + job.id + '/subtitles.vtt';
-    track.default = true;
-    video.append(track);
-  }
+  jobUsage(job);
+  if (job.subtitles_ready) subtitleTrack(job);
 }
+
+function jobUsage(job) {
+  $('#usage').textContent = job.state === 'ready' ? 'Téléchargement complet : ' + size(job.size_bytes)
+    : 'Préparation sur le serveur · ' + job.progress + ' %';
+}
+
+function subtitleTrack(job) {
+  video.querySelectorAll('track').forEach(t => t.remove());
+  const track = el('track');
+  track.kind = 'subtitles';
+  track.label = 'Sous-titres sélectionnés';
+  track.srclang = 'und';
+  track.src = '/media/' + job.id + '/subtitles.vtt';
+  track.default = true;
+  video.append(track);
+}
+
+// Film lance avant la fin de sa preparation : progression, et sous-titres des
+// que le serveur les a extraits.
+let jobBusy = false;
+setInterval(async () => {
+  const job = state.job;
+  if (!job || job.state === 'ready' || jobBusy) return;
+  jobBusy = true;
+  try {
+    const fresh = (await api('/preparations')).find(j => j.id === job.id);
+    if (!fresh || state.job !== job) return;
+    const subtitlesArrived = fresh.subtitles_ready && !job.subtitles_ready;
+    Object.assign(job, fresh);
+    jobUsage(job);
+    if (subtitlesArrived) subtitleTrack(job);
+    if (job.state === 'failed') $('#player-status').textContent = job.error || 'Échec de la préparation.';
+  } catch (err) {
+    // Le prochain tour reessaiera.
+  } finally {
+    jobBusy = false;
+  }
+}, 5000);
 
 // Administration
 function frenchDate(epoch) {
@@ -1475,6 +1630,10 @@ async function loadProviderDetails() {
 
 async function refreshConfig() {
   const st = await api('/status').catch(() => ({}));
+  const hours = st.catalog_refresh_hours;
+  $('#catalog-refresh-info').textContent = hours > 0
+    ? `Le catalogue est ensuite actualisé automatiquement toutes les ${hours} heures.`
+    : hours === 0 ? 'L’actualisation périodique est désactivée. Vous pouvez synchroniser à tout moment.' : '';
   $('#status').textContent = 'Charge système (1 / 5 / 15 min) : ' + (st.load || []).map(n => n.toFixed(2)).join(' / ') + '\nCapacité : ' + (st.stream ? st.stream.capacity : 0) + ' chaîne(s) distincte(s)\n' + ((st.stream && st.stream.workers) || []).map(w => w.label + ' · ' + w.state + ' · ' + w.viewers + ' appareil(s) · ' + w.failovers + ' bascule(s)').join('\n');
   $('#sync-log').textContent = (st.sync_log || []).join('\n') || 'Aucune synchronisation en cours.';
   $('#provider-list').replaceChildren();
@@ -1551,8 +1710,8 @@ $('#provider-form').onsubmit = async e => {
     $('#provider-form').reset();
     syncProviderFields();
     $('#p-msg').textContent = (kind === 'm3u' && added.kind === 'xtream')
-      ? 'Lien reconnu comme panel Xtream : programme et films disponibles. Vous pouvez synchroniser.'
-      : 'Abonnement ajouté. Vous pouvez synchroniser son catalogue.';
+      ? 'Lien reconnu comme panel Xtream. Synchronisation automatique du catalogue lancée.'
+      : 'Abonnement ajouté. Synchronisation automatique du catalogue lancée ; la progression apparaît ci-dessous.';
     await refreshConfig();
   } catch (err) {
     $('#p-msg').textContent = err.message;

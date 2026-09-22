@@ -101,3 +101,25 @@ synchronisation unique vers SQLite.
 - Le conteneur VOD est souvent **MKV** avec de l'HEVC Main 10 et de l'E-AC3,
   que `AVPlayer` ne sait pas lire — un remux `-c copy` vers MP4 suffit à le
   rendre lisible, sans ré-encodage.
+
+## Films : lecture pendant la préparation (22 septembre 2026)
+
+Source synthétique 1080p HEVC Main 10 + E-AC3 (2 min), commande exacte du
+serveur (`Movies._command`), sans autre lecture en cours.
+
+| Machine | 480p (3 qualités) | 720p (4 qualités) |
+|---|---|---|
+| VPS, 4 cœurs (instance principale) | 3,6× temps réel | 2,5× temps réel |
+| VPS, 2 cœurs (proche des instances amis, `CPUQuota=150%`) | 2,3× | 1,5× |
+| Mac M1 Pro | 7,1× | 5,7× |
+
+Préversion locale, faux panel Xtream bridé à 4× le temps réel, Chrome + hls.js :
+première image 3,1 à 3,4 s après « Regarder maintenant » ; reprise 3,5 à
+5,5 s après un saut vers un passage non encodé (une passe FFmpeg par saut) ;
+film de 10 min entièrement préparé en 160 s, MP4 assemblé de 7 passes :
+15 000 images pour 600 s, sans trou ni doublon.
+
+Sous-titres texte dans la passe vidéo : FFmpeg n'écrit rien avant la
+réplique suivante — 44 s d'attente mesurées pour 2 min 30 sans dialogue,
+identique en copie SRT/MKV et avec `-max_interleave_delta`. Ils sont donc
+extraits par un FFmpeg séparé.

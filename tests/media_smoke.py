@@ -11,7 +11,8 @@ import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server'))
-from streamly.transcoder import Transcoder, probe
+from streamly.transcoder import Transcoder, probe, RELAY_INPUT_OPTIONS
+from streamly.egress import RelayGateway
 from streamly.vod import Movies
 from streamly.catalog import Catalog
 
@@ -74,10 +75,39 @@ with tempfile.TemporaryDirectory() as root:
     while movies.jobs[job['id']]['state'] == 'preparing' and time.time()<deadline: time.sleep(.2)
     j = movies.jobs[job['id']]
     assert j['state']=='ready',j
-    assert j['size_bytes']>0 and len(j['qualities']) == 3,j
+    # Source en 180p : les barreaux plus hauts ne l'agrandissent pas, un seul reste.
+    assert j['size_bytes']>0 and j['qualities'] == [180],j
     download = root/'movies'/j['id']/j['download']
     video = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(download)]))
     assert next(s for s in video['streams'] if s['codec_type']=='video')['codec_name']=='h264'
     print(json.dumps({'live_50fps_segments':durations,'remux_segments':copy_durations,'prepared_qualities':j['qualities'],'download_bytes':j['size_bytes'],'provider_reservation_released':not t.reservations}))
     assert not t.reservations
-    t.close();http.shutdown();http.server_close()
+    # Le meme FFmpeg doit encore lire du TS et les sous-ressources HLS
+    # quand toutes ses entrees passent par la passerelle protegee.
+    gateway = RelayGateway('StreamlyTest', allow_private=True)
+    try:
+        for kind, url in [('ts', source), ('hls', source.replace('/source.ts', '/live/g0_s_0.m3u8'))]:
+            guarded = gateway.grant('smoke', url)
+            checked = probe(guarded, 'StreamlyTest', guarded=True)
+            assert not checked.get('unverified'), (kind, checked)
+            decoded = subprocess.run(['ffmpeg', '-nostdin', '-v', 'error'] + RELAY_INPUT_OPTIONS +
+                                     ['-i', guarded, '-t', '2', '-f', 'null', '-'],
+                                     capture_output=True, timeout=20)
+            assert decoded.returncode == 0, (kind, decoded.stderr.decode()[-2000:])
+        print('guarded_relay_ts_and_hls: OK')
+        relay = Transcoder(dict(cfg, relay_allow_private=True), str(root/'relay'), str(root/'relay-logs'), monitor=False)
+        try:
+            ticket = relay.open('test', 'relay-smoke', [{'provider': 'relay:localhost', 'url': source}], ceiling=650000)
+            deadline = time.time() + 20
+            while not list((root/'relay').rglob('*.ts')) and time.time() < deadline:
+                time.sleep(.1)
+            assert list((root/'relay').rglob('*.ts')), 'le worker relais ne produit pas de segments'
+            worker = next(iter(relay.workers.values()))
+            command = worker['proc'].args
+            assert source not in command and '-protocol_whitelist' in command
+            print('guarded_relay_worker: OK')
+        finally:
+            relay.close()
+    finally:
+        gateway.close()
+        t.close();http.shutdown();http.server_close()

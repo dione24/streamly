@@ -24,6 +24,7 @@ from .logos import Logos
 from .vod import Movies
 from .m3u import M3UClient, PlaylistError, detect_xtream
 from .xtream import XtreamClient, parse_series_info
+from .refresh import CatalogRefresh, catalog_due, refresh_seconds
 
 STARTUP_TIMEOUT = 25      # secondes d'attente de la premiere playlist
 ACCESS_LOG = []           # journal d'acces circulaire, expose via /api/access
@@ -41,7 +42,7 @@ REDACTIONS = (
     (re.compile(r"(/(?:s|v|media)/)[^/ ?]+"), r"\1[redacted]"),
     (re.compile(r"(/live/)[^/ ?]+/[^/ ?]+"), r"\1[redacted]"),
     (re.compile(r"(\"[A-Z]+ /)(?!live/)[^/ ?\"]+/[^/ ?\"]+(/\d+(?:\.[a-z0-9]+)?[ ?])"), r"\1[redacted]\2"),
-    (re.compile(r"((?:username|password)=)[^& ]+"), r"\1[redacted]"),
+    (re.compile(r"((?:username|password|ticket|token)=)[^& \"\\]+", re.I), r"\1[redacted]"),
 )
 
 
@@ -114,6 +115,9 @@ class State:
         self.sync_lock = threading.Lock()
         self.sync_log = []
         self._details, self._details_lock = {}, threading.Lock()
+        self.catalog_refresh = CatalogRefresh(
+            self.cfg, self.catalog.stats,
+            lambda pid: _run_sync(pid, self, due_only=True), self.sync_lock.locked)
 
     def provider(self, pid):
         for p in self.cfg.get("providers", []):
@@ -140,7 +144,9 @@ class State:
         with self._details_lock:
             cached = self._details.get(pid)
             if cached and not force and time.time() - cached["at"] < ttl:
-                return cached["data"]
+                # Le cache concerne le panel, pas le catalogue local qui peut
+                # venir d'etre importe par la synchronisation automatique.
+                return dict(cached["data"], catalog=self.catalog.provider_counts(pid))
         data = {"id": pid, "kind": provider.get("kind", "xtream"), "reachable": False}
         try:
             info = self.client(provider).account_info()
@@ -232,6 +238,10 @@ class Handler(BaseHTTPRequestHandler):
         # Journal d'acces minimal : indispensable pour distinguer « la requete
         # n'arrive pas » de « le serveur repond mal ».
         text = fmt % args
+        # Distinguer une TV, un navigateur et nos sondes dans le diagnostic.
+        # JSON echappe les retours a la ligne d'un User-Agent malveillant.
+        agent = self.headers.get('User-Agent', '') if hasattr(self, 'headers') else ''
+        text += ' ua=' + json.dumps(agent[:160], ensure_ascii=True)
         for pattern, replacement in REDACTIONS:
             text = pattern.sub(replacement, text)
         line = "%s  %s  %s" % (time.strftime("%H:%M:%S"), self._client_ip(), text)
@@ -784,10 +794,34 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, 'fichier introuvable')
         _, jid, name = parts
         job = STATE.movies.jobs.get(jid)
-        if not job or job['state'] != 'ready' or not re.fullmatch(r'(master|q\d+)\.m3u8|q\d+\.mp4|q\d+_\d+\.ts|subtitles\.vtt', name):
+        if not job or not re.fullmatch(r'(master|q\d+)\.m3u8|q\d+\.mp4|q\d+_\d+\.ts|subtitles\.vtt', name):
+            return self._err(404, 'préparation indisponible')
+        progressive = job.get('format') == 2
+        if not (job['state'] == 'ready' or (progressive and job['state'] == 'preparing' and job.get('playable'))):
             return self._err(404, 'préparation indisponible')
         job['last_access'] = time.time()
         target = os.path.join(STATE.movies.root, jid, name)
+        if progressive:
+            # Playlists calculees, segments attendus le temps de leur encodage.
+            if name == 'master.m3u8':
+                return self._raw(200, STATE.movies.master(job).encode(), 'application/vnd.apple.mpegurl', {'Cache-Control': 'no-cache'})
+            if name.endswith('.m3u8'):
+                rung = int(name[1:-5])
+                if rung >= len(job.get('qualities') or []):
+                    return self._err(404, 'qualité inconnue')
+                return self._raw(200, STATE.movies.variant(job, rung).encode(), 'application/vnd.apple.mpegurl', {'Cache-Control': 'no-cache'})
+            if name.endswith('.ts'):
+                rung, n = (int(x) for x in name[1:-3].split('_'))
+                target = STATE.movies.segment(jid, rung, n)
+                if not target and n >= STATE.movies._total(job):
+                    # Film plus court qu'annonce : fin de lecture, pas d'attente.
+                    return self._err(404, 'fin du film')
+                if not target:
+                    return self._raw(503, b'segment en preparation', 'text/plain', {'Retry-After': '2', 'Cache-Control': 'no-store'})
+            elif name == 'subtitles.vtt' and not job.get('subtitles_ready'):
+                return self._err(404, 'sous-titres pas encore disponibles')
+            elif name.endswith('.mp4') and job['state'] != 'ready':
+                return self._err(404, 'téléchargement disponible à la fin de la préparation')
         try:
             fh = open(target, 'rb')
         except OSError:
@@ -909,6 +943,7 @@ class Handler(BaseHTTPRequestHandler):
                      "kind": p.get("kind", "xtream")}
                     for p in STATE.cfg.get("providers", [])],
                 "sync": cat.stats(),
+                "catalog_refresh_hours": refresh_seconds(STATE.cfg) / 3600,
                 "sync_log": STATE.sync_log[-30:] if self._admin() else [],
                 "load": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
             })
@@ -1092,13 +1127,17 @@ class Handler(BaseHTTPRequestHandler):
             except CapacityError as exc:
                 return self._err(409, str(exc))
             return self._json(job)
+        if path == '/api/prepare/delete':
+            if not STATE.movies.delete(str(body.get('id') or '')):
+                return self._err(404, 'Préparation introuvable.')
+            return self._json({'ok': True})
         if path == '/api/prepare/retry':
             job = STATE.movies.retry(body.get('job_id') or body.get('id'))
             if not job:
                 return self._err(404, 'Préparation introuvable.')
             return self._json(job)
         if path == "/api/providers":
-            pid = (body.get("id") or "").strip() or ("p%d" % int(time.time()))
+            pid = (body.get("id") or "").strip() or ("p" + secrets.token_hex(8))
             if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", pid):
                 return self._err(400, "identifiant provider invalide")
             link = (body.get("url") or "").strip()
@@ -1144,7 +1183,8 @@ class Handler(BaseHTTPRequestHandler):
             providers.append(provider)
             STATE.cfg["providers"] = providers
             cfgmod.save({"providers": providers})
-            return self._json({"ok": True, "provider": pid,
+            _schedule_sync(pid)
+            return self._json({"ok": True, "provider": pid, "sync_scheduled": True,
                                "kind": provider.get("kind", "xtream")})
 
         if path == "/api/providers/delete":
@@ -1162,8 +1202,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/sync":
             if STATE.sync_lock.locked():
                 return self._json({"ok": False, "message": "synchro deja en cours"})
-            threading.Thread(target=_run_sync, args=(body.get("id"),),
-                             daemon=True).start()
+            _schedule_sync(body.get("id"))
             return self._json({"ok": True, "message": "synchro demarree"})
 
         if path == "/api/favorites":
@@ -1307,41 +1346,58 @@ def _estimated_size(movie):
     return int(bitrate * 1000 * seconds / 8) if bitrate and seconds else 0
 
 
-def _run_sync(only_id=None):
+def _schedule_sync(only_id=None):
+    # Le verrou de _run_sync serialise les imports : l'ajout attend son tour
+    # si une autre synchronisation est en cours, sans perdre la demande.
+    # Capturer l'instance evite qu'un fil utilise un autre etat global.
+    threading.Thread(target=_run_sync, args=(only_id, STATE), daemon=True).start()
+
+
+def _run_sync(only_id=None, state=None, due_only=False):
     """Synchronise un provider (ou tous) en tache de fond."""
-    with STATE.sync_lock:
+    state = state or STATE
+    with state.sync_lock:
+        changed = False
         def log(msg):
-            STATE.sync_log.append("%s  %s" % (time.strftime("%H:%M:%S"), msg))
+            state.sync_log.append("%s  %s" % (time.strftime("%H:%M:%S"), msg))
             print(msg, flush=True)
 
-        for provider in STATE.cfg.get("providers", []):
+        for provider in state.cfg.get("providers", []):
             if only_id and provider.get("id") != only_id:
                 continue
             if not provider.get("enabled", True):
                 continue
-            client = STATE.client(provider)
+            # Une synchro manuelle peut avoir fini pendant l'attente du verrou.
+            if due_only and not catalog_due(state.cfg, state.catalog.stats(), provider['id'], time.time()):
+                continue
             try:
-                count, note = STATE.catalog.sync_provider(provider, client, log)
+                client = state.client(provider)
+                # Un abonnement expire peut renvoyer des listes vides : verifier
+                # l'acces avant de remplacer un catalogue deja disponible.
+                client.account_info()
+                count, note = state.catalog.sync_provider(provider, client, log)
+                changed = True
                 log("[%s] direct : %d chaines (%s)" % (provider["id"], count, note))
             except Exception as exc:
                 log("[%s] ECHEC direct : %s" % (provider.get("id"), exc))
                 continue
             nvod = 0
             try:
-                nvod = STATE.catalog.sync_vod(provider, client, log)
+                nvod = state.catalog.sync_vod(provider, client, log)
             except Exception as exc:
                 log("[%s] ECHEC VOD : %s" % (provider.get("id"), exc))
             # Un panel sans series ne doit pas faire echouer la synchro : une
             # playlist M3U n'en a jamais, et certains abonnements non plus.
             nseries = 0
             try:
-                nseries = STATE.catalog.sync_series(provider, client, log)
+                nseries = state.catalog.sync_series(provider, client, log)
             except Exception as exc:
                 log("[%s] ECHEC series : %s" % (provider.get("id"), exc))
             log("[%s] termine : %d chaines, %d films, %d series" %
                 (provider["id"], count, nvod, nseries))
-        STATE.player.invalidate()
-        STATE.guide.ensure_fresh(force=True)
+        if changed:
+            state.player.invalidate()
+            state.guide.ensure_fresh(force=True)
 
 
 def main():
@@ -1351,7 +1407,13 @@ def main():
     host = cfg.get("listen_host", "0.0.0.0")
     port = int(cfg.get("listen_port", 8088))
     print("Streamly sur http://%s:%d/" % (host, port))
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    server = ThreadingHTTPServer((host, port), Handler)
+    STATE.catalog_refresh.start()
+    try:
+        server.serve_forever()
+    finally:
+        STATE.catalog_refresh.close()
+        server.server_close()
 
 
 if __name__ == "__main__":

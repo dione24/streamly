@@ -40,9 +40,10 @@ abonnement IPTV ──▶ Streamly (FFmpeg, à la demande) ──▶ interface w
   qualité en cours, connexion interrompue, chaîne indisponible chez le
   fournisseur.
 - Favoris, récents, recherche, PWA installable, mini-lecteur, plein écran.
-- Films et épisodes préparés sur le serveur en version légère (choix de la
-  qualité, de l'audio et des sous-titres texte), lisibles ou téléchargeables
-  avec reprise.
+- Films et épisodes lisibles immédiatement, pendant que le serveur les compresse
+  (choix de la qualité, de l'audio et des sous-titres texte) : on peut avancer
+  n'importe où dans le film, l'encodage repart de ce point. Une fois la
+  préparation terminée, le film reste disponible et téléchargeable en MP4.
 
 **Vos lecteurs habituels**
 - Streamly se présente comme un panel **Xtream Codes** et comme un lien **M3U** :
@@ -71,9 +72,16 @@ python3 run.py
 
 Au premier lancement, `config.json` est créé et un **jeton administrateur**
 s'affiche dans le terminal. Ouvrez `http://localhost:8088`, connectez-vous avec
-ce jeton, puis dans **Réglages** : ajoutez votre abonnement et lancez la
-synchronisation. Les identifiants pour vos lecteurs externes sont dans
+ce jeton, puis dans **Réglages** : ajoutez votre abonnement. La synchronisation du catalogue démarre
+automatiquement. Les identifiants pour vos lecteurs externes sont dans
 **Réglages → Lecteur externe**.
+
+Les catalogues existants sont ensuite actualisés automatiquement toutes les
+**six heures**, même si l'interface est fermée. Le serveur reprend les échéances
+enregistrées après un redémarrage et importe les abonnements l'un après l'autre.
+Si la récupération du direct échoue, la copie précédente est conservée et une
+nouvelle tentative a lieu après quinze minutes. Le bouton **Synchroniser**
+permet toujours de lancer une mise à jour immédiate.
 
 Pour essayer l'interface sans abonnement : `python3 tests/preview.py`
 (catalogue fictif, jeton `preview-only`, usage local uniquement).
@@ -124,6 +132,7 @@ Les principales :
 | `players` | Comptes des lecteurs externes et leur mode. |
 | `public_url`, `trust_proxy`, `secure_cookies`, `listen_host` | Publication derrière un proxy HTTPS. |
 | `epg_refresh_hours` | Fréquence de reconstruction du guide des programmes. |
+| `catalog_refresh_hours` | Actualisation des catalogues, toutes les 6 h par défaut ; minimum 1 h, `0` désactive la périodicité. |
 | `relay_allow_private` | Autorise l'application à faire compresser une source du réseau local (moteur domestique uniquement). |
 
 ## Sécurité
@@ -138,7 +147,10 @@ Les principales :
 - Les journaux masquent tickets, mots de passe et identifiants d'abonnement.
   Aucune URL ni identifiant du fournisseur ne sort dans les playlists servies.
 - Tout ce qui va chercher une adresse venue de l'extérieur (relais, logos)
-  refuse les adresses privées et locales, redirections comprises.
+  refuse les adresses privées et locales, redirections comprises. Le relais
+  contrôle aussi les playlists, segments et clés HLS, et se connecte à l'IP
+  vérifiée sans refaire de résolution DNS. FFmpeg reçoit ces ressources via
+  une passerelle locale ; seuls les formats de médias autorisés sont ouverts.
 
 Une faille ? Merci de la signaler en privé au mainteneur (onglet *Security* du
 dépôt s'il est activé) plutôt que dans une issue publique.
@@ -178,6 +190,13 @@ documentation que ce qui a été mesuré ([`docs/mesures.md`](docs/mesures.md)).
 - Démarrage d'une chaîne : 3 à 11 s selon la source (l'écran d'attente le couvre).
 - Le relais et les lecteurs externes servent le direct ; films et séries passent
   par l'interface web.
+- Film : première image en 3 s environ, et 3,5 à 5,5 s après un saut vers un
+  passage pas encore encodé (mesuré en local, source bridée à 4 fois le temps
+  réel). Le serveur doit encoder plus vite que la lecture, sinon l'image attend.
+- Sous-titres d'un film : extraits par une lecture complète du fichier. Avec un
+  abonnement à une seule connexion, cette lecture passe avant la vidéo.
+- Un film sans durée annoncée (flux `.ts` surtout) se lit depuis le début : le
+  saut se limite à la partie déjà encodée.
 - Le mode Budget n'existe que dans l'interface web et l'API : un lecteur tiers ne
   sait pas afficher un compteur.
 - Certains fournisseurs refusent les connexions venant d'un centre de données.

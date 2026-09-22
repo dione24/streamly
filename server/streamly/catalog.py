@@ -23,6 +23,8 @@ def _clean_label(name):
     if not name:
         return name
     cleaned = re.sub(xtream.QUALITY_TOKENS, "", name, flags=re.IGNORECASE)
+    # « Titre [4K] » devient « Titre [] » : on retire les crochets vidés.
+    cleaned = re.sub(r"\[[\s|/,+-]*\]|\([\s|/,+-]*\)", "", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -|:")
     return cleaned or name
 

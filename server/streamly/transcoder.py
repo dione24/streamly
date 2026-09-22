@@ -13,6 +13,12 @@ import subprocess
 import threading
 import time
 from fractions import Fraction
+from .egress import RelayGateway
+
+
+RELAY_INPUT_OPTIONS = ['-protocol_whitelist', 'http,tcp,crypto',
+                       '-format_whitelist', 'mpegts,hls,mov,matroska,webm,aac,mp3,webvtt',
+                       '-http_proxy', '']
 
 _FFMPEG_CAPABILITIES = None
 
@@ -104,12 +110,13 @@ def _bps(value):
     return int(float(value[:-1]) * {'k': 1000, 'm': 1000000}[value[-1]]) if value[-1:] in ('k', 'm') else int(float(value))
 
 
-def probe(source, user_agent):
+def probe(source, user_agent, guarded=False):
     try:
         result = subprocess.run([
             'ffprobe', '-v', 'error', '-rw_timeout', '5000000',
             '-user_agent', user_agent, '-show_streams', '-show_format',
-            '-of', 'json', source], capture_output=True, timeout=7, check=True)
+            '-of', 'json'] + (RELAY_INPUT_OPTIONS if guarded else []) + [source],
+            capture_output=True, timeout=7, check=True)
         data = json.loads(result.stdout)
         video = next(s for s in data['streams'] if s['codec_type'] == 'video')
         audio = next((s for s in data['streams'] if s['codec_type'] == 'audio'), {})
@@ -212,6 +219,7 @@ class Transcoder:
         self._lock = threading.RLock()
         self.workers, self.tickets, self.reservations = {}, {}, {}
         self.failures = {}
+        self._relay_gateway = None
         self._closed = threading.Event()
         os.makedirs(hls_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
@@ -608,7 +616,14 @@ class Transcoder:
             generation = w['generation']
             source = w['sources'][w['index']]['url']
             audio_only = w.get('audio_only')
-        media = probe(source, self.cfg.get('user_agent', 'VLC/3.0.20'))
+            guarded = w['provider'].startswith('relay:')
+            input_source = source
+            if guarded:
+                if self._relay_gateway is None:
+                    self._relay_gateway = RelayGateway(self.cfg.get('user_agent', 'VLC/3.0.20'),
+                                                       self.cfg.get('relay_allow_private') is True)
+                input_source = self._relay_gateway.grant(key, source)
+        media = probe(input_source, self.cfg.get('user_agent', 'VLC/3.0.20'), guarded=guarded)
         with self._lock:
             if self.workers.get(key) is not w or w['generation'] != generation:
                 return
@@ -633,11 +648,14 @@ class Transcoder:
                         os.chmod(log_path, 0o600)
                     except OSError:
                         pass
-                    w['proc'] = subprocess.Popen(self._command(source, media, generation, audio_only=audio_only,
+                    command = self._command(input_source, media, generation, audio_only=audio_only,
                                                                   passthrough=w['passthrough'],
                                                                   levels=w.get('levels') or None,
-                                                                  start_number=self._next_sequence(outdir, generation)),
-                                                 cwd=outdir, stdout=log, stderr=log)
+                                                                  start_number=self._next_sequence(outdir, generation))
+                    if guarded:
+                        position = command.index('-i')
+                        command[position:position] = RELAY_INPUT_OPTIONS
+                    w['proc'] = subprocess.Popen(command, cwd=outdir, stdout=log, stderr=log)
                 w['state'] = 'buffering'
             except OSError:
                 w['state'] = 'failed'
@@ -781,6 +799,8 @@ class Transcoder:
     def _stop_locked(self, key):
         w = self.workers.pop(key, None)
         if w:
+            if self._relay_gateway:
+                self._relay_gateway.revoke(key)
             self._kill(w['proc'])
             shutil.rmtree(os.path.join(self.hls_dir, key), ignore_errors=True)
 
@@ -912,3 +932,5 @@ class Transcoder:
             for key in list(self.workers):
                 self._stop_locked(key)
             self.tickets.clear()
+        if self._relay_gateway:
+            self._relay_gateway.close()

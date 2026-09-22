@@ -15,7 +15,7 @@ from http.server import ThreadingHTTPServer
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server'))
 from streamly.transcoder import Transcoder, CapacityError, _redact_credentials
 from streamly.auth import Sessions
-from streamly.catalog import Catalog
+from streamly.catalog import Catalog, _clean_label
 from streamly.xtream import parse_name, parse_series_info
 from streamly import m3u
 from streamly import app, config
@@ -824,6 +824,7 @@ class HTTPTests(unittest.TestCase):
         state.devices = relaymod.Devices(state.cfg, lambda _: None)
         state.logos = Logos(root + '/logos', state.catalog.has_icon)
         state.guide = Guide(root + '/guide.xml.gz', lambda: [], lambda: set(), log=lambda _: None)
+        state.sync_lock = threading.Lock()
         state.sync_log = []; self.state = app.STATE = state
         app.STATE.provider.side_effect = lambda pid: CFG['providers'][0] if pid == 'p' else None
         with patch('socket.getfqdn', return_value='localhost'):
@@ -889,12 +890,112 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(r.status, 206); self.assertEqual(r.read(), b'defg'); self.assertEqual(r.headers['Content-Range'],'bytes 3-6/10')
         self.assertEqual(self.request('/media/testjob/q0.mp4').status, 401)
         self.assertEqual(self.request('/media/testjob/q0.mp4',cookie=cookie, headers={'Range':'bytes=50-'}).status,416)
+    def test_movie_playable_while_preparing(self):
+        jid = 'progjob'; folder = pathlib.Path(self.state.movies.root) / jid; folder.mkdir()
+        (folder/'r1_q0_000000.ts').write_bytes(b'segment-0')
+        rungs = [{'height': 480, 'width': 854, 'bitrate': '800k', 'maxrate': '900k', 'bufsize': '1600k'}]
+        self.state.movies.jobs[jid] = {'id': jid, 'state': 'preparing', 'format': 2, 'playable': True, 'height': 480,
+                                       'rungs': rungs, 'qualities': [480], 'segments': 3, 'duration': 10.0,
+                                       'subtitle': None, 'progress': 30}
+        # Pas de passe d'encodage en memoire : un segment absent repond tout de suite.
+        cookie = self.login()
+        master = self.request('/media/progjob/master.m3u8', cookie=cookie)
+        self.assertEqual(master.status, 200); self.assertIn(b'RESOLUTION=854x480', master.read())
+        variant = self.request('/media/progjob/q0.m3u8', cookie=cookie).read().decode()
+        self.assertIn('#EXT-X-PLAYLIST-TYPE:VOD', variant); self.assertEqual(variant.count('#EXTINF'), 3)
+        self.assertIn('#EXTINF:2.000,', variant)  # dernier segment : reste de la duree
+        self.state.movies.runtime[jid] = {'index': {0: {0: 'r1_q0_000000.ts'}}, 'proc': None, 'want': None,
+                                          'start': 0, 'run': 1, 'cursor': 0}
+        self.state.movies.jobs[jid]['state'] = 'failed'
+        self.assertEqual(self.request('/media/progjob/q0_000000.ts', cookie=cookie).status, 404)
+        self.state.movies.jobs[jid]['state'] = 'preparing'
+        r = self.request('/media/progjob/q0_000000.ts', cookie=cookie)
+        self.assertEqual(r.status, 200); self.assertEqual(r.read(), b'segment-0')
+        self.assertEqual(self.request('/media/progjob/q1.m3u8', cookie=cookie).status, 404)
+        with patch.object(self.state.movies, 'segment', return_value=None):
+            self.assertEqual(self.request('/media/progjob/q0_000002.ts', cookie=cookie).status, 503)
+        self.assertEqual(self.request('/media/progjob/q0_000003.ts', cookie=cookie).status, 404)
+        self.assertEqual(self.request('/media/progjob/q0.mp4', cookie=cookie).status, 404)
+        self.assertEqual(self.request('/media/progjob/master.m3u8').status, 401)
+    def test_delete_prepared_movie(self):
+        jid = 'oldjob'; folder = pathlib.Path(self.state.movies.root) / jid; folder.mkdir()
+        (folder/'q0.mp4').write_bytes(b'abc'); self.state.movies.jobs[jid] = {'id': jid, 'state': 'ready', 'height': 480}
+        cookie = self.login()
+        r = self.request('/api/prepare/delete', {'id': jid}, cookie)
+        self.assertEqual(r.status, 200)
+        self.assertFalse(folder.exists())
+        self.assertEqual(self.request('/media/oldjob/q0.mp4', cookie=cookie).status, 404)
+        self.assertEqual(self.request('/api/prepare/delete', {'id': jid}, cookie).status, 404)
+        self.assertEqual(self.request('/api/prepare/delete', {'id': jid}).status, 401)
     def test_credentials_redacted_from_log(self):
         self.request('/s/never-log-this-secret/master.m3u8')
         self.assertNotIn('never-log-this-secret', app.ACCESS_LOG[-1])
         self.request('/get.php?username=tv&password=salon2024xyz')
         self.request('/live/tv/salon2024xyz/12.m3u8')
         self.assertFalse(any('salon2024xyz' in line for line in app.ACCESS_LOG[-2:]))
+        self.request('/api/playback?ticket=hidden-ticket&token=hidden-token',
+                     headers={'User-Agent': 'SmartOneTest'})
+        self.assertNotIn('hidden-ticket', app.ACCESS_LOG[-1])
+        self.assertNotIn('hidden-token', app.ACCESS_LOG[-1])
+        self.assertIn('SmartOneTest', app.ACCESS_LOG[-1])
+
+    def test_adding_provider_imports_catalog_without_sync_request(self):
+        cookie = self.login()
+        client = self.state.client.return_value
+        client.live_streams.return_value = LIVE
+        client.live_categories.return_value = [{'category_id': 1, 'category_name': 'France'}]
+        finished = threading.Event()
+        self.state.guide.ensure_fresh = Mock(side_effect=lambda **kwargs: finished.set())
+        with patch.object(config, 'save'), \
+                patch.object(self.state.catalog, 'sync_vod', return_value=0), \
+                patch.object(self.state.catalog, 'sync_series', return_value=0):
+            result = self.request('/api/providers', {'host': 'http://example.invalid',
+                                  'username': 'u', 'password': 'p'}, cookie)
+            self.assertEqual(result.status, 200)
+            added = json.load(result)
+            self.assertTrue(added['sync_scheduled'])
+            self.assertTrue(finished.wait(3), 'import automatique absent')
+        self.assertTrue(any(s['provider_id'] == added['provider'] and s['channels'] > 0
+                            for s in self.state.catalog.stats()))
+
+    def test_addition_during_sync_waits_then_imports(self):
+        cookie = self.login()
+        finished = threading.Event()
+        self.state.guide.ensure_fresh = Mock(side_effect=lambda **kwargs: finished.set())
+        self.state.client.return_value.live_streams.return_value = LIVE
+        self.state.client.return_value.live_categories.return_value = [{'category_id': 1, 'category_name': 'France'}]
+        with patch.object(config, 'save'), \
+                patch.object(self.state.catalog, 'sync_vod', return_value=0), \
+                patch.object(self.state.catalog, 'sync_series', return_value=0):
+            self.state.sync_lock.acquire()
+            try:
+                result = self.request('/api/providers', {'url': 'https://example.invalid/list.m3u'}, cookie)
+                self.assertEqual(result.status, 200)
+                added = json.load(result)
+                self.assertFalse(finished.is_set())
+            finally:
+                self.state.sync_lock.release()
+            self.assertTrue(finished.wait(3), 'import en attente perdu')
+        self.assertTrue(any(s['provider_id'] == added['provider'] for s in self.state.catalog.stats()))
+
+    def test_rejected_provider_never_schedules_sync(self):
+        cookie = self.login()
+        self.state.client.return_value.account_info.side_effect = ValueError('refuse')
+        with patch.object(app, '_schedule_sync') as scheduled, patch.object(config, 'save') as saved:
+            self.assertEqual(self.request('/api/providers', {'host': 'http://example.invalid',
+                             'username': 'u', 'password': 'p'}, cookie).status, 400)
+        scheduled.assert_not_called()
+        saved.assert_not_called()
+
+    def test_cached_account_details_show_fresh_catalog_counts(self):
+        state = object.__new__(app.State)
+        state.cfg = CFG
+        state.catalog = self.state.catalog
+        state._details_lock = threading.Lock()
+        state._details = {'p': {'at': time.time(), 'data': {'reachable': True, 'catalog': {'channels': 0}}}}
+        seed_live(state.catalog)
+        details = state.provider_details({'id': 'p'})
+        self.assertEqual(details['catalog']['channels'], len(LIVE))
 
     # ------------------------------------------------ lecteurs externes
 
@@ -1270,5 +1371,13 @@ class HTTPTests(unittest.TestCase):
         saved.assert_called_once()
         self.assertEqual(self.request('/get.php?username=tv&password=salon2024xyz').status, 401)
         self.assertEqual(self.request('/get.php?username=tv&password=' + fresh['password']).status, 200)
+
+
+class CleanLabelTests(unittest.TestCase):
+    def test_empty_brackets_left_by_quality_tag_are_removed(self):
+        self.assertEqual(_clean_label('La Chute de la maison Usher [4K]'), 'La Chute de la maison Usher')
+        self.assertEqual(_clean_label('Dune (HD)'), 'Dune')
+        self.assertEqual(_clean_label('Film [MULTI]'), 'Film [MULTI]')
+
 
 if __name__ == '__main__': unittest.main()

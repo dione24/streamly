@@ -1554,6 +1554,11 @@ pre {
   flex-wrap: wrap;
 }
 
+/* Supprimer : a l'ecart des actions de lecture, pour ne pas le toucher par megarde. */
+.job-actions button.quiet:last-child {
+  margin-left: auto;
+}
+
 .job-actions a {
   padding: 11px 14px;
   border: 1px solid var(--line);
@@ -1597,6 +1602,25 @@ dialog .primary {
 
 dialog label {
   margin: 15px 0;
+}
+
+#check-tracks {
+  margin-bottom: 14px;
+}
+
+.movie-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.movie-actions .primary {
+  margin-top: 0;
+}
+
+.movie-actions .quiet {
+  width: 100%;
 }
 
 #movie-plot {
