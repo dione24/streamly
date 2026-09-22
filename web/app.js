@@ -451,6 +451,8 @@ function stageScreen(kind) {
   const box = $('#stage-loader');
   clearTimeout(state.stallTimer);
   state.stallTimer = null;
+  // Pendant l'attente, le bouton retour reste visible au-dessus de l'ecran.
+  $('#video-stage').classList.toggle('loading', !!kind);
   if (!kind) { box.hidden = true; return; }
   const [title, sub] = STAGE_SCREENS[kind];
   $('#stage-loader-text').textContent = title;
@@ -506,7 +508,9 @@ function playbackUI(title, live) {
   state.frames = false;
   state.started = performance.now();
   state.retries = 0;
-  $('#player-wrap').scrollIntoView({behavior: 'smooth', block: 'start'});
+  $('#pui-subtitle').textContent = '';
+  // Un film ferme la rangee des chaines ; en zappant, elle reste ouverte.
+  if (!live) setRail(false);
 }
 
 async function play(channel) {
@@ -517,6 +521,7 @@ async function play(channel) {
   state.current = channel;
   state.generation = null;
   playbackUI(channel.label, true);
+  $('#pui-subtitle').textContent = [channel.category, channel.lang].filter(Boolean).join(' · ');
   message('');
   updateProgramInfo().catch(() => {});
   
@@ -768,7 +773,31 @@ let controlsTimer = null;
 function showControls() {
   stageBox.classList.add('ui-on');
   clearTimeout(controlsTimer);
-  if (!video.paused) controlsTimer = setTimeout(() => stageBox.classList.remove('ui-on'), 3000);
+  // Rangee des chaines ouverte : les commandes restent, on est en train de choisir.
+  if (!video.paused && !stageBox.classList.contains('rail-open')) {
+    controlsTimer = setTimeout(() => stageBox.classList.remove('ui-on'), 3000);
+  }
+}
+
+function setRail(open) {
+  stageBox.classList.toggle('rail-open', open);
+  $('#pui-channels').setAttribute('aria-expanded', String(open));
+  if (open) markNowPlaying(state.current);
+  showControls();
+}
+
+// « The Winter King S01E05 — Le retour » : titre, puis l'episode a part.
+function splitTitle(title) {
+  const m = String(title || '').match(/^(.*?)\s+S(\d+)\s*E(\d+)(?:\s+[—–-]\s+(.*))?$/i);
+  if (!m) return {title: title || '', sub: ''};
+  return {title: m[1], sub: ['S' + Number(m[2]), 'É' + Number(m[3]), m[4] || ''].filter(Boolean).join(' · ')};
+}
+
+function showJobTitle(job) {
+  const parts = splitTitle(cleanTitle(job.title));
+  $('#now-playing').textContent = parts.title;
+  $('#pui-subtitle').textContent = parts.sub;
+  $('#live-badge').textContent = job.kind === 'episode' || parts.sub ? 'ÉPISODE' : 'FILM';
 }
 
 function syncPlayState() {
@@ -829,6 +858,7 @@ syncVolume();
 syncFullscreen();
 
 $('#pui-play').onclick = togglePlay;
+$('#pui-channels').onclick = () => setRail(!stageBox.classList.contains('rail-open'));
 $('#pui-big').onclick = togglePlay;
 $('#pui-back').onclick = () => seekBy(-10);
 $('#pui-fwd').onclick = () => seekBy(10);
@@ -1052,6 +1082,8 @@ function channelRow(c, number = 0) {
 function renderLiveRail(live) {
   const list = live ? state.channelList.slice(0, 150) : [];
   $('#live-rail-wrap').hidden = !list.length;
+  $('#pui-channels').hidden = !list.length;
+  if (!list.length) setRail(false);
   const key = list.length + '|' + list.map(channelKey).slice(0, 3).join('|');
   if (!list.length || key === state.railKey) return;
   state.railKey = key;
@@ -2439,6 +2471,7 @@ async function watchWhenPlayable(job, start) {
   if (attempt !== state.playback) return;
   state.current = {label: cleanTitle(job.title)};
   playbackUI(cleanTitle(job.title), false);
+  showJobTitle(job);
   $('#player-status').textContent = 'Analyse du film sur le serveur…';
   let deadline = Date.now() + 60000;
   while (attempt === state.playback && Date.now() < deadline) {
@@ -2559,6 +2592,7 @@ async function playJob(job, start) {
   tabStore.set('playing', {kind: 'watch', watch: state.watch, position: state.startAt});
   state.current = {label: cleanTitle(job.title)};
   playbackUI(cleanTitle(job.title), false);
+  showJobTitle(job);
   attach('/media/' + job.id + '/master.m3u8', false, attempt);
   jobUsage(job);
   if (job.subtitles_ready) subtitleTrack(job);
@@ -2911,6 +2945,11 @@ window.addEventListener('keydown', e => {
     }
     if (e.key === 'Escape') {
       if (document.querySelector('dialog[open]')) return;
+      if (stageBox.classList.contains('rail-open') && !$('#player-wrap').hidden) {
+        setRail(false);
+        e.preventDefault();
+        return;
+      }
       if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
         e.preventDefault();
@@ -2945,7 +2984,7 @@ window.addEventListener('keydown', e => {
     }
     // Raccourci C pour replier/déplier la barre latérale des chaînes
     if ((e.key === 'c' || e.key === 'C') && !$('#player-wrap').hidden) {
-      toggleCatalogueSidebar();
+      if (!$('#pui-channels').hidden) setRail(!stageBox.classList.contains('rail-open'));
       e.preventDefault();
       return;
     }
