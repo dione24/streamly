@@ -14,7 +14,7 @@ from unittest.mock import patch, Mock
 from http.server import ThreadingHTTPServer
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server'))
 from streamly.transcoder import Transcoder, CapacityError, _redact_credentials
-from streamly.auth import Sessions
+from streamly.auth import Sessions, hash_password
 from streamly.catalog import Catalog, _clean_label
 from streamly.xtream import parse_name, parse_series_info
 from streamly import m3u
@@ -434,6 +434,44 @@ class PlayerIndexTests(unittest.TestCase):
         self.assertEqual(body.count('#EXTINF'), 20000)
 
 
+class SessionStoreTests(unittest.TestCase):
+    """Sessions web : elles survivent a un redemarrage du service."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = self.tmp.name + '/sessions.json'
+        salt, digest = hash_password('motdepasse1')
+        self.cfg = dict(CFG, users=[{'username': 'awa', 'salt': salt, 'password_hash': digest, 'role': 'viewer'}])
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_sessions_survive_a_restart_without_storing_the_identifier(self):
+        sid, role = Sessions(self.cfg, self.path).login(None, '1.2.3.4', username='awa', password='motdepasse1')
+        self.assertEqual(role, 'viewer')
+        self.assertNotIn(sid, pathlib.Path(self.path).read_text())
+        restarted = Sessions(self.cfg, self.path)
+        session = restarted.get('streamly_session=' + sid)
+        self.assertEqual((session['role'], session['account'], session['id']), ('viewer', 'awa', sid))
+        restarted.logout(sid)
+        self.assertIsNone(Sessions(self.cfg, self.path).get('streamly_session=' + sid))
+
+    def test_removed_account_loses_its_sessions(self):
+        sessions = Sessions(self.cfg, self.path)
+        sid, _ = sessions.login(None, '1.2.3.4', username='awa', password='motdepasse1')
+        self.cfg['users'] = []
+        self.assertIsNone(sessions.get('streamly_session=' + sid))
+
+    def test_token_sessions_share_the_instance_account(self):
+        sid, _ = Sessions(CFG, self.path).login('test-admin', '1.2.3.4')
+        self.assertEqual(Sessions(CFG, self.path).get('streamly_session=' + sid)['account'], '')
+
+    def test_full_store_frees_the_oldest_session(self):
+        sessions = Sessions(CFG, self.path)
+        first, _ = sessions.login('test-admin', '1.2.3.4')
+        for _ in range(Sessions.LIMIT):
+            last, _ = sessions.login('test-admin', '1.2.3.4')
+        self.assertIsNone(sessions.get('streamly_session=' + first))
+        self.assertIsNotNone(sessions.get('streamly_session=' + last))
+
+
 class PlayerAccountTests(unittest.TestCase):
     def test_missing_passwords_are_generated_and_kept(self):
         players, changed = config._players({'players': [{'username': 'tv', 'password': '', 'mode': 'x'}]})
@@ -846,6 +884,60 @@ class HTTPTests(unittest.TestCase):
     def login(self, token='test-admin'):
         r = self.request('/api/login', {'token':token}); self.assertEqual(r.status, 200)
         self.assertIn('HttpOnly', r.headers['Set-Cookie']); return r.headers['Set-Cookie'].split(';')[0]
+    def seed_history_catalog(self):
+        cat = self.state.catalog
+        cat._db.execute("INSERT INTO vod(provider_id,stream_id,name,title,lang,icon,duration) VALUES "
+                        "('p',7,'FR| Dune','Dune','FR','http://img/dune.jpg','02:00:00')")
+        cat._db.execute("INSERT INTO series(provider_id,series_id,name,title,icon) VALUES "
+                        "('p',10,'FR| Lupin','Lupin','http://img/lupin.jpg')")
+        cat._db.commit()
+        _, episodes = parse_series_info({'episodes': {'1': [
+            {'id': '901', 'episode_num': '1', 'title': 'Pilote', 'container_extension': 'mkv', 'info': {'duration': '00:50:00'}},
+            {'id': '902', 'episode_num': '2', 'title': 'Suite', 'container_extension': 'mkv'}]}})
+        cat.series_set_episodes('p', 10, '', episodes)
+    def history(self, cookie):
+        return json.loads(self.request('/api/history', cookie=cookie).read())
+    def test_history_keeps_progress_and_proposes_the_next_episode(self):
+        self.seed_history_catalog()
+        cookie = self.login()
+        self.assertEqual(self.request('/api/history', {'kind': 'movie', 'provider': 'p', 'id': 7,
+                                                       'position': 600, 'height': 360}, cookie=cookie).status, 200)
+        self.request('/api/history', {'kind': 'live', 'lang': 'FR', 'canonical': 'TF1', 'label': 'TF1',
+                                      'icon': 'javascript:alert(1)', 'epg_id': 'tf1.fr'}, cookie=cookie)
+        self.request('/api/history', {'kind': 'episode', 'provider': 'p', 'id': 901,
+                                      'position': 2900, 'duration': 3000}, cookie=cookie)
+        data = self.history(cookie)
+        items = {i['kind']: i for i in data['items']}
+        # Titre, affiche et duree viennent du catalogue, pas du navigateur.
+        self.assertEqual((items['movie']['title'], items['movie']['icon'], items['movie']['duration']),
+                         ('Dune', 'http://img/dune.jpg', 7200))
+        self.assertEqual((items['movie']['position'], items['movie']['finished'], items['movie']['data']['height']),
+                         (600, False, 360))
+        self.assertIsNone(items['live']['icon'])
+        self.assertEqual(items['live']['data']['epg_id'], 'tf1.fr')
+        # Episode vu a plus de 92 % : termine, le suivant est propose.
+        self.assertTrue(items['episode']['finished'])
+        self.assertEqual(items['episode']['data']['series_id'], 10)
+        self.assertEqual(data['next']['series:p:10']['episode_id'], 902)
+        self.assertEqual(data['next']['series:p:10']['series_title'], 'Lupin')
+        # Le plus recent d'abord.
+        self.assertEqual([i['kind'] for i in data['items']], ['episode', 'live', 'movie'])
+        # Retirer une serie efface tous ses episodes.
+        self.request('/api/history/delete', {'grp': 'series:p:10'}, cookie=cookie)
+        self.assertEqual(sorted(i['kind'] for i in self.history(cookie)['items']), ['live', 'movie'])
+    def test_history_rejects_unknown_titles_and_stays_per_account(self):
+        self.seed_history_catalog()
+        salt, digest = hash_password('motdepasse1')
+        self.state.cfg['users'] = [{'username': 'awa', 'salt': salt, 'password_hash': digest, 'role': 'viewer'}]
+        awa = self.request('/api/login', {'username': 'awa', 'password': 'motdepasse1'}).headers['Set-Cookie'].split(';')[0]
+        self.assertEqual(self.request('/api/history', {'kind': 'movie', 'provider': 'p', 'id': 999}, cookie=awa).status, 404)
+        self.assertEqual(self.request('/api/history', {'kind': 'movie', 'provider': 'ailleurs', 'id': 7}, cookie=awa).status, 404)
+        self.assertEqual(self.request('/api/history', {'kind': 'film', 'provider': 'p', 'id': 7}, cookie=awa).status, 404)
+        self.assertEqual(self.request('/api/history', {'kind': 'movie', 'provider': 'p', 'id': 7, 'position': 'abc'}, cookie=awa).status, 400)
+        self.request('/api/history', {'kind': 'movie', 'provider': 'p', 'id': 7, 'position': 300}, cookie=awa)
+        self.assertEqual(len(self.history(awa)['items']), 1)
+        self.state.cfg['users'] = []
+        self.assertEqual(self.history(self.login())['items'], [])
     def test_remember_me_controls_cookie_lifetime(self):
         kept = self.request('/api/login', {'token': 'test-admin', 'remember': True})
         self.assertIn('Max-Age=604800', kept.headers['Set-Cookie'])

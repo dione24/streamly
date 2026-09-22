@@ -1,6 +1,7 @@
 """HTTP API, device cookies and short-lived media tickets. Admin-only writes."""
 import gzip
 import json
+import math
 import mimetypes
 import os
 import posixpath
@@ -89,6 +90,20 @@ def _panel_int(value):
         return None
 
 
+def _duration_seconds(text):
+    """« 01:42:10 » en secondes ; 0 si le panel ne donne rien d'exploitable."""
+    try:
+        parts = [int(float(x)) for x in str(text or '').split(':')]
+    except ValueError:
+        return 0
+    if len(parts) < 2:
+        return 0
+    total = 0
+    for n in parts:
+        total = total * 60 + n
+    return total
+
+
 class State:
     def __init__(self):
         self.cfg = cfgmod.load()
@@ -100,7 +115,7 @@ class State:
         if dropped:
             print("catalogue purge des providers absents : %s" % dropped, flush=True)
         self.transcoder = Transcoder(self.cfg, cfgmod.HLS_DIR, cfgmod.LOG_DIR, state_dir=cfgmod.DATA_DIR)
-        self.sessions = Sessions(self.cfg)
+        self.sessions = Sessions(self.cfg, os.path.join(cfgmod.DATA_DIR, "sessions.json"))
         self.player = playermod.PlayerFacade(self.catalog, self.transcoder)
         self.guide = Guide(os.path.join(cfgmod.DATA_DIR, "guide.xml.gz"), self.guide_sources,
                            lambda: {c["epg_id"] for c in self.player.index()[0]},
@@ -569,7 +584,7 @@ class Handler(BaseHTTPRequestHandler):
             self._request_session = None
             return None
         self._cookie = self._session_cookie(sid)
-        session = dict(id=sid, role=role)
+        session = dict(id=sid, role=role, account='')
         self._request_session = session
         return session
 
@@ -769,7 +784,7 @@ class Handler(BaseHTTPRequestHandler):
             label = '%s — %s' % (label, episode['title'])
         # Movies.start() attend une fiche de film : un episode en presente une
         # equivalente, ce qui evite un second chemin de preparation.
-        movie = {'provider_id': pid, 'stream_id': int(eid), 'title': label,
+        movie = {'provider_id': pid, 'stream_id': int(eid), 'title': label, 'kind': 'episode',
                  'container': container, 'bitrate': 0,
                  'duration': episode.get('duration') or ''}
         return movie, STATE.client(provider).episode_url(int(eid), container)
@@ -863,6 +878,83 @@ class Handler(BaseHTTPRequestHandler):
                     left -= len(chunk)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+    # ---------------------------------------------------------- historique
+
+    def _history_entry(self, body):
+        """Ligne d'historique a partir de ce que le lecteur envoie.
+
+        Titres et affiches des films et des episodes viennent du catalogue,
+        pas du navigateur : l'accueil reste juste meme si le client se trompe.
+        """
+        text = lambda v, n=200: str(v or '').strip()[:n] or None
+        kind = body.get('kind')
+        # Bornes : une valeur infinie casserait le JSON de l'accueil.
+        seconds = lambda v: min(max(0.0, float(v or 0)), 172800.0) if math.isfinite(float(v or 0)) else 0.0
+        position, duration = seconds(body.get('position')), seconds(body.get('duration'))
+        if kind == 'live':
+            canonical = text(body.get('canonical'))
+            if not canonical:
+                return None
+            lang = text(body.get('lang'), 20) or ''
+            icon = text(body.get('icon'), 500)
+            data = {'lang': lang, 'canonical': canonical, 'label': text(body.get('label')) or canonical,
+                    'epg_id': text(body.get('epg_id')), 'category': text(body.get('category'))}
+            ref = lang + '|' + canonical
+            return dict(kind='live', ref=ref, grp='live:' + ref, title=data['label'],
+                        icon=icon if icon and re.match(r'https?://', icon) else None,
+                        data=data, position=0, duration=0, finished=False)
+        if kind not in ('movie', 'episode'):
+            return None
+        pid, sid = text(body.get('provider'), 64), _panel_int(body.get('id'))
+        if not pid or sid is None or not STATE.provider(pid):
+            return None
+        tracks = {k: _panel_int(body.get(k)) for k in ('audio', 'subtitle')}
+        height = _panel_int(body.get('height'))
+        data = {'provider_id': pid, 'stream_id': sid,
+                'height': height if height in (240, 360, 480, 720) else 480, **tracks}
+        if kind == 'movie':
+            movie = STATE.catalog.vod_get(pid, sid)
+            if not movie:
+                return None
+            title, icon, grp = movie.get('title') or movie.get('name'), movie.get('icon'), 'movie:%s:%d' % (pid, sid)
+            duration = duration or _duration_seconds(movie.get('duration'))
+        else:
+            episode = STATE.catalog.episode_get(pid, sid)
+            if not episode:
+                return None
+            show = STATE.catalog.series_get(pid, episode['series_id']) or {}
+            title, icon = show.get('title') or show.get('name') or 'Série', show.get('icon')
+            grp = 'series:%s:%d' % (pid, episode['series_id'])
+            data.update(series_id=episode['series_id'], season=episode.get('season') or 0,
+                        episode=episode.get('episode') or 0, episode_title=text(episode.get('title')))
+            duration = duration or _duration_seconds(episode.get('duration'))
+        # Generique de fin : passe 92 %, le film est considere comme vu.
+        finished = bool(body.get('finished')) or (duration > 0 and position >= 0.92 * duration)
+        return dict(kind=kind, ref='%s:%d' % (pid, sid), grp=grp, title=title, icon=icon,
+                    data=data, position=position, duration=duration, finished=finished)
+
+    def _history(self, account):
+        """Historique du compte, et l'episode a suivre de chaque serie terminee."""
+        configured = {p.get('id') for p in STATE.cfg.get('providers', [])}
+        items, latest = [], {}
+        for item in STATE.catalog.history(account):
+            pid = item['data'].get('provider_id')
+            if item['kind'] != 'live' and pid not in configured:
+                continue
+            items.append(item)
+            if item['kind'] == 'episode':
+                latest.setdefault(item['grp'], item)
+        upcoming = {}
+        for grp, item in latest.items():
+            if not item['finished']:
+                continue
+            d = item['data']
+            nxt = STATE.catalog.next_episode(d['provider_id'], d['series_id'], d.get('season'), d.get('episode'))
+            if nxt:
+                upcoming[grp] = dict(nxt, provider_id=d['provider_id'], series_id=d['series_id'],
+                                     height=d.get('height'), series_title=item['title'], icon=item['icon'])
+        return {'items': items, 'next': upcoming}
 
     # --------------------------------------------------------------- API
 
@@ -994,6 +1086,8 @@ class Handler(BaseHTTPRequestHandler):
             ids = [i for i in (one('ids') or '').split(',') if i][:300]
             return self._compact(STATE.guide.now_next(ids))
 
+        if path == '/api/history':
+            return self._json(self._history(self._session().get('account') or ''))
         if path == '/api/preparations':
             return self._json(STATE.movies.list())
         if path == '/api/vod/tracks':
@@ -1204,6 +1298,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "message": "synchro deja en cours"})
             _schedule_sync(body.get("id"))
             return self._json({"ok": True, "message": "synchro demarree"})
+
+        if path == '/api/history':
+            entry = self._history_entry(body)
+            if not entry:
+                return self._err(404, 'élément introuvable')
+            cat.history_record(self._session().get('account') or '', **entry)
+            return self._json({'ok': True, 'finished': entry['finished']})
+
+        if path == '/api/history/delete':
+            grp = str(body.get('grp') or '')[:200]
+            if not grp:
+                return self._err(400, 'élément manquant')
+            cat.history_forget(self._session().get('account') or '', grp)
+            return self._json({'ok': True})
 
         if path == "/api/favorites":
             cat.add_favorite(body.get("lang") or "", body.get("canonical") or "",

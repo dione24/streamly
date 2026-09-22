@@ -7,15 +7,24 @@ const store = {
   remove(k) { try { localStorage.removeItem('streamly_' + k); } catch (_) {} },
   json(k, fallback) { try { return JSON.parse(this.get(k)) || fallback; } catch (_) { return fallback; } },
 };
+// Propre a l'onglet : survit a l'actualisation, pas a la fermeture. C'est ce
+// qui distingue « je rechargeais la page » de « je reviens plus tard ».
+const tabStore = {
+  get(k) { try { return JSON.parse(sessionStorage.getItem('streamly_' + k)); } catch (_) { return null; } },
+  set(k, v) { try { sessionStorage.setItem('streamly_' + k, JSON.stringify(v)); } catch (_) {} },
+  remove(k) { try { sessionStorage.removeItem('streamly_' + k); } catch (_) {} },
+};
 
 const state = {
-  mode: 'live', lang: store.get('lang'), provider: store.get('provider'), category: '', query: '', favorites: [],
+  mode: 'home', lang: store.get('lang'), provider: store.get('provider'), category: '', query: '', favorites: [],
   page: 0, pageSize: 48, request: 0, controller: null, hls: null, ticket: null, current: null,
   generation: null, retries: 0, statusMisses: 0, recoveryTimer: null, playback: 0, stalls: 0, started: 0,
   frames: false, movie: null, job: null, role: 'viewer', configTimer: null, jobTimer: null,
   configOpen: false, configReturnMode: 'live', configSnapshot: null,
   channelList: [], zapTimer: null,
-  selectedChannelIndex: -1
+  selectedChannelIndex: -1,
+  // Historique du compte (serveur) ; watch : film ou episode en lecture.
+  history: {items: [], next: {}}, watch: null, startAt: 0, savedAt: 0, liveTimer: null, homeRender: 0
 };
 
 function message(text) { $('#notice').textContent = text; $('#notice').hidden = !text; }
@@ -33,11 +42,13 @@ function requireLogin(msg = '') {
   state.role = 'viewer';
   state.ticket = null; state.current = null; state.job = null; ++state.playback;
   state.favorites = [];
+  state.history = {items: [], next: {}}; state.watch = null;
   if (state.controller) state.controller.abort(); state.controller = null;
   destroyPlayer(); $('#player-wrap').hidden = true;
   clearInterval(state.jobTimer); clearInterval(state.configTimer); state.jobTimer = null; state.configTimer = null;
   $('#login').hidden = false; $('#app').hidden = true;
   $('#tab-conf').hidden = true;
+  $('#menu-conf').hidden = true;
   $('#login-error').textContent = msg || '';
   $('#token-input').value = '';
   const u = $('#user-input'); if (u) u.value = '';
@@ -107,10 +118,17 @@ function getChannelColor(str) {
 async function connected(role) {
   state.role = role;
   $('#login').hidden = true; $('#app').hidden = false; $('#tab-conf').hidden = role !== 'admin';
+  $('#menu-conf').hidden = role !== 'admin';
   state.favorites = await api('/favorites').catch(() => []);
+  await migrateRecents();
+  await loadHistory();
   await loadFilters();
-  await renderChannels();
-  renderRecents();
+  const route = parseRoute();
+  await setMode(route.mode, {route: false});
+  // Normalise l'adresse (#/accueil au premier chargement) sans empiler d'entree.
+  window.history.replaceState(null, '', location.hash && route.id ? location.hash : routeHash(route.mode));
+  openRouteDialog(route);
+  offerResume();
 }
 
 // Support de connexion souple (Identifiant/Mot de passe ou Jeton direct)
@@ -248,12 +266,18 @@ function zapChannel(offset) {
 }
 
 async function stop() {
+  // Avant destroyPlayer : il remet la video a zero.
+  const saving = saveProgress(true);
   ++state.playback;
   const ticket = state.ticket;
   state.ticket = null;
   destroyPlayer();
   state.current = null;
   state.job = null;
+  state.watch = null;
+  state.startAt = 0;
+  clearTimeout(state.liveTimer);
+  tabStore.remove('playing');
   clearZapOverlay();
   $('#player-wrap').hidden = true;
   stageScreen(null);
@@ -263,6 +287,9 @@ async function stop() {
   $('#preferences').hidden = false;
   renderRecents();
   if (ticket) await post('/stop', {ticket}, {skipAuthRedirect: true}).catch(failure);
+  await saving;
+  // Retour a l'accueil : la position qu'on vient d'enregistrer doit s'y voir.
+  if (state.mode === 'home' && $('#player-wrap').hidden && !state.configOpen) renderHome().catch(() => {});
 }
 
 // Gestion Collapse Catalogue & Zapping
@@ -483,7 +510,9 @@ async function play(channel) {
     $('#budget-meter').hidden = !info.budget;
     attach(info.play_url, true, attempt);
     markNowPlaying(channel);
-    remember(channel);
+    hideResume();
+    tabStore.set('playing', {kind: 'live', channel});
+    rememberWhenWatched(channel, attempt);
   } catch (err) {
     if (attempt === state.playback) {
       stageScreen(null);
@@ -518,7 +547,7 @@ function attach(url, live, attempt) {
       capLevelToPlayerSize: true,
       // Film en preparation : apres un saut, le serveur encode le passage
       // demande avant de repondre. On attend plutot que d'abandonner.
-      ...(live ? {} : {startPosition: 0, fragLoadPolicy: {default: {
+      ...(live ? {} : {startPosition: state.startAt || 0, fragLoadPolicy: {default: {
         maxTimeToFirstByteMs: 30000,
         maxLoadTimeMs: 120000,
         timeoutRetry: {maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 4000},
@@ -623,12 +652,14 @@ video.addEventListener('playing', () => {
   state.frames = true;
 });
 video.addEventListener('error', () => { if (!state.hls && state.current) $('#player-status').textContent = 'Flux interrompu. Vérification de la source en cours…'; });
-video.addEventListener('timeupdate', () => { if (state.job && video.currentTime > 5) store.set('position_' + state.job.id, String(video.currentTime)); });
+video.addEventListener('timeupdate', () => saveProgress(false));
+video.addEventListener('pause', () => { if (!video.ended) saveProgress(true); });
+video.addEventListener('ended', () => saveProgress(true, true));
 video.addEventListener('loadedmetadata', () => {
-  if (state.job) {
-    const pos = Number(store.get('position_' + state.job.id));
-    if (pos && pos < video.duration - 20) video.currentTime = pos;
-  }
+  // hls.js part deja de startPosition ; le lecteur natif (Safari) doit y aller.
+  const start = state.startAt;
+  state.startAt = 0;
+  if (state.job && start && Math.abs(video.currentTime - start) > 3) video.currentTime = start;
 });
 
 let statusBusy = false;
@@ -688,6 +719,12 @@ setInterval(() => {
 
 window.addEventListener('pagehide', () => {
   if (state.ticket) navigator.sendBeacon('/api/stop', new Blob([JSON.stringify({ticket: state.ticket})], {type: 'application/json'}));
+  // Actualisation ou fermeture en plein film : la position part quand meme.
+  const body = progressBody();
+  if (body && body.position >= 5) {
+    notePlayingPosition(body.position);
+    navigator.sendBeacon('/api/history', new Blob([JSON.stringify(body)], {type: 'application/json'}));
+  }
 });
 window.addEventListener('offline', () => message('Vous êtes hors connexion. La lecture reprend tant que la réserve le permet.'));
 window.addEventListener('online', () => message('Connexion rétablie.'));
@@ -1082,7 +1119,11 @@ searchInput.oninput = e => {
   }, 250);
 };
 
-async function setMode(mode) {
+// route : false quand le changement vient deja de l'adresse (retour arriere,
+// premier chargement) ; sinon l'onglet choisi s'inscrit dans l'historique.
+async function setMode(mode, {route = true} = {}) {
+  if (!ROUTE_OF[mode]) mode = 'home';
+  if (route) setRoute(routeHash(mode));
   if (state.configOpen) {
     // Quitter les reglages par un onglet, sans « Fermer » : meme remise en
     // etat, sinon la page restait en mode reglages et le lecteur masque.
@@ -1103,16 +1144,17 @@ async function setMode(mode) {
   if (categorySearch) categorySearch.value = '';
   if (categorySearchClear) categorySearchClear.hidden = true;
   $('#config').hidden = true;
+  $('#home').hidden = mode !== 'home';
   $('#preparations').hidden = mode !== 'prepared';
-  $('#catalogue').hidden = mode === 'prepared';
-  $('#filters').hidden = mode === 'favorites' || mode === 'prepared';
-  $('#recent-wrap').hidden = mode !== 'live' || !store.json('recents', []).length;
+  $('#catalogue').hidden = mode === 'prepared' || mode === 'home';
+  $('#filters').hidden = mode === 'favorites' || mode === 'prepared' || mode === 'home';
+  $('#recent-wrap').hidden = mode !== 'live' || !recentChannels().length;
   
   const modeClass = 'mode-' + (mode === 'favorites' ? 'favorites' : mode);
-  document.body.classList.remove('mode-live', 'mode-vod', 'mode-series', 'mode-favorites', 'mode-prepared');
+  document.body.classList.remove('mode-home', 'mode-live', 'mode-vod', 'mode-series', 'mode-favorites', 'mode-prepared');
   document.body.classList.add(modeClass);
 
-  ['live', 'vod', 'series', 'fav', 'prepared'].forEach(k => {
+  ['home', 'live', 'vod', 'series', 'fav', 'prepared'].forEach(k => {
     $('#tab-' + k).classList.toggle('active', (k === 'fav' ? 'favorites' : k) === mode);
   });
   $('#catalogue-title').textContent = {live: 'À l’antenne.', vod: 'Une soirée cinéma.',
@@ -1121,7 +1163,9 @@ async function setMode(mode) {
     || 'Rechercher une chaîne…';
   
   clearInterval(state.jobTimer);
-  if (mode === 'prepared') {
+  if (mode === 'home') {
+    await renderHome();
+  } else if (mode === 'prepared') {
     await refreshJobs();
     state.jobTimer = setInterval(() => refreshJobs().catch(failure), 5000);
   } else {
@@ -1146,7 +1190,7 @@ async function openSettings() {
   restoreSettingsSnapshot();
   document.body.classList.add('view-config');
   $$('.rail .tab').forEach(t => t.classList.toggle('active', t.id === 'tab-conf'));
-  state.configSnapshot = ['#player-wrap', '#preferences', '#recent-wrap', '#catalogue', '#preparations', '#filters', '#idle-hero']
+  state.configSnapshot = ['#player-wrap', '#preferences', '#recent-wrap', '#catalogue', '#preparations', '#filters', '#idle-hero', '#home']
     .map(id => {
       const element = $(id);
       if (!element) return null;
@@ -1176,21 +1220,19 @@ async function closeSettings() {
   await setMode(returnMode);
 }
 
+$('#tab-home').onclick = () => setMode('home').catch(failure);
 $('#tab-live').onclick = () => setMode('live').catch(failure);
 $('#tab-vod').onclick = () => setMode('vod').catch(failure);
 $('#tab-series').onclick = () => setMode('series').catch(failure);
 $('#tab-fav').onclick = () => setMode('favorites').catch(failure);
 $('#tab-prepared').onclick = () => setMode('prepared').catch(failure);
 
-function remember(c) {
-  const list = store.json('recents', []).filter(x => favKey(x) !== favKey(c));
-  list.unshift(c);
-  store.set('recents', JSON.stringify(list.slice(0, 6)));
-  renderRecents();
+function recentChannels() {
+  return state.history.items.filter(i => i.kind === 'live').map(channelOf);
 }
 
 function renderRecents() {
-  const list = store.json('recents', []);
+  const list = recentChannels().slice(0, 6);
   $('#recent-wrap').hidden = !list.length || state.mode !== 'live';
   $('#recents').replaceChildren();
   list.forEach(c => {
@@ -1200,9 +1242,528 @@ function renderRecents() {
   });
 }
 
+// ====================================================================
+// Adresse de la page : onglet, et fiche ouverte. Actualiser ramene au meme
+// endroit ; le bouton retour du navigateur change d'onglet.
+// ====================================================================
+const ROUTES = {accueil: 'home', direct: 'live', films: 'vod', series: 'series', favoris: 'favorites', prets: 'prepared'};
+const ROUTE_OF = Object.fromEntries(Object.entries(ROUTES).map(([name, mode]) => [mode, name]));
+
+function routeHash(mode, provider, id) {
+  const base = '#/' + (ROUTE_OF[mode] || 'accueil');
+  return provider && id !== undefined && id !== '' ? base + '/' + encodeURIComponent(provider) + '/' + encodeURIComponent(id) : base;
+}
+
+function parseRoute() {
+  const parts = location.hash.replace(/^#\/?/, '').split('/').map(part => {
+    try { return decodeURIComponent(part); } catch (_) { return ''; }
+  });
+  return {mode: ROUTES[parts[0]] || 'home', provider: parts[1] || '', id: parts[2] || ''};
+}
+
+function setRoute(hash, replace = false) {
+  if (location.hash === hash) return;
+  window.history[replace ? 'replaceState' : 'pushState'](null, '', hash);
+}
+
+function openRouteDialog(route) {
+  if (!route.id) return;
+  if (route.mode === 'vod' && !$('#movie-dialog').open) {
+    movieDialog({provider_id: route.provider, stream_id: route.id, title: ''}).catch(failure);
+  } else if (route.mode === 'series' && !$('#series-dialog').open) {
+    seriesDialog({provider_id: route.provider, series_id: route.id, title: ''}).catch(failure);
+  }
+}
+
+window.addEventListener('popstate', () => {
+  if ($('#app').hidden) return;
+  const route = parseRoute();
+  const change = route.mode !== state.mode || state.configOpen ? setMode(route.mode, {route: false}) : Promise.resolve();
+  change.then(() => {
+    if (!route.id) {
+      if ($('#movie-dialog').open) $('#movie-dialog').close();
+      if ($('#series-dialog').open) $('#series-dialog').close();
+    }
+    openRouteDialog(route);
+  }).catch(failure);
+});
+
+// Fermer une fiche rend l'adresse de l'onglet, sans nouvelle entree.
+['#movie-dialog', '#series-dialog'].forEach(id => $(id).addEventListener('close', () => {
+  if (parseRoute().id) setRoute(routeHash(state.mode), true);
+}));
+
+// ====================================================================
+// Historique : ce que le compte a regarde, garde par le serveur pour que
+// tous les appareils le partagent.
+// ====================================================================
+async function loadHistory() {
+  const data = await api('/history', {skipAuthRedirect: true}).catch(() => null);
+  if (data && Array.isArray(data.items)) state.history = {items: data.items, next: data.next || {}};
+  return state.history;
+}
+
+function watchOfJob(job) {
+  return {kind: job.kind || 'movie', provider: job.provider, id: job.movie, height: job.height,
+          audio: job.audio === undefined ? null : job.audio, subtitle: job.subtitle === undefined ? null : job.subtitle};
+}
+
+function watchOf(item) {
+  const d = item.data || {};
+  return {kind: item.kind, provider: d.provider_id, id: d.stream_id, height: d.height || 480,
+          audio: d.audio === undefined ? null : d.audio, subtitle: d.subtitle === undefined ? null : d.subtitle};
+}
+
+function channelOf(item) {
+  return {...(item.data || {}), icon: item.icon || undefined};
+}
+
+function historyItem(watch) {
+  const ref = watch.provider + ':' + watch.id;
+  return state.history.items.find(i => i.kind === watch.kind && i.ref === ref);
+}
+
+function jobDuration(job) {
+  return job && job.duration > 0 && !job.open ? job.duration : 0;
+}
+
+function jobPosition(job) {
+  const item = historyItem(watchOfJob(job));
+  if (item) return item.finished ? 0 : item.position;
+  // Positions gardees par ce navigateur avant l'historique du compte.
+  return Number(store.get('position_' + job.id)) || 0;
+}
+
+function progressBody(finished = false) {
+  const watch = state.watch, job = state.job;
+  if (!watch || !job) return null;
+  const position = video.currentTime || 0;
+  // Pendant la preparation, la duree de la video peut n'etre que la partie
+  // deja encodee : seule celle du serveur fait foi.
+  const duration = jobDuration(job) || (job.state === 'ready' && Number.isFinite(video.duration) ? video.duration : 0);
+  return {...watch, position, duration, finished};
+}
+
+function notePlayingPosition(position) {
+  const playing = tabStore.get('playing');
+  if (playing && playing.kind === 'watch') tabStore.set('playing', {...playing, position});
+}
+
+// Toutes les 15 s pendant la lecture, et a chaque pause, arret ou fin.
+function saveProgress(force = false, finished = false) {
+  const body = progressBody(finished);
+  if (!body || (body.position < 5 && !finished)) return Promise.resolve();
+  const now = Date.now();
+  if (!force && now - state.savedAt < 15000) return Promise.resolve();
+  state.savedAt = now;
+  notePlayingPosition(body.position);
+  return post('/history', body, {skipAuthRedirect: true}).then(saved => {
+    const item = historyItem(body);
+    if (item) Object.assign(item, {position: body.position, finished: saved.finished, updated: Math.floor(now / 1000)});
+    else loadHistory().catch(() => {});
+  }).catch(() => {});
+}
+
+// Une chaine compte comme regardee apres dix secondes d'image : zapper ne
+// remplit pas la liste.
+function rememberWhenWatched(channel, attempt) {
+  clearTimeout(state.liveTimer);
+  let waited = 0;
+  const check = () => {
+    if (attempt !== state.playback) return;
+    if (!state.frames && (waited += 5000) < 60000) { state.liveTimer = setTimeout(check, 5000); return; }
+    if (!state.frames) return;
+    recordChannel(channel).catch(() => {});
+  };
+  state.liveTimer = setTimeout(check, 10000);
+}
+
+async function recordChannel(channel) {
+  await post('/history', {kind: 'live', lang: channel.lang, canonical: channel.canonical, label: channel.label,
+    icon: channel.icon, epg_id: channel.epg_id, category: channel.category}, {skipAuthRedirect: true});
+  await loadHistory();
+  renderRecents();
+}
+
+// Les chaines recentes etaient gardees par le navigateur : on les confie au
+// compte une fois, puis on oublie la copie locale.
+async function migrateRecents() {
+  const old = store.json('recents', []);
+  if (!old.length) return;
+  for (const channel of old.slice().reverse()) {
+    if (channel && channel.canonical) {
+      await post('/history', {kind: 'live', lang: channel.lang, canonical: channel.canonical, label: channel.label,
+        icon: channel.icon, epg_id: channel.epg_id, category: channel.category}, {skipAuthRedirect: true}).catch(() => {});
+    }
+  }
+  store.remove('recents');
+}
+
+async function forget(item) {
+  await post('/history/delete', {grp: item.grp});
+  await loadHistory();
+  if (state.mode === 'home') await renderHome();
+}
+
+// Relance d'un film ou d'un episode : la meme preparation si elle existe
+// encore, sinon une nouvelle, qui repart directement de la position.
+async function watchAgain(watch, start) {
+  hideResume();
+  const job = await post('/prepare', {kind: watch.kind, provider: watch.provider, id: watch.id,
+    height: watch.height || 480, audio: watch.audio, subtitle: watch.subtitle});
+  await watchWhenPlayable(job, start);
+}
+
+function watchFailed(err) {
+  stageScreen(null);
+  $('#player-status').textContent = err.message;
+  failure(err);
+}
+
+function resumeWatch(item, fromStart = false) {
+  const start = fromStart || item.finished ? 0 : item.position;
+  return watchAgain(watchOf(item), start).catch(watchFailed);
+}
+
+function playNext(next) {
+  return watchAgain({kind: 'episode', provider: next.provider_id, id: next.episode_id, height: next.height || 480,
+    audio: null, subtitle: null}, 0).catch(watchFailed);
+}
+
+// ====================================================================
+// Accueil
+// ====================================================================
+const pad2 = n => String(n).padStart(2, '0');
+function episodeCode(season, episode) {
+  return (season ? 'S' + pad2(season) : '') + (episode ? 'E' + pad2(episode) : '');
+}
+
+function humanDuration(seconds) {
+  const total = Math.max(60, Math.round(seconds / 60) * 60);
+  const h = Math.floor(total / 3600), m = Math.round((total % 3600) / 60);
+  return h ? h + ' h ' + pad2(m) : m + ' min';
+}
+
+function progressLine(item) {
+  const left = item.duration - item.position;
+  if (item.duration > 0 && left > 0) return 'Reste ' + humanDuration(left);
+  return humanDuration(item.position) + ' regardées';
+}
+
+function itemLabel(item) {
+  if (item.kind !== 'episode') return item.title;
+  const d = item.data || {};
+  return item.title + ' · ' + episodeCode(d.season, d.episode);
+}
+
+// Titre d'episode seulement s'il dit autre chose que son numero.
+function episodeTitle(title, code) {
+  const raw = String(title || '').trim();
+  if (!raw || raw.toUpperCase() === code || /^S\s*\d+\s*E\s*\d+$/i.test(raw) || /^(episode|épisode)\s*\d+$/i.test(raw)) return '';
+  return raw;
+}
+
+function artwork(url, label, className = 'home-art') {
+  const slot = el('span', className);
+  slot.style.backgroundColor = getChannelColor(label);
+  slot.append(el('span', 'logo-placeholder', (label || '?').trim().slice(0, 2).toUpperCase()));
+  if (url && /^https?:\/\//.test(url)) {
+    const img = el('img');
+    img.src = '/api/logo?u=' + encodeURIComponent(url);
+    img.alt = '';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.onload = () => img.classList.add('ready');
+    img.onerror = () => img.remove();
+    slot.append(img);
+  }
+  return slot;
+}
+
+function progressBar(item) {
+  const bar = el('span', 'home-progress');
+  const fill = el('span');
+  fill.style.width = (item.duration > 0 ? Math.min(100, item.position / item.duration * 100) : 8) + '%';
+  bar.append(fill);
+  return bar;
+}
+
+function removeButton(label, action) {
+  const b = el('button', 'home-remove', '✕');
+  b.type = 'button';
+  b.title = 'Retirer de la liste';
+  b.setAttribute('aria-label', 'Retirer « ' + label + ' » de la liste');
+  b.onclick = e => { e.stopPropagation(); action().catch(failure); };
+  return b;
+}
+
+// Carte d'affiche : film, episode, serie a suivre, film pret.
+function posterCard({title, sub, icon, item, onPlay, onRemove}) {
+  const li = el('li', 'home-card poster');
+  const button = el('button', 'home-card-main');
+  button.type = 'button';
+  button.dataset.navItem = '';
+  const art = artwork(icon, title);
+  if (item) art.append(progressBar(item));
+  art.append(el('span', 'home-play', '▶'));
+  button.append(art, el('span', 'home-card-title', title), el('span', 'home-card-sub', sub || ''));
+  button.onclick = () => onPlay();
+  li.append(button);
+  if (onRemove) li.append(removeButton(title, onRemove));
+  return li;
+}
+
+function channelCard(c, onRemove) {
+  const li = el('li', 'home-card channel');
+  const button = el('button', 'home-card-main');
+  button.type = 'button';
+  button.dataset.navItem = '';
+  const meta = el('span', 'home-card-meta');
+  meta.append(el('span', 'home-card-title', c.label || c.canonical));
+  const now = el('span', 'home-card-sub epg-now', [c.category, c.lang].filter(Boolean).join(' · ') || 'Direct');
+  if (c.epg_id) now.dataset.epgId = c.epg_id;
+  meta.append(now);
+  button.append(artwork(c.icon, c.label, 'home-logo'), meta);
+  button.onclick = () => play(c).catch(failure);
+  button.ondblclick = () => fullscreenWhenReady();
+  li.append(button);
+  if (onRemove) li.append(removeButton(c.label, onRemove));
+  return li;
+}
+
+function homeRow(title, cards, more) {
+  const section = el('section', 'home-row');
+  const head = el('div', 'home-row-head');
+  head.append(el('h3', 'home-row-title', title));
+  if (more) {
+    const link = el('button', 'quiet home-more', more.label + ' ›');
+    link.type = 'button';
+    link.onclick = () => setMode(more.mode).catch(failure);
+    head.append(link);
+  }
+  const list = el('ul', 'home-list');
+  list.dataset.navRow = '';
+  cards.forEach(card => list.append(card));
+  section.append(head, list);
+  return section;
+}
+
+// Ce que le compte a en cours, dans l'ordre de l'historique (le plus recent
+// d'abord) : un seul episode par serie, le dernier regarde.
+function homeSections(data) {
+  const watching = [], upNext = [], seen = new Set();
+  let hero = null;
+  for (const item of data.items) {
+    let entry = null;
+    if (item.kind === 'live') {
+      entry = {type: 'live', item};
+    } else if (item.kind === 'movie') {
+      if (!item.finished && item.position >= 120) { entry = {type: 'watch', item}; watching.push(entry); }
+    } else if (item.kind === 'episode' && !seen.has(item.grp)) {
+      seen.add(item.grp);
+      const next = data.next[item.grp];
+      if (!item.finished && item.position >= 120) { entry = {type: 'watch', item}; watching.push(entry); }
+      else if (item.finished && next) { entry = {type: 'next', item, next}; upNext.push(entry); }
+    }
+    if (entry && !hero) hero = entry;
+  }
+  const channels = data.items.filter(i => i.kind === 'live');
+  return {hero, watching, upNext, channels};
+}
+
+async function heroProgram(channel, slot) {
+  if (!channel.epg_id) return;
+  const guide = await api('/guide/now?ids=' + encodeURIComponent(channel.epg_id), {skipAuthRedirect: true}).catch(() => ({}));
+  const entry = guide[channel.epg_id];
+  const program = entry && (entry.now || entry.next);
+  if (!program) return;
+  slot.textContent = (entry.now ? 'En ce moment : ' : 'À ' + clock(program.start) + ' : ') + program.title;
+}
+
+function renderHero(hero) {
+  const box = $('#home-hero');
+  box.replaceChildren();
+  box.hidden = !hero;
+  if (!hero) return;
+  const {type, item, next} = hero;
+  let kicker, title, detail, icon = item.icon, actions = [];
+  const action = (label, cls, fn) => {
+    const b = el('button', cls, label);
+    b.type = 'button';
+    b.dataset.navItem = '';
+    b.onclick = () => fn();
+    actions.push(b);
+  };
+  const detailLine = el('p', 'home-hero-detail muted');
+  if (type === 'live') {
+    const channel = channelOf(item);
+    kicker = 'REPRENDRE LE DIRECT';
+    title = channel.label;
+    detail = [channel.category, channel.lang].filter(Boolean).join(' · ') || 'Chaîne en direct';
+    heroProgram(channel, detailLine).catch(() => {});
+    action('▶ Regarder', 'primary', () => play(channel).catch(failure));
+  } else if (type === 'next') {
+    const code = episodeCode(next.season, next.episode);
+    kicker = 'SÉRIE · ÉPISODE SUIVANT';
+    title = item.title;
+    detail = [code, episodeTitle(next.title, code)].filter(Boolean).join(' · ') + ' à suivre';
+    action('▶ Lancer ' + (code || 'l’épisode'), 'primary', () => playNext(next));
+  } else {
+    kicker = item.kind === 'episode' ? 'REPRENDRE LA SÉRIE' : 'REPRENDRE LE FILM';
+    title = itemLabel(item);
+    detail = progressLine(item);
+    action('▶ Reprendre', 'primary', () => resumeWatch(item));
+    action('Depuis le début', 'quiet', () => resumeWatch(item, true));
+  }
+  action('Retirer', 'quiet', () => forget(item).catch(failure));
+  detailLine.textContent = detail;
+
+  const backdrop = artwork(icon, title, 'home-hero-backdrop');
+  const art = artwork(icon, title, type === 'live' ? 'home-hero-art logo' : 'home-hero-art');
+  const body = el('div', 'home-hero-body');
+  body.append(el('p', 'eyebrow', kicker), el('h1', '', title), detailLine);
+  if (type === 'watch') body.append(progressBar(item));
+  const row = el('div', 'home-hero-actions');
+  row.dataset.navRow = '';
+  actions.forEach(b => row.append(b));
+  box.append(backdrop, art, body, row);
+}
+
+async function renderHome() {
+  const serial = ++state.homeRender;
+  const hour = new Date().getHours();
+  $('#home-greeting').firstChild.textContent = hour >= 5 && hour < 18 ? 'Bonjour' : 'Bonsoir';
+  const [data, jobs] = await Promise.all([loadHistory(), api('/preparations', {skipAuthRedirect: true}).catch(() => [])]);
+  if (serial !== state.homeRender || state.mode !== 'home') return;
+  const {hero, watching, upNext, channels} = homeSections(data);
+  renderHero(hero);
+  const rows = [];
+
+  const others = watching.filter(e => e !== hero);
+  if (others.length) {
+    rows.push(homeRow('Continuer à regarder', others.map(({item}) => posterCard({
+      title: itemLabel(item), sub: progressLine(item), icon: item.icon, item,
+      onPlay: () => resumeWatch(item), onRemove: () => forget(item)
+    }))));
+  }
+  const series = upNext.filter(e => e !== hero);
+  if (series.length) {
+    rows.push(homeRow('Séries en cours', series.map(({item, next}) => {
+      const code = episodeCode(next.season, next.episode);
+      return posterCard({title: item.title, sub: (code ? code + ' · ' : '') + 'à suivre', icon: item.icon,
+        onPlay: () => playNext(next), onRemove: () => forget(item)});
+    })));
+  }
+  const recent = channels.filter(i => !hero || hero.item !== i).slice(0, 12);
+  if (recent.length) {
+    rows.push(homeRow('Chaînes récentes', recent.map(i => channelCard(channelOf(i), () => forget(i))), {label: 'Tout le direct', mode: 'live'}));
+  }
+  if (state.favorites.length) {
+    rows.push(homeRow('Favoris', state.favorites.slice(0, 12).map(c => channelCard(c)), {label: 'Tous les favoris', mode: 'favorites'}));
+  }
+  const ready = jobs.filter(j => j.state === 'ready' || (j.state === 'preparing' && j.playable)).slice(0, 12);
+  if (ready.length) {
+    rows.push(homeRow('Films prêts', ready.map(job => {
+      const item = historyItem(watchOfJob(job));
+      const status = job.state === 'ready' ? job.height + 'p · prêt' : job.height + 'p · préparation ' + job.progress + ' %';
+      return posterCard({title: job.title, sub: status, icon: item && item.icon,
+        item: item && !item.finished && item.position >= 120 ? item : null, onPlay: () => playJob(job).catch(failure)});
+    }), {label: 'Tous les films prêts', mode: 'prepared'}));
+  }
+  $('#home-rows').replaceChildren(...rows);
+  $('#home-empty').hidden = !!(hero || rows.length);
+  // Programme en cours sous chaque chaine, depuis le guide en cache.
+  const ids = [...new Set([...$$('#home .epg-now[data-epg-id]')].map(n => n.dataset.epgId))];
+  if (ids.length) {
+    api('/guide/now?ids=' + encodeURIComponent(ids.join(',')), {skipAuthRedirect: true}).then(guide => {
+      $$('#home .epg-now[data-epg-id]').forEach(slot => {
+        const entry = guide[slot.dataset.epgId];
+        if (entry && entry.now) slot.textContent = entry.now.title;
+      });
+    }).catch(() => {});
+  }
+}
+
+// Menu du compte (telephone) : relaie vers les onglets masques de la barre du bas.
+function closeAccountMenu() {
+  $('#account-menu').hidden = true;
+  $('#account-btn').setAttribute('aria-expanded', 'false');
+}
+$('#account-btn').onclick = e => {
+  e.stopPropagation();
+  const open = $('#account-menu').hidden;
+  $('#account-menu').hidden = !open;
+  $('#account-btn').setAttribute('aria-expanded', String(open));
+  if (open) $('#account-menu button:not([hidden])').focus();
+};
+$$('#account-menu [data-proxy]').forEach(b => {
+  b.onclick = () => { closeAccountMenu(); $('#' + b.dataset.proxy).click(); };
+});
+document.addEventListener('click', e => { if (!$('#account-menu').hidden && !e.target.closest('.mobile-bar')) closeAccountMenu(); });
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || $('#account-menu').hidden) return;
+  // Sinon Echap fermerait aussi le lecteur.
+  e.stopPropagation();
+  closeAccountMenu();
+  $('#account-btn').focus();
+});
+
+$$('#home-empty [data-goto]').forEach(b => { b.onclick = () => setMode(b.dataset.goto).catch(failure); });
+
+// Fleches dans l'accueil : gauche/droite dans une rangee, haut/bas entre rangees.
+function homeArrow(e) {
+  const rows = [...$$('#home [data-nav-row]')].map(r => [...r.querySelectorAll('[data-nav-item]')]).filter(r => r.length);
+  if (!rows.length) return false;
+  let r = rows.findIndex(row => row.includes(document.activeElement));
+  if (r < 0) { rows[0][0].focus(); return true; }
+  let i = rows[r].indexOf(document.activeElement);
+  if (e.key === 'ArrowRight') i = Math.min(rows[r].length - 1, i + 1);
+  else if (e.key === 'ArrowLeft') i = Math.max(0, i - 1);
+  else {
+    r = e.key === 'ArrowDown' ? Math.min(rows.length - 1, r + 1) : Math.max(0, r - 1);
+    i = Math.min(i, rows[r].length - 1);
+  }
+  rows[r][i].focus();
+  rows[r][i].scrollIntoView({behavior: 'smooth', block: 'nearest', inline: 'nearest'});
+  return true;
+}
+
+// ====================================================================
+// Apres une actualisation en pleine lecture : proposer de reprendre, sans
+// relancer d'office (son bloque par le navigateur, encodage inutile).
+// ====================================================================
+function hideResume() { $('#resume-bar').hidden = true; }
+
+function offerResume() {
+  const playing = tabStore.get('playing');
+  if (!playing) return;
+  if (playing.kind === 'live' && playing.channel) {
+    $('#resume-title').textContent = playing.channel.label || '';
+    $('#resume-detail').textContent = 'Direct';
+    $('#resume-go').onclick = () => play(playing.channel).catch(failure);
+  } else if (playing.kind === 'watch' && playing.watch) {
+    const item = historyItem(playing.watch);
+    $('#resume-title').textContent = item ? itemLabel(item) : 'Votre film';
+    $('#resume-detail').textContent = playing.position > 5 ? 'à ' + clockPosition(playing.position) : '';
+    $('#resume-go').onclick = () => { hideResume(); watchAgain(playing.watch, playing.position).catch(watchFailed); };
+  } else {
+    return;
+  }
+  $('#resume-bar').hidden = false;
+  $('#resume-go').focus({preventScroll: true});
+}
+
+function clockPosition(seconds) {
+  const s = Math.floor(seconds), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return (h ? h + ':' + pad2(m) : m) + ':' + pad2(s % 60);
+}
+
+$('#resume-close').onclick = () => { hideResume(); tabStore.remove('playing'); };
+
 // Dialog films
 async function seriesDialog(show) {
-  $('#series-title').textContent = show.title || show.name;
+  if (state.mode === 'series') setRoute(routeHash('series', show.provider_id, show.series_id), true);
+  $('#series-title').textContent = show.title || show.name || '';
   $('#series-details').textContent = '';
   $('#series-plot').textContent = '';
   $('#series-message').textContent = 'Chargement des saisons…';
@@ -1297,7 +1858,8 @@ function episodeDialog(show, episode) {
 }
 
 async function movieDialog(c) {
-  $('#movie-title').textContent = c.title;
+  if (state.mode === 'vod') setRoute(routeHash('vod', c.provider_id, c.stream_id), true);
+  $('#movie-title').textContent = c.title || '';
   $('#movie-message').textContent = 'Chargement des informations…';
   $('#movie-details').textContent = '';
   $('#movie-plot').textContent = '';
@@ -1427,7 +1989,7 @@ $('#watch-movie').onclick = async () => {
 
 // Le serveur sonde la source avant de connaitre la duree du film : quelques
 // secondes pendant lesquelles on affiche l'ecran d'ouverture.
-async function watchWhenPlayable(job) {
+async function watchWhenPlayable(job, start) {
   const stopping = stop();
   const attempt = state.playback;
   await stopping;
@@ -1440,7 +2002,7 @@ async function watchWhenPlayable(job) {
     const jobs = await api('/preparations').catch(() => []);
     const fresh = jobs.find(j => j.id === job.id);
     if (fresh && fresh.state === 'failed') throw new Error(fresh.error || 'Échec de la préparation.');
-    if (fresh && (fresh.state === 'ready' || fresh.playable)) return playJob(fresh);
+    if (fresh && (fresh.state === 'ready' || fresh.playable)) return playJob(fresh, start);
     if (fresh && fresh.stage === 'subtitles') {
       // Abonnement a une seule connexion : le serveur lit d'abord tout le
       // fichier pour en extraire les sous-titres.
@@ -1472,7 +2034,7 @@ async function refreshJobs() {
     }
     const actions = el('div', 'job-actions');
     if (job.state === 'ready' || (job.state === 'preparing' && job.playable)) {
-      const playButton = el('button', 'primary', store.get('position_' + job.id) ? 'Reprendre ▶' : 'Regarder ▶');
+      const playButton = el('button', 'primary', jobPosition(job) ? 'Reprendre ▶' : 'Regarder ▶');
       playButton.onclick = () => playJob(job).catch(failure);
       actions.append(playButton);
     }
@@ -1527,12 +2089,22 @@ async function retryPreparation(job, button) {
   }
 }
 
-async function playJob(job) {
+// start : position voulue, en secondes. Absente, on reprend la ou le compte
+// s'etait arrete ; 0 force le debut.
+async function playJob(job, start) {
   const stopping = stop();
   const attempt = state.playback;
   await stopping;
   if (attempt !== state.playback) return;
   state.job = job;
+  state.watch = watchOfJob(job);
+  let from = start === undefined ? jobPosition(job) : Number(start) || 0;
+  const known = jobDuration(job);
+  if (known && from > known - 20) from = 0;
+  state.startAt = from > 5 ? from : 0;
+  state.savedAt = Date.now();
+  hideResume();
+  tabStore.set('playing', {kind: 'watch', watch: state.watch, position: state.startAt});
   state.current = {label: job.title};
   playbackUI(job.title, false);
   attach('/media/' + job.id + '/master.m3u8', false, attempt);
@@ -1921,6 +2493,14 @@ window.addEventListener('keydown', e => {
 
   // Navigation par flèches dans la grille de chaînes
   if (['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Enter'].includes(e.key) && !isInput) {
+    // Accueil : ses propres rangees. Entree reste a l'element qui a le focus.
+    if (state.mode === 'home') {
+      const busy = document.body.classList.contains('is-playing') || document.querySelector('dialog[open]') || state.configOpen;
+      if (!busy && e.key !== 'Enter' && homeArrow(e)) e.preventDefault();
+      return;
+    }
+    // Liste masquee (films prets, reglages) : Entree lancait une chaine invisible.
+    if ($('#catalogue').hidden || state.configOpen) return;
     const cards = Array.from($$('#channels > .channel-card'));
     if (!cards.length) return;
 

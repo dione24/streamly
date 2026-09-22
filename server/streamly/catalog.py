@@ -9,6 +9,7 @@ Regrouper les chaines par (langue, nom canonique) donne deux choses :
   - les sources alternatives, y compris chez un autre provider, pour basculer
     si un flux meurt en plein direct.
 """
+import json
 import os
 import re
 import sqlite3
@@ -117,6 +118,25 @@ CREATE TABLE IF NOT EXISTS episodes (
     PRIMARY KEY (provider_id, episode_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ep_series ON episodes(provider_id, series_id, season, episode);
+
+-- Ce que chaque compte a regarde : chaines, films, episodes. Une ligne par
+-- element, mise a jour a chaque avancee ; « grp » regroupe les episodes d'une
+-- meme serie pour « Series en cours ».
+CREATE TABLE IF NOT EXISTS history (
+    account  TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    ref      TEXT NOT NULL,
+    grp      TEXT NOT NULL,
+    title    TEXT,
+    icon     TEXT,
+    data     TEXT,
+    position REAL DEFAULT 0,
+    duration REAL DEFAULT 0,
+    finished INTEGER DEFAULT 0,
+    updated  INTEGER,
+    PRIMARY KEY (account, kind, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_history_recent ON history(account, updated);
 
 CREATE TABLE IF NOT EXISTS sync_state (
     provider_id TEXT PRIMARY KEY,
@@ -644,9 +664,14 @@ class Catalog:
     # ------------------------------------------------------------- favoris
 
     def favorites(self):
+        # Logo et guide des programmes, pris dans le catalogue : un favori
+        # s'affiche alors comme n'importe quelle chaine, a l'accueil aussi.
         cur = self._db.execute(
-            "SELECT lang, canonical, label FROM favorites ORDER BY label")
-        return [dict(r) for r in cur.fetchall()]
+            "SELECT f.lang, f.canonical, f.label,"
+            " (SELECT MAX(icon) FROM channels c WHERE c.lang IS NULLIF(f.lang, '') AND c.canonical=f.canonical) AS icon,"
+            " (SELECT MAX(epg_id) FROM channels c WHERE c.lang IS NULLIF(f.lang, '') AND c.canonical=f.canonical) AS epg_id"
+            " FROM favorites f ORDER BY f.label")
+        return [{k: v for k, v in dict(r).items() if v is not None} for r in cur.fetchall()]
 
     def add_favorite(self, lang, canonical, label):
         with self._db:
@@ -659,3 +684,57 @@ class Catalog:
             self._db.execute(
                 "DELETE FROM favorites WHERE lang IS ? AND canonical=?",
                 (lang or "", canonical))
+
+    # ---------------------------------------------------------- historique
+
+    HISTORY_KEPT = 300
+
+    def history_record(self, account, kind, ref, grp, title, icon, data,
+                       position=0.0, duration=0.0, finished=False):
+        with self._db:
+            self._db.execute(
+                "INSERT INTO history (account, kind, ref, grp, title, icon, data,"
+                " position, duration, finished, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(account, kind, ref) DO UPDATE SET grp=excluded.grp,"
+                " title=COALESCE(excluded.title, title), icon=COALESCE(excluded.icon, icon),"
+                " data=excluded.data, position=excluded.position,"
+                " duration=CASE WHEN excluded.duration > 0 THEN excluded.duration ELSE duration END,"
+                " finished=excluded.finished, updated=excluded.updated",
+                (account, kind, ref, grp, title, icon, json.dumps(data or {}),
+                 float(position or 0), float(duration or 0), int(bool(finished)),
+                 int(time.time())))
+            self._db.execute(
+                "DELETE FROM history WHERE account=? AND rowid NOT IN ("
+                "SELECT rowid FROM history WHERE account=? ORDER BY updated DESC LIMIT ?)",
+                (account, account, self.HISTORY_KEPT))
+
+    def history(self, account, limit=120):
+        cur = self._db.execute(
+            "SELECT kind, ref, grp, title, icon, data, position, duration, finished, updated"
+            " FROM history WHERE account=? ORDER BY updated DESC, rowid DESC LIMIT ?",
+            (account, int(limit)))
+        items = []
+        for r in cur.fetchall():
+            item = dict(r)
+            try:
+                item['data'] = json.loads(item['data'] or '{}')
+            except ValueError:
+                item['data'] = {}
+            item['finished'] = bool(item['finished'])
+            items.append(item)
+        return items
+
+    def history_forget(self, account, grp):
+        """Retire un element, ou toute une serie : leurs lignes partagent « grp »."""
+        with self._db:
+            return self._db.execute(
+                "DELETE FROM history WHERE account=? AND grp=?", (account, grp)).rowcount
+
+    def next_episode(self, provider_id, series_id, season, episode):
+        row = self._db.execute(
+            "SELECT episode_id, season, episode, title, duration FROM episodes"
+            " WHERE provider_id=? AND series_id=?"
+            " AND (COALESCE(season, 0) > ? OR (COALESCE(season, 0) = ? AND COALESCE(episode, 0) > ?))"
+            " ORDER BY COALESCE(season, 0), COALESCE(episode, 0) LIMIT 1",
+            (provider_id, int(series_id), int(season or 0), int(season or 0), int(episode or 0))).fetchone()
+        return dict(row) if row else None

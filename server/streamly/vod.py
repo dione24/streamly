@@ -131,7 +131,10 @@ class Movies:
         if height not in (240, 360, 480, 720):
             raise ValueError('Qualité invalide')
         with self.lock:
-            same = [j for j in self.jobs.values() if j['provider'] == movie['provider_id'] and j['movie'] == movie['stream_id'] and j['height'] == height and j.get('audio') == audio and j.get('subtitle') == subtitle and j['state'] in ('preparing', 'ready')]
+            # Film et episode ont chacun leur numerotation chez le panel : un meme
+            # numero peut designer les deux.
+            kind = movie.get('kind') or 'movie'
+            same = [j for j in self.jobs.values() if j['provider'] == movie['provider_id'] and j['movie'] == movie['stream_id'] and j.get('kind', 'movie') == kind and j['height'] == height and j.get('audio') == audio and j.get('subtitle') == subtitle and j['state'] in ('preparing', 'ready')]
             if same:
                 return dict(same[0])
             for key, j in list(self.jobs.items()):
@@ -142,6 +145,7 @@ class Movies:
                 raise CapacityError('Espace de préparation insuffisant. Libérez une ancienne préparation.')
             jid = secrets.token_urlsafe(18)
             job = dict(id=jid, provider=movie['provider_id'], movie=movie['stream_id'], title=movie['title'],
+                       kind=kind,
                        height=height, audio=audio, subtitle=subtitle, state='preparing', created=time.time(),
                        progress=0, format=2, playable=False)
             self.jobs[jid] = job

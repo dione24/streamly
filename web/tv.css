@@ -575,6 +575,17 @@
     overflow-y: auto;
   }
   body.view-config #app.tv #viewer { display: none; }
+
+  /* --- Accueil : pleine scene ; le lecteur la prend quand on lance quelque chose */
+  body.mode-home #app.tv #viewer, body.mode-home #app.tv #filters { display: none; }
+  #app.tv #home {
+    grid-column: 1 / -1;
+    padding: 30px clamp(26px, 5vw, 70px) 60px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  body.mode-home.is-playing #app.tv #viewer { display: flex; grid-column: 1 / -1; padding-inline: clamp(26px, 9vw, 180px); }
+  body.mode-home.is-playing #app.tv #home, body.view-config #app.tv #home { display: none; }
 }
 
 /* Affiches : valable a toutes les tailles */
@@ -703,6 +714,59 @@
   }
 
   body.view-config #app.tv #viewer, body.mode-prepared #app.tv #viewer { display: none; }
+
+  /* Barre du bas facon app : cinq onglets, icone teintee quand actif.
+     Films prets, reglages et deconnexion passent par le menu du compte. */
+  .rail #tab-prepared, .rail .account-actions { display: none; }
+  .rail .tab { min-width: 0; gap: 4px; font-size: 0.64rem; font-weight: 600; }
+  .rail .tab:hover { background: none; }
+  .rail .tab.active { background: none; color: var(--accent-hover); }
+  .rail .tab.active::before { display: none; }
+  .rail .tab.active .rail-icon { filter: drop-shadow(0 0 8px var(--accent-glow)); }
+
+  .mobile-bar {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: calc(10px + env(safe-area-inset-top)) 16px 2px;
+  }
+  .mobile-bar .wordmark { display: flex; align-items: center; gap: 0; font-size: 1.05rem; font-weight: 700; }
+  .mobile-bar .brand-icon { margin-right: 8px; }
+  .mobile-bar .brand-icon { width: 28px; height: 28px; font-size: 0.9rem; }
+  body.is-playing .mobile-bar { display: none; }
+
+  body.mode-home:not(.is-playing) #app.tv #viewer, body.mode-home.is-playing #app.tv #home { display: none; }
+  #app.tv #home { order: 3; gap: 22px; }
+  .home-heading .eyebrow { display: none; }
+  .home-heading h2 { font-size: 1.7rem; }
+  .home-hero {
+    grid-template-columns: 76px minmax(0, 1fr);
+    align-items: center;
+    column-gap: 14px;
+    min-height: 0;
+    padding: 14px;
+    border-radius: 16px;
+  }
+  .home-hero-art { grid-row: auto; width: 76px; border-radius: 9px; }
+  .home-hero-art.logo { width: 64px; }
+  .home-hero-body .eyebrow { font-size: 0.6rem; margin-bottom: 4px; }
+  .home-hero-body h1 { font-size: 1.2rem; line-height: 1.15; }
+  .home-hero-detail { margin-top: 4px; font-size: 0.8rem; }
+  .home-hero-body .home-progress { margin-top: 8px; }
+  .home-hero-actions { grid-column: 1 / -1; margin-top: 14px; gap: 8px; flex-wrap: nowrap; }
+  .home-hero-actions button { flex: 0 1 auto; padding: 9px 14px; font-size: 0.82rem; white-space: nowrap; }
+  .home-hero-actions .primary { flex: 1 1 auto; }
+  .home-rows { gap: 22px; }
+  .home-row-title { font-size: 1rem; }
+  .home-list { grid-auto-columns: 100px; gap: 10px; margin-inline: -16px; padding-inline: 16px; scroll-padding-inline: 16px; }
+  .home-list:has(.channel) { grid-auto-columns: 190px; gap: 8px; }
+  .home-card-title { font-size: 0.76rem; }
+  .home-card-sub { font-size: 0.68rem; }
+  .home-card.channel .home-card-main { padding: 8px 10px; gap: 9px; }
+  .home-logo { flex-basis: 38px; width: 38px; height: 38px; }
+  .resume-bar { bottom: calc(76px + env(safe-area-inset-bottom)); padding-left: 16px; gap: 10px; }
+  .resume-text strong { max-width: 40vw; }
 }
 
 @media (prefers-reduced-motion: reduce) {

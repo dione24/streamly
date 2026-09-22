@@ -39,7 +39,12 @@ abonnement IPTV ──▶ Streamly (FFmpeg, à la demande) ──▶ interface w
   mesuré de votre connexion), reprise du direct, connexion trop lente pour la
   qualité en cours, connexion interrompue, chaîne indisponible chez le
   fournisseur.
-- Favoris, récents, recherche, PWA installable, mini-lecteur, plein écran.
+- Page d'accueil par compte : reprendre là où on s'était arrêté, films et
+  épisodes en cours, épisode suivant des séries, chaînes récentes, favoris.
+  L'historique est gardé par le serveur, donc partagé entre tous les appareils.
+- Actualiser la page ramène au même onglet et propose de reprendre la lecture
+  en cours ; les sessions survivent à un redémarrage du serveur.
+- Favoris, recherche, PWA installable, mini-lecteur, plein écran.
 - Films et épisodes lisibles immédiatement, pendant que le serveur les compresse
   (choix de la qualité, de l'audio et des sous-titres texte) : on peut avancer
   n'importe où dans le film, l'encodage repart de ce point. Une fois la

@@ -1,6 +1,8 @@
 """Expiring device sessions. Admin credentials never appear in media URLs."""
 import hashlib
 import hmac
+import json
+import os
 import secrets
 import threading
 import time
@@ -25,10 +27,50 @@ def verify_password(password, salt, expected):
     return hmac.compare_digest(computed, expected)
 
 
+def _digest(sid):
+    return hashlib.sha256(str(sid).encode('utf-8')).hexdigest()
+
+
 class Sessions:
-    def __init__(self, cfg):
+    """Sessions web, conservees sur disque quand un chemin est donne.
+
+    En memoire seulement, chaque redemarrage du service (mise a jour,
+    deploiement) deconnectait tous les appareils. Le fichier ne contient que
+    l'empreinte de chaque identifiant : sa lecture ne suffit pas a se faire
+    passer pour un appareil connecte.
+    """
+    LIMIT = 100
+
+    def __init__(self, cfg, path=None):
         self.cfg, self.items, self.attempts = cfg, {}, {}
+        self.path = path
         self.lock = threading.RLock()
+        self._load()
+
+    def _load(self):
+        if not self.path:
+            return
+        try:
+            with open(self.path, encoding='utf-8') as fh:
+                stored = json.load(fh)
+        except (OSError, ValueError):
+            return
+        now = time.time()
+        if isinstance(stored, dict):
+            self.items = {k: v for k, v in stored.items()
+                          if isinstance(v, dict) and v.get('expires', 0) > now}
+
+    def _save(self):
+        if not self.path:
+            return
+        tmp = self.path + '.tmp'
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                json.dump(self.items, fh)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
 
     def login(self, token, address, username=None, password=None):
         now = time.time()
@@ -37,7 +79,7 @@ class Sessions:
             count, since = self.attempts.get(address, (0, now))
             if count >= 10:
                 raise ValueError('Trop de tentatives. Réessayez dans cinq minutes.')
-            role = None
+            role, account = None, ''
             if username:
                 # Comparaison a temps constant sur le nom aussi : sinon la
                 # duree de reponse revele quels comptes existent.
@@ -45,6 +87,7 @@ class Sessions:
                     if (secrets.compare_digest(str(u.get('username', '')), str(username))
                             and verify_password(password, u.get('salt'), u.get('password_hash'))):
                         role = u.get('role', 'admin')
+                        account = str(u.get('username'))
                         break
                 # Fallback : premier demarrage ou instance sans comptes 'users' definis
                 if not role and not self.cfg.get('users', []):
@@ -68,10 +111,13 @@ class Sessions:
                 raise ValueError('Identifiants refusés.' if username else 'Jeton refusé.')
             self.attempts.pop(address, None)
             self.items = {k: v for k, v in self.items.items() if v['expires'] > now}
-            if len(self.items) >= 100:
-                raise ValueError('Trop de sessions actives.')
+            # Conservees d'un redemarrage a l'autre, les sessions s'accumulent :
+            # on libere la plus ancienne plutot que de refuser la connexion.
+            while len(self.items) >= self.LIMIT:
+                del self.items[min(self.items, key=lambda k: self.items[k]['expires'])]
             sid = secrets.token_urlsafe(32)
-            self.items[sid] = {'role': role, 'expires': now + 7 * 86400}
+            self.items[_digest(sid)] = {'role': role, 'account': account, 'expires': now + 7 * 86400}
+            self._save()
             return sid, role
 
     def blocked(self, address):
@@ -121,13 +167,27 @@ class Sessions:
             sid = parsed['streamly_session'].value
         except (KeyError, ValueError):
             return None
+        key = _digest(sid)
         with self.lock:
-            session = self.items.get(sid)
+            session = self.items.get(key)
             if not session or session['expires'] < time.time():
-                self.items.pop(sid, None)
+                if self.items.pop(key, None):
+                    self._save()
                 return None
-            return dict(session, id=sid)
+            account = session.get('account') or ''
+            if account:
+                # Compte retire ou role change dans config.json : la session
+                # suit, sans attendre ses sept jours.
+                user = next((u for u in self.cfg.get('users', [])
+                             if str(u.get('username', '')) == account), None)
+                if not user:
+                    self.items.pop(key, None)
+                    self._save()
+                    return None
+                session = dict(session, role=user.get('role', 'admin'))
+            return dict(session, id=sid, account=account)
 
     def logout(self, sid):
         with self.lock:
-            self.items.pop(sid, None)
+            if self.items.pop(_digest(sid), None):
+                self._save()
