@@ -181,7 +181,7 @@ function modeHint() {
   const mode = $('#play-mode').value;
   $('#budget-fields').hidden = mode !== 'budget';
   $('#mode-hint').textContent = {
-    eco: 'Qualité plafonnée pour préserver votre forfait mobile.',
+    eco: 'Qualité plafonnée pour les connexions Internet lentes ou limitées.',
     balanced: 'Un équilibre optimal entre netteté et consommation.',
     sport: 'La meilleure image que votre connexion permet, jusqu’à 720p, cadence d’origine.',
     budget: 'Volume et durée dédiés à cette séance avec coupure automatique protectrice.'
