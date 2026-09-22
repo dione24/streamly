@@ -4,8 +4,8 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a14"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="app.css?v=20260923-v42">
-<script defer src="app.js?v=20260923-v42"></script>
+<link rel="stylesheet" href="app.css?v=20260923-v43">
+<script defer src="app.js?v=20260923-v43"></script>
 <!-- Le moteur video n'est charge qu'a la premiere lecture ; le navigateur le
      recupere en tache de fond pour qu'il soit deja la. -->
 <link rel="prefetch" href="vendor/hls.min.js?v=1.5">
@@ -308,7 +308,10 @@
   <h2 id="series-title"></h2>
   <p id="series-details" class="muted"></p>
  </div>
+ <div id="series-ratings" class="scores" hidden></div>
  <p id="series-plot" class="sheet-plot"></p>
+ <p id="series-credits" class="credits" hidden></p>
+ <a id="series-trailer" class="btn-ghost trailer" target="_blank" rel="noopener noreferrer" hidden>▶ Bande-annonce</a>
  <label id="series-season-field" hidden>Saison<select id="series-season"></select></label>
  <ul id="series-episodes" class="episode-list"></ul>
  <p id="series-message" role="status"></p>
@@ -321,7 +324,9 @@
   <h2 id="movie-title"></h2>
   <p id="movie-details" class="muted"></p>
  </div>
+ <div id="movie-ratings" class="scores" hidden></div>
  <p id="movie-plot" class="sheet-plot"></p>
+ <p id="movie-credits" class="credits" hidden></p>
  <label>Qualité à préparer
   <select id="movie-height">
    <option value="240">240p · minimum de données</option>
@@ -339,6 +344,7 @@
  <p id="movie-note" class="small muted">La lecture démarre pendant que le serveur compresse le film. Il reste ensuite dans « Mes films prêts », téléchargeable une fois la préparation terminée.</p>
  <div class="movie-actions">
   <button id="watch-movie" class="btn-play">▶ Regarder</button>
+  <a id="movie-trailer" class="btn-ghost trailer" target="_blank" rel="noopener noreferrer" hidden>Bande-annonce</a>
   <button id="prepare-movie" class="quiet">Préparer sans regarder</button>
  </div>
  <p id="movie-message" role="status"></p>

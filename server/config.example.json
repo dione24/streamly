@@ -4,6 +4,8 @@
   "_comment_token": "Jeton d'acces. Laisser vide pour qu'il soit genere au premier demarrage.",
   "token": "",
   "_comment_providers": "Un bloc par abonnement. 'host' inclut le port si besoin.",
+  "_comment_omdb": "Cle OMDb (omdbapi.com, gratuite) : notes IMDb, Rotten Tomatoes et Metacritic dans les fiches, affiche de secours. Vide = sans notes.",
+  "omdb_api_key": "",
   "_comment_users": "Comptes de connexion. A creer avec deploy/adduser.py : le mot de passe n'est jamais stocke en clair, seuls un sel et une empreinte PBKDF2.",
   "users": [],
 

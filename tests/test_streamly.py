@@ -26,6 +26,7 @@ from streamly.logos import Logos
 import gzip
 import xml.etree.ElementTree as ET
 from streamly.vod import Movies
+from streamly import metadata
 
 CFG = json.loads((pathlib.Path(__file__).resolve().parents[1] / 'server/config.example.json').read_text())
 CFG.update(token='test-admin', viewer_token='test-viewer', max_concurrent_streams=2,
@@ -470,6 +471,26 @@ class SessionStoreTests(unittest.TestCase):
             last, _ = sessions.login('test-admin', '1.2.3.4')
         self.assertIsNone(sessions.get('streamly_session=' + first))
         self.assertIsNotNone(sessions.get('streamly_session=' + last))
+
+
+class MetadataTests(unittest.TestCase):
+    def test_tmdb_images_are_resized(self):
+        self.assertEqual(metadata.tmdb_image('/abc.jpg', 'w780'), 'https://image.tmdb.org/t/p/w780/abc.jpg')
+        self.assertEqual(metadata.tmdb_image('https://image.tmdb.org/t/p/original/abc.jpg', 'w1280'),
+                         'https://image.tmdb.org/t/p/w1280/abc.jpg')
+        self.assertIsNone(metadata.tmdb_image('None', 'w780'))
+        self.assertIsNone(metadata.tmdb_image([], 'w780'))
+    def test_titles_are_cleaned_for_the_lookup(self):
+        for raw in ('EN| The Dunes (2019)', 'The Dunes - 2019', 'FR: The Dunes [2019]'):
+            self.assertEqual(metadata.clean_title(raw), 'The Dunes')
+    def test_panel_extra_ignores_empty_and_odd_values(self):
+        extra = metadata.panel_extra({'rating': 'n/a', 'genre': '', 'backdrop_path': None, 'releaseDate': '2017-04-28',
+                                      'youtube_trailer': 'x"><script>'})
+        self.assertEqual(extra, {'year': '2017'})
+    def test_omdb_without_key_does_nothing(self):
+        omdb = metadata.Omdb('')
+        self.assertFalse(omdb)
+        self.assertEqual(omdb.lookup('Dune'), {})
 
 
 class PlayerAccountTests(unittest.TestCase):
@@ -966,6 +987,56 @@ class HTTPTests(unittest.TestCase):
         handler = app.Handler.__new__(app.Handler)
         self.assertEqual(handler._episode_source('p', 904)[0]['title'], 'The Winter King S01E04')
         self.assertEqual(handler._episode_source('p', 905)[0]['title'], 'The Winter King S01E05 — La bataille')
+    VOD_INFO = {'movie_data': {'container_extension': 'mkv'},
+                'info': {'o_name': 'The Dunes (2019)', 'releasedate': '2019-11-01', 'genre': 'Thriller, Drama',
+                         'director': 'Grant Mohrman', 'cast': 'Barton Bund', 'rating': '6.2', 'duration': '01:28:00',
+                         'backdrop_path': ['https://image.tmdb.org/t/p/original/uo863.jpg'], 'plot': 'Un resume',
+                         'youtube_trailer': 'Mdf9-rSDHwY'}}
+    def seed_movie(self):
+        self.state.catalog._db.execute("INSERT INTO vod(provider_id,stream_id,name,title,lang) VALUES ('p',7,'EN| The Dunes - 2019','The Dunes','EN')")
+        self.state.catalog._db.commit()
+        self.state.client.return_value.vod_info.return_value = self.VOD_INFO
+    def test_movie_sheet_keeps_the_panel_details_and_relays_the_backdrop(self):
+        self.seed_movie()
+        cookie = self.login()
+        info = json.loads(self.request('/api/vod/info?provider=p&id=7', cookie=cookie).read())
+        extra = info['extra']
+        self.assertEqual((extra['year'], extra['genre'], extra['rating'], extra['original_title']),
+                         ('2019', 'Thriller, Drama', 6.2, 'The Dunes'))
+        # Taille raisonnable plutot que l'original de plusieurs Mo.
+        self.assertEqual(extra['backdrop'], 'https://image.tmdb.org/t/p/w1280/uo863.jpg')
+        self.assertTrue(self.state.catalog.has_icon(extra['backdrop_small']))
+        # Lue une fois : la fiche suivante ne rappelle pas le panel.
+        self.request('/api/vod/info?provider=p&id=7', cookie=cookie).read()
+        self.assertEqual(self.state.client.return_value.vod_info.call_count, 1)
+        # L'historique porte l'image de fond, pour l'affiche de l'accueil.
+        self.request('/api/history', {'kind': 'movie', 'provider': 'p', 'id': 7, 'position': 600}, cookie=cookie)
+        item = json.loads(self.request('/api/history', cookie=cookie).read())['items'][0]
+        self.assertEqual(item['backdrop'], extra['backdrop'])
+    def test_ratings_come_from_omdb_once(self):
+        self.seed_movie()
+        cookie = self.login()
+        answer = {'Response': 'True', 'imdbID': 'tt9', 'imdbRating': '6.8', 'Poster': 'https://m.media-amazon.com/p.jpg',
+                  'Ratings': [{'Source': 'Rotten Tomatoes', 'Value': '81%'}], 'Awards': 'N/A'}
+        calls = []
+        class Reply(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def opener(url, timeout):
+            calls.append(url)
+            return Reply(json.dumps(answer).encode())
+        self.state.omdb = metadata.Omdb('cle', opener=opener)
+        # Fiche du panel pas encore lue : pas d'appel OMDb.
+        self.assertEqual(json.loads(self.request('/api/ratings?provider=p&id=7', cookie=cookie).read()), {})
+        self.request('/api/vod/info?provider=p&id=7', cookie=cookie).read()
+        ratings = json.loads(self.request('/api/ratings?provider=p&id=7', cookie=cookie).read())
+        self.assertEqual((ratings['imdb_rating'], ratings['rotten_tomatoes']), ('6.8', '81%'))
+        self.assertNotIn('awards', ratings)
+        self.assertIn('t=The+Dunes', calls[0])
+        self.assertIn('y=2019', calls[0])
+        self.assertTrue(self.state.catalog.has_icon('https://m.media-amazon.com/p.jpg'))
+        self.request('/api/ratings?provider=p&id=7', cookie=cookie).read()
+        self.assertEqual(len(calls), 1)
     def test_remember_me_controls_cookie_lifetime(self):
         kept = self.request('/api/login', {'token': 'test-admin', 'remember': True})
         self.assertIn('Max-Age=604800', kept.headers['Set-Cookie'])

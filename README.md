@@ -50,6 +50,10 @@ abonnement IPTV ──▶ Streamly (FFmpeg, à la demande) ──▶ interface w
 - Actualiser la page ramène au même onglet et propose de reprendre la lecture
   en cours ; les sessions survivent à un redémarrage du serveur.
 - Favoris, recherche, PWA installable, mini-lecteur, plein écran.
+- Fiches enrichies : image de fond, genre, année, réalisation, distribution et
+  bande-annonce lues dans la fiche TMDB que renvoie le panel ; notes IMDb,
+  Rotten Tomatoes et Metacritic si une clé OMDb (gratuite) est configurée
+  (`omdb_api_key`).
 - Films et épisodes lisibles immédiatement, pendant que le serveur les compresse
   (choix de la qualité, de l'audio et des sous-titres texte) : on peut avancer
   n'importe où dans le film, l'encodage repart de ce point. Une fois la
@@ -143,6 +147,7 @@ Les principales :
 | `public_url`, `trust_proxy`, `secure_cookies`, `listen_host` | Publication derrière un proxy HTTPS. |
 | `epg_refresh_hours` | Fréquence de reconstruction du guide des programmes. |
 | `catalog_refresh_hours` | Actualisation des catalogues, toutes les 6 h par défaut ; minimum 1 h, `0` désactive la périodicité. |
+| `omdb_api_key` | Clé OMDb (omdbapi.com) : notes IMDb, Rotten Tomatoes et Metacritic dans les fiches. Vide = sans notes. |
 | `relay_allow_private` | Autorise l'application à faire compresser une source du réseau local (moteur domestique uniquement). |
 
 ## Sécurité

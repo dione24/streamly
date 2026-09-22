@@ -541,6 +541,8 @@ dialog.confirm p { margin-top: 8px; font-size: 0.9rem; line-height: 1.5; }
 }
 .billboard-scene > img { position: absolute; inset: -40px; width: calc(100% + 80px); height: calc(100% + 80px); object-fit: cover; filter: blur(34px) saturate(1.3); opacity: 0; transform: scale(1.05); transition: opacity 0.6s; }
 .billboard-scene > img.ready { opacity: 0.62; }
+.billboard-scene > img.sharp { inset: 0; width: 100%; height: 100%; object-position: center 22%; filter: none; transform: none; }
+.billboard-scene > img.sharp.ready { opacity: 1; }
 .billboard::before { content: ""; position: absolute; inset: 0; z-index: -1;
   background:
     linear-gradient(90deg, rgba(8, 8, 15, 0.94) 0%, rgba(8, 8, 15, 0.6) 42%, rgba(8, 8, 15, 0.05) 78%),
@@ -607,6 +609,7 @@ dialog.confirm p { margin-top: 8px; font-size: 0.9rem; line-height: 1.5; }
 .card.wide { width: 250px; }
 .card.wide .art { aspect-ratio: 16 / 9; }
 .card.wide .art > img { object-position: center 28%; }
+.card.wide .art.landscape > img { object-position: center; }
 .card.wide .art .art-title { font-size: 1.3rem; }
 .card.wide .art .bar, .card.poster .art .bar, .job .art .bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; height: 3px; border-radius: 0; background: rgba(0, 0, 0, 0.55); }
 .card.wide .art .bar > span, .card.poster .art .bar > span, .job .art .bar > span { border-radius: 0; background: linear-gradient(90deg, var(--violet), #c084fc); }
@@ -752,8 +755,11 @@ dialog.sheet > form { position: absolute; top: 12px; right: 12px; z-index: 5; }
 .dialog-close { width: 34px; min-height: 34px; padding: 0; border-radius: 50%; background: rgba(8, 8, 15, 0.6); color: #fff; font-size: 0.8rem; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
 .sheet-art { position: relative; height: 190px; overflow: hidden; isolation: isolate; }
 .sheet-art > .art:not(.sheet-poster) { position: absolute; inset: 0; box-shadow: none; }
-.sheet-art > .art:not(.sheet-poster) > img { filter: blur(26px) saturate(1.3); transform: scale(1.2); }
-.sheet-art > .art:not(.sheet-poster) > img.ready { opacity: 0.7; }
+.sheet-art > .art:not(.sheet-poster):not(.sharp) > img { filter: blur(26px) saturate(1.3); transform: scale(1.2); }
+.sheet-art > .art:not(.sheet-poster):not(.sharp) > img.ready { opacity: 0.7; }
+.sheet-art.has-backdrop { height: 260px; }
+.sheet-art.has-backdrop .sheet-poster { display: none; }
+.sheet-art > .art.sharp > img { object-position: center 20%; }
 .sheet-art > .art:not(.sheet-poster) .art-title { display: none; }
 .sheet-art::after { content: ""; position: absolute; inset: 0; z-index: 1; background: linear-gradient(0deg, #12121c 2%, rgba(18, 18, 28, 0.2) 70%); }
 .sheet-poster { position: absolute; z-index: 2; left: 24px; bottom: 14px; width: 92px; aspect-ratio: 2 / 3; border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.1); }
@@ -765,6 +771,15 @@ dialog.sheet > :not(form):not(.sheet-art) { margin-left: 24px; margin-right: 24p
 .sheet-head .muted { font-size: 0.84rem; }
 .sheet-plot { margin-top: 12px; font-size: 0.9rem; line-height: 1.55; color: rgba(235, 232, 250, 0.82); display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
 .sheet-plot:empty { display: none; }
+.scores { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.score { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 4px; border-radius: 7px; background: rgba(255, 255, 255, 0.08); font-size: 0.82rem; font-weight: 700; }
+.score b { padding: 1px 5px; border-radius: 4px; font-size: 0.66rem; font-weight: 800; letter-spacing: 0.02em; background: rgba(255, 255, 255, 0.16); }
+.score.imdb b { background: #f5c518; color: #000; }
+.score.rt b { background: #fa320a; color: #fff; }
+.score.tmdb b { background: var(--violet-deep); color: #fff; }
+.credits { margin-top: 10px; font-size: 0.8rem; line-height: 1.5; color: var(--muted); }
+a.btn-ghost { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border-radius: 8px; font-weight: 600; }
+#series-trailer { margin-top: 14px; min-height: 36px; padding: 0 16px; font-size: 0.84rem; }
 #movie-dialog > label, #series-dialog > label { margin-top: 18px; }
 #movie-estimate, #movie-note { margin-top: 8px; font-size: 0.78rem; color: var(--faint); }
 #check-tracks { margin-top: 12px; background: transparent; color: var(--accent); padding: 0; min-height: 28px; }

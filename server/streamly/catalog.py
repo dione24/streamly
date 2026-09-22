@@ -138,6 +138,12 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS idx_history_recent ON history(account, updated);
 
+-- Images de fiche (fond, affiche OMDb) que le relais d'images peut servir,
+-- en plus des logos et affiches du catalogue.
+CREATE TABLE IF NOT EXISTS artwork (
+    url TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     provider_id TEXT PRIMARY KEY,
     last_sync   INTEGER,
@@ -158,6 +164,11 @@ class Catalog:
         if 'url' not in {r['name'] for r in self._db.execute('PRAGMA table_info(channels)')}:
             with self._db:
                 self._db.execute('ALTER TABLE channels ADD COLUMN url TEXT')
+        # Fiche enrichie (JSON) : fond, genre, annee, notes. NULL = jamais lue.
+        for table in ('vod', 'series'):
+            if 'extra' not in {r['name'] for r in self._db.execute('PRAGMA table_info(%s)' % table)}:
+                with self._db:
+                    self._db.execute('ALTER TABLE %s ADD COLUMN extra TEXT' % table)
         if self._db.execute('PRAGMA user_version').fetchone()[0] < 1:
             rows = self._db.execute('SELECT provider_id, stream_id, name FROM channels').fetchall()
             with self._db:
@@ -426,11 +437,37 @@ class Catalog:
             "GROUP BY lang ORDER BY n DESC")
         return [dict(r) for r in cur.fetchall()]
 
+    @staticmethod
+    def _with_extra(row):
+        if not row:
+            return None
+        item = dict(row)
+        raw = item.get('extra')
+        try:
+            item['extra'] = json.loads(raw) if raw else ({} if raw == '' else None)
+        except ValueError:
+            item['extra'] = {}
+        return item
+
+    def _set_extra(self, table, key, provider_id, item_id, extra):
+        from .metadata import images_of
+        with self._db:
+            self._db.execute("UPDATE %s SET extra=? WHERE provider_id=? AND %s=?" % (table, key),
+                             (json.dumps(extra or {}, ensure_ascii=False), provider_id, int(item_id)))
+            self._db.executemany("INSERT OR IGNORE INTO artwork(url) VALUES (?)",
+                                 [(u,) for u in images_of(extra or {})])
+
+    def vod_set_extra(self, provider_id, stream_id, extra):
+        self._set_extra('vod', 'stream_id', provider_id, stream_id, extra)
+
+    def series_set_extra(self, provider_id, series_id, extra):
+        self._set_extra('series', 'series_id', provider_id, series_id, extra)
+
     def series_get(self, provider_id, series_id):
         row = self._db.execute(
             "SELECT * FROM series WHERE provider_id=? AND series_id=?",
             (provider_id, int(series_id))).fetchone()
-        return dict(row) if row else None
+        return self._with_extra(row)
 
     def series_episodes(self, provider_id, series_id):
         cur = self._db.execute(
@@ -501,8 +538,7 @@ class Catalog:
         cur = self._db.execute(
             "SELECT * FROM vod WHERE provider_id=? AND stream_id=?",
             (provider_id, int(stream_id)))
-        row = cur.fetchone()
-        return dict(row) if row else None
+        return self._with_extra(cur.fetchone())
 
     def vod_set_details(self, provider_id, stream_id, container, bitrate,
                         duration, plot):
@@ -615,7 +651,8 @@ class Catalog:
         """Vrai si cette adresse est le logo ou l'affiche d'une entree du catalogue."""
         row = self._db.execute(
             "SELECT 1 FROM channels WHERE icon=?1 UNION ALL SELECT 1 FROM vod WHERE icon=?1 "
-            "UNION ALL SELECT 1 FROM series WHERE icon=?1 LIMIT 1", (url,)).fetchone()
+            "UNION ALL SELECT 1 FROM series WHERE icon=?1 UNION ALL SELECT 1 FROM artwork WHERE url=?1 LIMIT 1",
+            (url,)).fetchone()
         return row is not None
 
     def signature(self):

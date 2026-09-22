@@ -1889,7 +1889,8 @@ function cardHit(label, visual, onPlay) {
 // Continuer a regarder : format paysage, progression au pied de l'image.
 function wideCard(item) {
   const d = item.data || {};
-  const art = artwork(item.icon, item.title);
+  // Image de fond au format paysage si on l'a, sinon l'affiche recadree.
+  const art = artwork(item.backdrop_small || item.icon, item.title, item.backdrop_small ? 'landscape' : '');
   art.append(bar(item.duration > 0 ? item.position / item.duration : 0.05));
   const sub = [item.kind === 'episode' ? seasonEpisode(d.season, d.episode) : '', progressLine(item)].filter(Boolean).join(' · ');
   const card = el('article', 'card wide');
@@ -2002,8 +2003,13 @@ function renderHero(hero) {
   const d = item.data || {};
   const scene = paint(el('div', 'billboard-scene'), item.title);
   scene.setAttribute('aria-hidden', 'true');
-  const backdrop = imageFor(item.icon);
-  if (backdrop) scene.append(backdrop);
+  // Image de fond de la fiche (TMDB) en plein cadre ; a defaut, l'affiche floutee.
+  const backdropUrl = type === 'next' ? (next.backdrop || item.backdrop) : item.backdrop;
+  const backdrop = imageFor(backdropUrl || item.icon);
+  if (backdrop) {
+    if (backdropUrl) backdrop.classList.add('sharp');
+    scene.append(backdrop);
+  }
   const body = el('div', 'billboard-body');
   const kicker = el('p', 'kicker');
   const actions = el('div', 'billboard-actions');
@@ -2056,7 +2062,27 @@ function renderHero(hero) {
   body.append(kicker, el('h1', '', title), meta);
   if (progress) body.append(progress);
   body.append(actions);
-  box.append(scene, poster, body);
+  box.append(scene);
+  if (!backdropUrl) box.append(poster);
+  box.append(body);
+  // Fiche jamais ouverte : on va chercher son image de fond, sans attendre.
+  if (!backdropUrl && type !== 'live') {
+    fetchBackdrop(item).then(url => {
+      if (!url || !scene.isConnected) return;
+      const img = imageFor(url);
+      img.classList.add('sharp');
+      scene.replaceChildren(img);
+      poster.remove();
+    });
+  }
+}
+
+function fetchBackdrop(item) {
+  const d = item.data || {};
+  const path = item.kind === 'movie'
+    ? '/vod/info?provider=' + encodeURIComponent(d.provider_id) + '&id=' + d.stream_id
+    : '/series/info?provider=' + encodeURIComponent(d.provider_id) + '&id=' + d.series_id;
+  return api(path, {skipAuthRedirect: true}).then(info => (info.extra || {}).backdrop).catch(() => null);
 }
 
 async function renderHome() {
@@ -2224,8 +2250,59 @@ $('#resume-close').onclick = () => { hideResume(); tabStore.remove('playing'); }
 
 // Dialog films
 // Bandeau d'une fiche : l'affiche floutee en fond, l'affiche nette devant.
-function sheetArt(selector, icon, title) {
-  $(selector).replaceChildren(artwork(icon, title), artwork(icon, title, 'sheet-poster'));
+// Avec une image de fond (fiche TMDB du panel), elle remplace l'affiche floutee.
+function sheetArt(selector, icon, title, backdrop) {
+  const back = backdrop ? artwork(backdrop, title, 'sharp') : artwork(icon, title);
+  $(selector).classList.toggle('has-backdrop', !!backdrop);
+  $(selector).replaceChildren(back, artwork(icon, title, 'sheet-poster'));
+}
+
+// Annee, genres, duree : la ligne d'une fiche de streaming.
+function sheetDetails(extra, duration, more = []) {
+  const genres = String((extra || {}).genre || '').split(/\s*,\s*/).filter(Boolean).slice(0, 2).join(', ');
+  return [(extra || {}).year, genres, readableDuration(duration), ...more].filter(Boolean).join(' · ');
+}
+
+function score(label, value, cls) {
+  const s = el('span', 'score ' + cls);
+  s.append(el('b', '', label), document.createTextNode(' ' + value));
+  return s;
+}
+
+function showScores(box, extra, omdb) {
+  box.replaceChildren();
+  if (omdb.imdb_rating) box.append(score('IMDb', omdb.imdb_rating, 'imdb'));
+  if (omdb.rotten_tomatoes) box.append(score('Rotten Tomatoes', omdb.rotten_tomatoes, 'rt'));
+  if (omdb.metacritic) box.append(score('Metacritic', omdb.metacritic.split('/')[0], 'mc'));
+  if (!box.children.length && extra.rating) box.append(score('Note', extra.rating + '/10', 'tmdb'));
+  if (omdb.rated) box.append(el('span', 'pill', omdb.rated));
+  box.hidden = !box.children.length;
+}
+
+function showCredits(node, extra) {
+  const cast = String(extra.cast || '').split(/\s*,\s*/).filter(Boolean).slice(0, 4).join(', ');
+  node.textContent = [extra.director ? 'Réalisation : ' + extra.director : '', cast ? 'Avec ' + cast : ''].filter(Boolean).join('  ·  ');
+  node.hidden = !node.textContent;
+}
+
+function showTrailer(link, extra) {
+  link.hidden = !extra.trailer;
+  if (extra.trailer) link.href = 'https://www.youtube.com/watch?v=' + encodeURIComponent(extra.trailer);
+}
+
+// Notes OMDb : demandees apres l'ouverture, pour ne pas la retarder.
+function loadScores(kind, item, box, sheet, title) {
+  const extra = item.extra || {};
+  showScores(box, extra, {});
+  const token = (state.scoreToken = (state.scoreToken || 0) + 1);
+  const id = kind === 'series' ? item.series_id : item.stream_id;
+  api('/ratings?kind=' + kind + '&provider=' + encodeURIComponent(item.provider_id) + '&id=' + id, {skipAuthRedirect: true})
+    .then(omdb => {
+      if (token !== state.scoreToken) return;
+      showScores(box, extra, omdb || {});
+      // Pas d'affiche chez le fournisseur : celle d'OMDb.
+      if (!item.icon && omdb && omdb.poster) sheetArt(sheet, omdb.poster, title, extra.backdrop);
+    }).catch(() => {});
 }
 
 async function seriesDialog(show) {
@@ -2234,6 +2311,9 @@ async function seriesDialog(show) {
   sheetArt('#series-art', show.icon, show.title || show.name);
   $('#series-details').textContent = '';
   $('#series-plot').textContent = '';
+  $('#series-ratings').hidden = true;
+  $('#series-credits').hidden = true;
+  $('#series-trailer').hidden = true;
   $('#series-message').textContent = 'Chargement des saisons…';
   $('#series-episodes').replaceChildren();
   $('#series-season-field').hidden = true;
@@ -2247,12 +2327,16 @@ async function seriesDialog(show) {
   }
   const seasons = info.seasons || [];
   $('#series-title').textContent = info.title || show.title;
-  if (info.icon !== show.icon || !show.title) sheetArt('#series-art', info.icon || show.icon, info.title || show.title);
+  const extra = info.extra || {};
+  if (info.icon !== show.icon || !show.title || extra.backdrop) sheetArt('#series-art', info.icon || show.icon, info.title || show.title, extra.backdrop);
   $('#series-plot').textContent = info.plot || '';
-  $('#series-details').textContent = [
+  $('#series-details').textContent = sheetDetails(extra, '', [
     seasons.length ? seasons.length + (seasons.length > 1 ? ' saisons' : ' saison') : '',
     info.episode_count ? info.episode_count + (info.episode_count > 1 ? ' épisodes' : ' épisode') : ''
-  ].filter(Boolean).join(' · ');
+  ]);
+  showCredits($('#series-credits'), extra);
+  showTrailer($('#series-trailer'), extra);
+  loadScores('series', info, $('#series-ratings'), '#series-art', info.title || show.title);
   $('#series-message').textContent = '';
   if (!seasons.length) {
     $('#series-message').textContent = 'Aucun épisode annoncé pour cette série.';
@@ -2316,7 +2400,10 @@ function episodeDialog(show, episode) {
     plot: episode.plot || show.plot || ''
   };
   movieWording('episode');
-  sheetArt('#movie-art', show.icon, show.title);
+  sheetArt('#movie-art', show.icon, show.title, (show.extra || {}).backdrop);
+  $('#movie-ratings').hidden = true;
+  $('#movie-credits').hidden = true;
+  $('#movie-trailer').hidden = true;
   $('#movie-kicker').textContent = 'Épisode · ' + (show.title || '');
   $('#movie-title').textContent = reste ? brut : (show.title || label);
   $('#movie-details').textContent = [seasonEpisode(episode.season, episode.episode), readableDuration(episode.duration)].filter(Boolean).join(' · ');
@@ -2336,6 +2423,9 @@ async function movieDialog(c) {
   $('#movie-message').textContent = 'Chargement des informations…';
   $('#movie-details').textContent = '';
   $('#movie-plot').textContent = '';
+  $('#movie-ratings').hidden = true;
+  $('#movie-credits').hidden = true;
+  $('#movie-trailer').hidden = true;
   $('#track-fields').hidden = true;
   movieButtons(false);
   movieWording('movie');
@@ -2344,8 +2434,12 @@ async function movieDialog(c) {
     const info = await api('/vod/info?provider=' + encodeURIComponent(c.provider_id) + '&id=' + c.stream_id);
     state.movie = {...info, kind: 'movie'};
     $('#movie-title').textContent = info.title;
-    if (info.icon !== c.icon || !c.title) sheetArt('#movie-art', info.icon || c.icon, info.title);
-    $('#movie-details').textContent = [readableDuration(info.duration), info.size_bytes ? 'Source : ≈ ' + size(info.size_bytes) : ''].filter(Boolean).join(' · ');
+    const extra = info.extra || {};
+    if (info.icon !== c.icon || !c.title || extra.backdrop) sheetArt('#movie-art', info.icon || c.icon, info.title, extra.backdrop);
+    $('#movie-details').textContent = sheetDetails(extra, info.duration, [info.size_bytes ? 'Source ≈ ' + size(info.size_bytes) : '']);
+    showCredits($('#movie-credits'), extra);
+    showTrailer($('#movie-trailer'), extra);
+    loadScores('movie', info, $('#movie-ratings'), '#movie-art', info.title);
     $('#movie-plot').textContent = info.plot || '';
     $('#movie-message').textContent = '';
     movieEstimate();

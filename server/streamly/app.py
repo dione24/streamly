@@ -26,6 +26,7 @@ from .vod import Movies
 from .m3u import M3UClient, PlaylistError, detect_xtream
 from .xtream import XtreamClient, parse_series_info
 from .refresh import CatalogRefresh, catalog_due, refresh_seconds
+from .metadata import Omdb, panel_extra, omdb_due
 
 STARTUP_TIMEOUT = 25      # secondes d'attente de la premiere playlist
 ACCESS_LOG = []           # journal d'acces circulaire, expose via /api/access
@@ -152,6 +153,8 @@ class State:
                            self.cfg.get("user_agent", "VLC/3.0.20"),
                            _as_bool(self.cfg.get("relay_allow_private")))
         self.movies = Movies(self.cfg, os.path.join(cfgmod.DATA_DIR, "movies"), self.catalog, self.transcoder)
+        # Notes IMDb / Rotten Tomatoes : seulement si une cle OMDb est configuree.
+        self.omdb = Omdb(self.cfg.get("omdb_api_key"))
         self.sync_lock = threading.Lock()
         self.sync_log = []
         self._details, self._details_lock = {}, threading.Lock()
@@ -984,6 +987,31 @@ class Handler(BaseHTTPRequestHandler):
         return dict(kind=kind, ref='%s:%d' % (pid, sid), grp=grp, title=title, icon=icon,
                     data=data, position=position, duration=duration, finished=finished)
 
+    def _ratings(self, kind, pid, iid):
+        """Notes OMDb d'un film ou d'une serie, demandees une fois puis gardees."""
+        cat = STATE.catalog
+        row = cat.series_get(pid, iid) if kind == 'series' else cat.vod_get(pid, iid)
+        # Fiche du panel pas encore lue : on ne la masquerait qu'a moitie.
+        if not row or row.get('extra') is None:
+            return {}
+        extra = row['extra']
+        omdb = getattr(STATE, 'omdb', None)
+        if omdb and omdb_due(extra):
+            try:
+                found = omdb.lookup(extra.get('original_title') or row.get('title') or row.get('name'),
+                                    extra.get('year'), kind)
+            except Exception:
+                found = None                     # reseau : on reessaiera a la prochaine fiche
+            if found is not None:
+                extra = dict(extra, omdb=found, omdb_at=int(time.time()))
+                (cat.series_set_extra if kind == 'series' else cat.vod_set_extra)(pid, iid, extra)
+        return extra.get('omdb') or {}
+
+    def _backdrop(self, kind, pid, iid):
+        row = STATE.catalog.series_get(pid, iid) if kind == 'series' else STATE.catalog.vod_get(pid, iid)
+        extra = (row or {}).get('extra') or {}
+        return {k: extra[k] for k in ('backdrop', 'backdrop_small') if extra.get(k)}
+
     def _history(self, account):
         """Historique du compte, et l'episode a suivre de chaque serie terminee."""
         configured = {p.get('id') for p in STATE.cfg.get('providers', [])}
@@ -992,6 +1020,12 @@ class Handler(BaseHTTPRequestHandler):
             pid = item['data'].get('provider_id')
             if item['kind'] != 'live' and pid not in configured:
                 continue
+            # Image de fond de la fiche, si elle a deja ete lue : l'accueil en
+            # fait son affiche plein cadre.
+            if item['kind'] == 'movie':
+                item.update(self._backdrop('movie', pid, item['data'].get('stream_id')))
+            elif item['kind'] == 'episode' and item['data'].get('series_id') is not None:
+                item.update(self._backdrop('series', pid, item['data']['series_id']))
             items.append(item)
             if item['kind'] == 'episode':
                 latest.setdefault(item['grp'], item)
@@ -1003,7 +1037,8 @@ class Handler(BaseHTTPRequestHandler):
             nxt = STATE.catalog.next_episode(d['provider_id'], d['series_id'], d.get('season'), d.get('episode'))
             if nxt:
                 upcoming[grp] = dict(nxt, provider_id=d['provider_id'], series_id=d['series_id'],
-                                     height=d.get('height'), series_title=item['title'], icon=item['icon'])
+                                     height=d.get('height'), series_title=item['title'], icon=item['icon'],
+                                     **self._backdrop('series', d['provider_id'], d['series_id']))
         return {'items': items, 'next': upcoming}
 
     # --------------------------------------------------------------- API
@@ -1190,18 +1225,25 @@ class Handler(BaseHTTPRequestHandler):
             if not show:
                 return self._err(404, "serie introuvable")
             # Saisons et episodes coutent un appel reseau par serie : on le
-            # fait a l'ouverture de la fiche, puis on le garde.
-            if not show.get("episodes_at"):
+            # fait a l'ouverture de la fiche, puis on le garde. La meme reponse
+            # porte la fiche (fond, genre, annee) : lue une fois aussi.
+            if not show.get("episodes_at") or show.get("extra") is None:
                 provider = STATE.provider(pid)
                 if not provider:
                     return self._err(404, "abonnement introuvable")
                 try:
-                    plot, episodes = parse_series_info(STATE.client(provider).series_info(sid))
+                    payload = STATE.client(provider).series_info(sid)
+                    plot, episodes = parse_series_info(payload)
                 except Exception as exc:
-                    return self._err(502, "episodes indisponibles : %s" % exc)
-                if not episodes:
-                    return self._err(502, "aucun episode annonce pour cette serie")
-                cat.series_set_episodes(pid, sid, plot, episodes)
+                    if not show.get("episodes_at"):
+                        return self._err(502, "episodes indisponibles : %s" % exc)
+                    payload, episodes = None, []
+                if payload is not None:
+                    if episodes:
+                        cat.series_set_episodes(pid, sid, plot, episodes)
+                    elif not show.get("episodes_at"):
+                        return self._err(502, "aucun episode annonce pour cette serie")
+                    cat.series_set_extra(pid, sid, panel_extra((payload or {}).get("info")))
                 show = cat.series_get(pid, sid)
             episodes = cat.series_episodes(pid, sid)
             seasons = {}
@@ -1210,6 +1252,9 @@ class Handler(BaseHTTPRequestHandler):
             show["seasons"] = [{"season": n, "episodes": seasons[n]} for n in sorted(seasons)]
             show["episode_count"] = len(episodes)
             return self._json(show)
+
+        if path == '/api/ratings':
+            return self._json(self._ratings('series' if one('kind') == 'series' else 'movie', one('provider'), one('id')))
 
         if path == "/api/vod/categories":
             return self._json(cat.vod_categories(one("lang")))
@@ -1223,7 +1268,9 @@ class Handler(BaseHTTPRequestHandler):
             # Le conteneur et le debit ne sont pas dans get_vod_streams : il
             # faut un appel par film. On le fait a l'ouverture de la fiche,
             # puis on le garde.
-            if not movie.get("container"):
+            # La meme reponse porte la fiche TMDB (fond, genre, annee...) : les
+            # films lus avant son ajout sont relus une fois pour la recuperer.
+            if not movie.get("container") or movie.get("extra") is None:
                 provider = STATE.provider(pid)
                 if provider:
                     try:
@@ -1231,13 +1278,15 @@ class Handler(BaseHTTPRequestHandler):
                         md = info.get("movie_data") or {}
                         detail = info.get("info") or {}
                         cat.vod_set_details(
-                            pid, sid, md.get("container_extension") or "mp4",
+                            pid, sid, md.get("container_extension") or movie.get("container") or "mp4",
                             int(detail.get("bitrate") or 0),
-                            detail.get("duration") or "",
-                            (detail.get("plot") or detail.get("description") or "")[:1200])
+                            detail.get("duration") or movie.get("duration") or "",
+                            (detail.get("plot") or detail.get("description") or movie.get("plot") or "")[:1200])
+                        cat.vod_set_extra(pid, sid, panel_extra(detail))
                         movie = cat.vod_get(pid, sid)
                     except Exception as exc:
-                        return self._err(502, "metadonnees indisponibles : %s" % exc)
+                        if not movie.get("container"):
+                            return self._err(502, "metadonnees indisponibles : %s" % exc)
 
             movie["size_bytes"] = _estimated_size(movie)
             movie["play_url"] = "/v/session/%s/%s" % (pid, sid)
