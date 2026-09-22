@@ -1,10 +1,9 @@
 'use strict';
 
-const CACHE_NAME = 'streamly-shell-v19';
+const CACHE_NAME = 'streamly-shell-v20';
 const SHELL_ASSETS = [
   '/',
-  '/style.css',
-  '/tv.css',
+  '/app.css',
   '/app.js',
   '/manifest.json',
   '/icon.svg',

@@ -48,7 +48,6 @@ function requireLogin(msg = '') {
   clearInterval(state.jobTimer); clearInterval(state.configTimer); state.jobTimer = null; state.configTimer = null;
   $('#login').hidden = false; $('#app').hidden = true;
   $('#tab-conf').hidden = true;
-  $('#menu-conf').hidden = true;
   $('#login-error').textContent = msg || '';
   $('#token-input').value = '';
   const u = $('#user-input'); if (u) u.value = '';
@@ -118,7 +117,6 @@ function getChannelColor(str) {
 async function connected(role) {
   state.role = role;
   $('#login').hidden = true; $('#app').hidden = false; $('#tab-conf').hidden = role !== 'admin';
-  $('#menu-conf').hidden = role !== 'admin';
   state.favorites = await api('/favorites').catch(() => []);
   await migrateRecents();
   await loadHistory();
@@ -465,7 +463,10 @@ function playbackUI(title, live) {
     updateTelemetryUI();
   }
 
-  $('#live-badge').innerHTML = live ? '<span class="pulse-dot" aria-hidden="true"></span> DIRECT' : '● FILM';
+  $('#live-badge').innerHTML = live ? '<span class="pulse-dot" aria-hidden="true"></span> DIRECT' : 'FILM';
+  $('#live-badge').classList.toggle('film', !live);
+  // Sans liste de chaines a cote (accueil, films), rien a masquer.
+  $('#toggle-sidebar').hidden = !(live && (state.mode === 'live' || state.mode === 'favorites'));
   $('#back-live').hidden = !live;
   $('#player-status').textContent = 'Préparation de la lecture…';
   // L'encodeur met quelques secondes a produire : on le dit, plutot qu'un ecran noir.
@@ -754,12 +755,13 @@ function row(c, kind = 'channel', number = 0) {
   if (!movie && number) button.append(el('span', 'ch-num', String(number)));
   const nameLabel = movie ? c.title : c.label;
   const fallback = (nameLabel || '?').trim().slice(0, 2).toUpperCase();
-  const iconSlot = el('span', 'logo-slot');
-  iconSlot.style.backgroundColor = getChannelColor(nameLabel);
+  // Affiche : l'image du panel, sinon une affiche generee avec le titre.
+  const iconSlot = movie ? artwork(c.icon, nameLabel, 'logo-slot') : el('span', 'logo-slot');
+  if (!movie) iconSlot.style.backgroundColor = getChannelColor(nameLabel);
   const placeholder = el('span', 'logo-placeholder', fallback);
-  iconSlot.append(placeholder);
+  if (!movie) iconSlot.append(placeholder);
 
-  if (c.icon && /^https?:\/\//.test(c.icon)) {
+  if (!movie && c.icon && /^https?:\/\//.test(c.icon)) {
     // Les logos viennent de serveurs tiers, lents, et souvent en http (bloques
     // sur une page https). Le serveur les relaie et les garde : la vignette
     // s'affiche tout de suite, le logo la remplace quand il arrive.
@@ -1149,6 +1151,7 @@ async function setMode(mode, {route = true} = {}) {
   $('#catalogue').hidden = mode === 'prepared' || mode === 'home';
   $('#filters').hidden = mode === 'favorites' || mode === 'prepared' || mode === 'home';
   $('#recent-wrap').hidden = mode !== 'live' || !recentChannels().length;
+  if (mode === 'live') renderRecents();
   
   const modeClass = 'mode-' + (mode === 'favorites' ? 'favorites' : mode);
   document.body.classList.remove('mode-home', 'mode-live', 'mode-vod', 'mode-series', 'mode-favorites', 'mode-prepared');
@@ -1157,8 +1160,8 @@ async function setMode(mode, {route = true} = {}) {
   ['home', 'live', 'vod', 'series', 'fav', 'prepared'].forEach(k => {
     $('#tab-' + k).classList.toggle('active', (k === 'fav' ? 'favorites' : k) === mode);
   });
-  $('#catalogue-title').textContent = {live: 'À l’antenne.', vod: 'Une soirée cinéma.',
-    series: 'Vos séries.', favorites: 'Vos incontournables.'}[mode] || '';
+  $('#catalogue-title').textContent = {live: 'Direct', vod: 'Films', series: 'Séries', favorites: 'Ma liste'}[mode] || '';
+  document.body.classList.toggle('scrolled', mode === 'home' && $('#home').scrollTop > 40);
   $('#search').placeholder = {vod: 'Rechercher un film…', series: 'Rechercher une série…'}[mode]
     || 'Rechercher une chaîne…';
   
@@ -1189,7 +1192,7 @@ async function openSettings() {
   // masques, et on efface l'instantane qu'on vient tout juste de constituer.
   restoreSettingsSnapshot();
   document.body.classList.add('view-config');
-  $$('.rail .tab').forEach(t => t.classList.toggle('active', t.id === 'tab-conf'));
+  $$('.topbar .tab, #account-menu button').forEach(t => t.classList.toggle('active', t.id === 'tab-conf'));
   state.configSnapshot = ['#player-wrap', '#preferences', '#recent-wrap', '#catalogue', '#preparations', '#filters', '#idle-hero', '#home']
     .map(id => {
       const element = $(id);
@@ -1463,85 +1466,176 @@ function episodeTitle(title, code) {
   return raw;
 }
 
-function artwork(url, label, className = 'home-art') {
-  const slot = el('span', className);
-  slot.style.backgroundColor = getChannelColor(label);
-  slot.append(el('span', 'logo-placeholder', (label || '?').trim().slice(0, 2).toUpperCase()));
-  if (url && /^https?:\/\//.test(url)) {
-    const img = el('img');
-    img.src = '/api/logo?u=' + encodeURIComponent(url);
-    img.alt = '';
-    img.loading = 'lazy';
-    img.decoding = 'async';
-    img.onload = () => img.classList.add('ready');
-    img.onerror = () => img.remove();
-    slot.append(img);
-  }
-  return slot;
+// Illustration : l'image du panel quand elle existe, sinon un degrade tire
+// du titre et le titre en lettres d'affiche. Jamais de case vide.
+const ART_PALETTES = [
+  ['#2a1850', '#8b5cf6', '#120a24'], ['#12203a', '#3e7bd6', '#070d18'], ['#3a2410', '#e39b3a', '#170d05'],
+  ['#3b1630', '#e0567d', '#1a0a16'], ['#321212', '#d74a3c', '#140606'], ['#1b2440', '#6f8fd8', '#0e1326'],
+  ['#2a1433', '#b45fd6', '#10071a'], ['#3a2a10', '#f0b04a', '#170f05'], ['#112a3a', '#3fa7d6', '#06121a'],
+  ['#2e1a2a', '#c86b9a', '#120a10'], ['#26262e', '#b8b8c8', '#101014'], ['#301c10', '#d9763a', '#140a05']
+];
+
+function hashOf(text) {
+  let h = 0;
+  for (const ch of String(text || '')) h = (h * 31 + ch.charCodeAt(0)) | 0;
+  return Math.abs(h);
 }
 
-function progressBar(item) {
-  const bar = el('span', 'home-progress');
+function paint(node, title) {
+  const [c1, c2, c3] = ART_PALETTES[hashOf(title) % ART_PALETTES.length];
+  node.style.setProperty('--c1', c1);
+  node.style.setProperty('--c2', c2);
+  node.style.setProperty('--c3', c3);
+  return node;
+}
+
+function imageFor(url, onReady) {
+  if (!url || !/^https?:\/\//.test(url)) return null;
+  const img = el('img');
+  img.src = '/api/logo?u=' + encodeURIComponent(url);
+  img.alt = '';
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  img.onload = () => { img.classList.add('ready'); if (onReady) onReady(); };
+  img.onerror = () => img.remove();
+  return img;
+}
+
+function artwork(url, title, className = '') {
+  const art = paint(el('span', 'art' + (className ? ' ' + className : '')), title);
+  art.append(el('span', 'art-title', title || ''));
+  const img = imageFor(url, () => art.classList.add('has-img'));
+  if (img) art.append(img);
+  return art;
+}
+
+function bar(fraction) {
+  const track = el('span', 'bar');
   const fill = el('span');
-  fill.style.width = (item.duration > 0 ? Math.min(100, item.position / item.duration * 100) : 8) + '%';
-  bar.append(fill);
-  return bar;
+  fill.style.width = Math.max(0, Math.min(1, fraction || 0)) * 100 + '%';
+  track.append(fill);
+  return track;
 }
 
-function removeButton(label, action) {
-  const b = el('button', 'home-remove', '✕');
+// « S3 · É3 » : lisible d'un coup d'oeil, comme sur les applis de streaming.
+function seasonEpisode(season, episode) {
+  return [season ? 'S' + season : '', episode ? 'É' + episode : ''].filter(Boolean).join(' · ');
+}
+
+// Menu « ⋯ » d'une carte : un seul a la fois, place sous le bouton.
+let cardMenu = null;
+function closeCardMenu() {
+  if (cardMenu) { cardMenu.remove(); cardMenu = null; }
+}
+function openCardMenu(anchor, actions) {
+  closeCardMenu();
+  const menu = el('div', 'card-menu');
+  menu.setAttribute('role', 'menu');
+  actions.forEach(({label, run, danger}) => {
+    const b = el('button', danger ? 'danger' : '', label);
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    b.onclick = () => { closeCardMenu(); Promise.resolve().then(run).catch(failure); };
+    menu.append(b);
+  });
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect(), w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)) + 'px';
+  menu.style.top = (r.bottom + h + 8 > window.innerHeight ? Math.max(8, r.top - h - 6) : r.bottom + 6) + 'px';
+  cardMenu = menu;
+  menu.querySelector('button').focus({preventScroll: true});
+}
+document.addEventListener('click', e => { if (cardMenu && !e.target.closest('.card-menu')) closeCardMenu(); });
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !cardMenu) return;
+  e.stopPropagation();
+  closeCardMenu();
+});
+document.addEventListener('scroll', closeCardMenu, {capture: true, passive: true});
+
+function moreButton(label, actions) {
+  const b = el('button', 'more', '⋯');
   b.type = 'button';
-  b.title = 'Retirer de la liste';
-  b.setAttribute('aria-label', 'Retirer « ' + label + ' » de la liste');
-  b.onclick = e => { e.stopPropagation(); action().catch(failure); };
+  b.setAttribute('aria-label', 'Options : ' + label);
+  b.setAttribute('aria-haspopup', 'menu');
+  b.onclick = e => { e.stopPropagation(); openCardMenu(b, actions); };
   return b;
 }
 
-// Carte d'affiche : film, episode, serie a suivre, film pret.
-function posterCard({title, sub, icon, item, onPlay, onRemove}) {
-  const li = el('li', 'home-card poster');
-  const button = el('button', 'home-card-main');
-  button.type = 'button';
-  button.dataset.navItem = '';
-  const art = artwork(icon, title);
-  if (item) art.append(progressBar(item));
-  art.append(el('span', 'home-play', '▶'));
-  button.append(art, el('span', 'home-card-title', title), el('span', 'home-card-sub', sub || ''));
-  button.onclick = () => onPlay();
-  li.append(button);
-  if (onRemove) li.append(removeButton(title, onRemove));
-  return li;
+function cardLine(title, sub, more) {
+  const line = el('div', 'card-line');
+  const text = el('div', 'card-text');
+  text.append(el('div', 'card-title', title || ''), el('div', 'card-sub', sub || ''));
+  line.append(text);
+  if (more) line.append(more);
+  return line;
 }
 
-function channelCard(c, onRemove) {
-  const li = el('li', 'home-card channel');
-  const button = el('button', 'home-card-main');
-  button.type = 'button';
-  button.dataset.navItem = '';
-  const meta = el('span', 'home-card-meta');
-  meta.append(el('span', 'home-card-title', c.label || c.canonical));
-  const now = el('span', 'home-card-sub epg-now', [c.category, c.lang].filter(Boolean).join(' · ') || 'Direct');
-  if (c.epg_id) now.dataset.epgId = c.epg_id;
-  meta.append(now);
-  button.append(artwork(c.icon, c.label, 'home-logo'), meta);
-  button.onclick = () => play(c).catch(failure);
-  button.ondblclick = () => fullscreenWhenReady();
-  li.append(button);
-  if (onRemove) li.append(removeButton(c.label, onRemove));
-  return li;
+function cardHit(label, visual, onPlay) {
+  const b = el('button', 'card-hit');
+  b.type = 'button';
+  b.dataset.navItem = '';
+  b.setAttribute('aria-label', label);
+  b.append(visual);
+  b.onclick = () => Promise.resolve().then(onPlay).catch(failure);
+  return b;
+}
+
+// Continuer a regarder : format paysage, progression au pied de l'image.
+function wideCard(item) {
+  const d = item.data || {};
+  const art = artwork(item.icon, item.title);
+  art.append(bar(item.duration > 0 ? item.position / item.duration : 0.05));
+  const sub = [item.kind === 'episode' ? seasonEpisode(d.season, d.episode) : '', progressLine(item)].filter(Boolean).join(' · ');
+  const card = el('article', 'card wide');
+  card.append(
+    cardHit('Reprendre ' + itemLabel(item), art, () => resumeWatch(item)),
+    cardLine(item.title, sub, moreButton(item.title, [
+      {label: 'Reprendre depuis le début', run: () => resumeWatch(item, true)},
+      {label: 'Retirer de la liste', run: () => forget(item), danger: true}
+    ])));
+  return card;
+}
+
+function posterCard({title, sub, icon, badge, label, onPlay, item, actions}) {
+  const art = artwork(icon, title);
+  if (badge) art.append(el('span', 'badge', badge));
+  if (item && item.duration > 0) art.append(bar(item.position / item.duration));
+  const card = el('article', 'card poster');
+  card.append(cardHit(label || title, art, onPlay), cardLine(title, sub, actions ? moreButton(title, actions) : null));
+  return card;
+}
+
+// Chaine : vignette 16:9, logo au centre, programme en cours dessous.
+function channelTile(c, actions) {
+  const tile = paint(el('div', 'tile'), c.label);
+  tile.append(el('span', 'live-dot', 'DIRECT'), el('span', 'brand', c.label || c.canonical));
+  const img = imageFor(c.icon, () => tile.classList.add('has-img'));
+  if (img) tile.append(img);
+  const progress = bar(0);
+  progress.hidden = true;
+  tile.append(progress);
+  const card = el('article', 'card channel');
+  if (c.epg_id) card.dataset.epgId = c.epg_id;
+  card.dataset.label = c.label || '';
+  const hit = cardHit('Regarder ' + (c.label || ''), tile, () => play(c));
+  hit.ondblclick = () => fullscreenWhenReady();
+  card.append(hit, cardLine(c.label, [c.category, c.lang].filter(Boolean).join(' · ') || 'Direct',
+    actions ? moreButton(c.label, actions) : null));
+  return card;
 }
 
 function homeRow(title, cards, more) {
   const section = el('section', 'home-row');
-  const head = el('div', 'home-row-head');
-  head.append(el('h3', 'home-row-title', title));
+  const head = el('div', 'row-head');
+  head.append(el('h2', '', title));
   if (more) {
-    const link = el('button', 'quiet home-more', more.label + ' ›');
+    const link = el('button', 'row-more', more.label);
     link.type = 'button';
     link.onclick = () => setMode(more.mode).catch(failure);
     head.append(link);
   }
-  const list = el('ul', 'home-list');
+  const list = el('div', 'rail');
   list.dataset.navRow = '';
   cards.forEach(card => list.append(card));
   section.append(head, list);
@@ -1571,6 +1665,15 @@ function homeSections(data) {
   return {hero, watching, upNext, channels};
 }
 
+function metaLine(parts) {
+  const line = el('div', 'billboard-meta');
+  parts.filter(Boolean).forEach((part, i) => {
+    if (i) line.append(el('span', 'dot'));
+    line.append(typeof part === 'string' ? el('span', '', part) : part);
+  });
+  return line;
+}
+
 async function heroProgram(channel, slot) {
   if (!channel.epg_id) return;
   const guide = await api('/guide/now?ids=' + encodeURIComponent(channel.epg_id), {skipAuthRedirect: true}).catch(() => ({}));
@@ -1580,111 +1683,158 @@ async function heroProgram(channel, slot) {
   slot.textContent = (entry.now ? 'En ce moment : ' : 'À ' + clock(program.start) + ' : ') + program.title;
 }
 
+function openSeriesOf(next, item) {
+  return seriesDialog({provider_id: next.provider_id, series_id: next.series_id, title: item.title, icon: item.icon});
+}
+
+// Grande affiche : la derniere chose regardee, a reprendre en un geste.
 function renderHero(hero) {
   const box = $('#home-hero');
   box.replaceChildren();
   box.hidden = !hero;
   if (!hero) return;
   const {type, item, next} = hero;
-  let kicker, title, detail, icon = item.icon, actions = [];
-  const action = (label, cls, fn) => {
+  const d = item.data || {};
+  const scene = paint(el('div', 'billboard-scene'), item.title);
+  scene.setAttribute('aria-hidden', 'true');
+  const backdrop = imageFor(item.icon);
+  if (backdrop) scene.append(backdrop);
+  const body = el('div', 'billboard-body');
+  const kicker = el('p', 'kicker');
+  const actions = el('div', 'billboard-actions');
+  actions.dataset.navRow = '';
+  const action = (label, cls, fn, aria) => {
     const b = el('button', cls, label);
     b.type = 'button';
     b.dataset.navItem = '';
-    b.onclick = () => fn();
-    actions.push(b);
+    if (aria) b.setAttribute('aria-label', aria);
+    b.onclick = () => Promise.resolve().then(fn).catch(failure);
+    actions.append(b);
+    return b;
   };
-  const detailLine = el('p', 'home-hero-detail muted');
+  let title = item.title, meta, poster, progress = null, menu;
   if (type === 'live') {
     const channel = channelOf(item);
-    kicker = 'REPRENDRE LE DIRECT';
+    kicker.append(el('b', '', 'Reprendre'), document.createTextNode(' · Direct'));
     title = channel.label;
-    detail = [channel.category, channel.lang].filter(Boolean).join(' · ') || 'Chaîne en direct';
-    heroProgram(channel, detailLine).catch(() => {});
-    action('▶ Regarder', 'primary', () => play(channel).catch(failure));
+    const now = el('span', '', '');
+    meta = metaLine([channel.category, channel.lang, now]);
+    heroProgram(channel, now).catch(() => {});
+    poster = paint(el('div', 'billboard-poster art logo'), channel.label);
+    poster.append(el('span', 'art-title', channel.label));
+    const logo = imageFor(item.icon, () => poster.classList.add('has-img'));
+    if (logo) poster.append(logo);
+    action('▶ Regarder', 'btn-play', () => play(channel));
+    menu = [{label: 'Retirer des récents', run: () => forget(item), danger: true}];
   } else if (type === 'next') {
-    const code = episodeCode(next.season, next.episode);
-    kicker = 'SÉRIE · ÉPISODE SUIVANT';
-    title = item.title;
-    detail = [code, episodeTitle(next.title, code)].filter(Boolean).join(' · ') + ' à suivre';
-    action('▶ Lancer ' + (code || 'l’épisode'), 'primary', () => playNext(next));
+    const code = seasonEpisode(next.season, next.episode);
+    kicker.append(el('b', '', 'À suivre'), document.createTextNode(' · Série'));
+    meta = metaLine([code, episodeTitle(next.title, episodeCode(next.season, next.episode)), next.duration ? readableDuration(next.duration) : '']);
+    poster = artwork(item.icon, item.title, 'billboard-poster');
+    action('▶ Lancer ' + (code.replace(' · ', ' ') || 'l’épisode'), 'btn-play', () => playNext(next));
+    action('Épisodes', 'btn-ghost', () => openSeriesOf(next, item));
+    menu = [{label: 'Retirer de l’accueil', run: () => forget(item), danger: true}];
   } else {
-    kicker = item.kind === 'episode' ? 'REPRENDRE LA SÉRIE' : 'REPRENDRE LE FILM';
-    title = itemLabel(item);
-    detail = progressLine(item);
-    action('▶ Reprendre', 'primary', () => resumeWatch(item));
-    action('Depuis le début', 'quiet', () => resumeWatch(item, true));
+    kicker.append(el('b', '', 'Reprendre'), document.createTextNode(item.kind === 'episode' ? ' · Série' : ' · Film'));
+    meta = metaLine([item.kind === 'episode' ? seasonEpisode(d.season, d.episode) : '',
+      item.kind === 'episode' ? d.episode_title && episodeTitle(d.episode_title, episodeCode(d.season, d.episode)) : '',
+      item.duration ? humanDuration(item.duration) : '', d.height ? el('span', 'pill', d.height + 'p') : '']);
+    progress = el('div', 'billboard-progress');
+    progress.append(bar(item.duration > 0 ? item.position / item.duration : 0.05), document.createTextNode(progressLine(item)));
+    poster = artwork(item.icon, item.title, 'billboard-poster');
+    action('▶ Reprendre', 'btn-play', () => resumeWatch(item));
+    action('Depuis le début', 'btn-ghost', () => resumeWatch(item, true));
+    menu = [{label: 'Retirer de l’accueil', run: () => forget(item), danger: true}];
   }
-  action('Retirer', 'quiet', () => forget(item).catch(failure));
-  detailLine.textContent = detail;
-
-  const backdrop = artwork(icon, title, 'home-hero-backdrop');
-  const art = artwork(icon, title, type === 'live' ? 'home-hero-art logo' : 'home-hero-art');
-  const body = el('div', 'home-hero-body');
-  body.append(el('p', 'eyebrow', kicker), el('h1', '', title), detailLine);
-  if (type === 'watch') body.append(progressBar(item));
-  const row = el('div', 'home-hero-actions');
-  row.dataset.navRow = '';
-  actions.forEach(b => row.append(b));
-  box.append(backdrop, art, body, row);
+  const more = action('⋯', 'btn-ghost btn-round', () => {}, 'Plus d’options');
+  more.onclick = e => { e.stopPropagation(); openCardMenu(more, menu); };
+  body.append(kicker, el('h1', '', title), meta);
+  if (progress) body.append(progress);
+  body.append(actions);
+  box.append(scene, poster, body);
 }
 
 async function renderHome() {
   const serial = ++state.homeRender;
   const hour = new Date().getHours();
-  $('#home-greeting').firstChild.textContent = hour >= 5 && hour < 18 ? 'Bonjour' : 'Bonsoir';
+  $('#home-greeting').textContent = hour >= 5 && hour < 18 ? 'Bonjour' : 'Bonsoir';
   const [data, jobs] = await Promise.all([loadHistory(), api('/preparations', {skipAuthRedirect: true}).catch(() => [])]);
   if (serial !== state.homeRender || state.mode !== 'home') return;
   const {hero, watching, upNext, channels} = homeSections(data);
   renderHero(hero);
+  paint($('#home-empty .billboard-scene'), 'Streamly');
+  $('#home-empty').hidden = !!hero;
   const rows = [];
 
   const others = watching.filter(e => e !== hero);
-  if (others.length) {
-    rows.push(homeRow('Continuer à regarder', others.map(({item}) => posterCard({
-      title: itemLabel(item), sub: progressLine(item), icon: item.icon, item,
-      onPlay: () => resumeWatch(item), onRemove: () => forget(item)
-    }))));
-  }
+  if (others.length) rows.push(homeRow('Continuer à regarder', others.map(({item}) => wideCard(item))));
+
   const series = upNext.filter(e => e !== hero);
   if (series.length) {
-    rows.push(homeRow('Séries en cours', series.map(({item, next}) => {
-      const code = episodeCode(next.season, next.episode);
-      return posterCard({title: item.title, sub: (code ? code + ' · ' : '') + 'à suivre', icon: item.icon,
-        onPlay: () => playNext(next), onRemove: () => forget(item)});
-    })));
+    rows.push(homeRow('Séries en cours', series.map(({item, next}) => posterCard({
+      title: item.title, icon: item.icon,
+      sub: [seasonEpisode(next.season, next.episode), episodeTitle(next.title, episodeCode(next.season, next.episode))].filter(Boolean).join(' · '),
+      badge: (next.episode ? 'É' + next.episode : 'Épisode') + ' à suivre',
+      label: 'Lancer ' + item.title + ' ' + episodeCode(next.season, next.episode),
+      onPlay: () => playNext(next),
+      actions: [
+        {label: 'Tous les épisodes', run: () => openSeriesOf(next, item)},
+        {label: 'Retirer de la liste', run: () => forget(item), danger: true}
+      ]
+    }))));
   }
-  const recent = channels.filter(i => !hero || hero.item !== i).slice(0, 12);
+
+  const recent = channels.filter(i => !hero || hero.item !== i).slice(0, 14);
   if (recent.length) {
-    rows.push(homeRow('Chaînes récentes', recent.map(i => channelCard(channelOf(i), () => forget(i))), {label: 'Tout le direct', mode: 'live'}));
+    rows.push(homeRow('En direct', recent.map(i => channelTile(channelOf(i),
+      [{label: 'Retirer des récents', run: () => forget(i), danger: true}])), {label: 'Tout le direct', mode: 'live'}));
   }
+
   if (state.favorites.length) {
-    rows.push(homeRow('Favoris', state.favorites.slice(0, 12).map(c => channelCard(c)), {label: 'Tous les favoris', mode: 'favorites'}));
+    rows.push(homeRow('Ma liste', state.favorites.slice(0, 14).map(c => channelTile(c, [{
+      label: 'Retirer de ma liste', danger: true,
+      run: async () => {
+        await post('/favorites/delete', {lang: c.lang, canonical: c.canonical});
+        state.favorites = await api('/favorites').catch(() => []);
+        await renderHome();
+      }
+    }])), {label: 'Tout voir', mode: 'favorites'}));
   }
-  const ready = jobs.filter(j => j.state === 'ready' || (j.state === 'preparing' && j.playable)).slice(0, 12);
+
+  const ready = jobs.filter(j => j.state === 'ready' || (j.state === 'preparing' && j.playable)).slice(0, 14);
   if (ready.length) {
-    rows.push(homeRow('Films prêts', ready.map(job => {
+    rows.push(homeRow('Prêts hors connexion', ready.map(job => {
       const item = historyItem(watchOfJob(job));
-      const status = job.state === 'ready' ? job.height + 'p · prêt' : job.height + 'p · préparation ' + job.progress + ' %';
-      return posterCard({title: job.title, sub: status, icon: item && item.icon,
-        item: item && !item.finished && item.position >= 120 ? item : null, onPlay: () => playJob(job).catch(failure)});
-    }), {label: 'Tous les films prêts', mode: 'prepared'}));
+      return posterCard({
+        title: job.title, icon: item && item.icon,
+        badge: job.state === 'ready' ? job.height + 'p · ' + size(job.size_bytes) : 'Préparation ' + job.progress + ' %',
+        sub: item && !item.finished && item.position >= 120 ? progressLine(item) : (job.state === 'ready' ? 'Prêt' : 'Lisible pendant la préparation'),
+        item: item && !item.finished && item.position >= 120 ? item : null,
+        onPlay: () => playJob(job)
+      });
+    }), {label: 'Tout voir', mode: 'prepared'}));
   }
   $('#home-rows').replaceChildren(...rows);
-  $('#home-empty').hidden = !!(hero || rows.length);
+
   // Programme en cours sous chaque chaine, depuis le guide en cache.
-  const ids = [...new Set([...$$('#home .epg-now[data-epg-id]')].map(n => n.dataset.epgId))];
+  const tiles = [...$$('#home .card.channel[data-epg-id]')];
+  const ids = [...new Set(tiles.map(t => t.dataset.epgId))];
   if (ids.length) {
     api('/guide/now?ids=' + encodeURIComponent(ids.join(',')), {skipAuthRedirect: true}).then(guide => {
-      $$('#home .epg-now[data-epg-id]').forEach(slot => {
-        const entry = guide[slot.dataset.epgId];
-        if (entry && entry.now) slot.textContent = entry.now.title;
+      tiles.forEach(card => {
+        const entry = guide[card.dataset.epgId];
+        if (!entry || !entry.now) return;
+        card.querySelector('.card-title').textContent = entry.now.title;
+        card.querySelector('.card-sub').textContent = card.dataset.label + ' · ' + clock(entry.now.start);
+        const progress = card.querySelector('.tile .bar');
+        progress.firstChild.style.width = progressOf(entry.now) + '%';
+        progress.hidden = false;
       });
     }).catch(() => {});
   }
 }
 
-// Menu du compte (telephone) : relaie vers les onglets masques de la barre du bas.
+// Menu du compte : Films prets, Reglages, Deconnexion.
 function closeAccountMenu() {
   $('#account-menu').hidden = true;
   $('#account-btn').setAttribute('aria-expanded', 'false');
@@ -1696,10 +1846,17 @@ $('#account-btn').onclick = e => {
   $('#account-btn').setAttribute('aria-expanded', String(open));
   if (open) $('#account-menu button:not([hidden])').focus();
 };
-$$('#account-menu [data-proxy]').forEach(b => {
-  b.onclick = () => { closeAccountMenu(); $('#' + b.dataset.proxy).click(); };
-});
-document.addEventListener('click', e => { if (!$('#account-menu').hidden && !e.target.closest('.mobile-bar')) closeAccountMenu(); });
+// Les entrees du menu gardent leurs propres actions ; le menu se referme.
+$('#account-menu').addEventListener('click', e => { if (e.target.closest('button')) closeAccountMenu(); });
+document.addEventListener('click', e => { if (!$('#account-menu').hidden && !e.target.closest('.top-tools')) closeAccountMenu(); });
+
+// La barre du haut est transparente sur l'affiche de l'accueil, opaque des
+// qu'on fait defiler. Le defilement ne remonte pas : on l'ecoute en capture.
+document.addEventListener('scroll', e => {
+  const box = e.target === document ? document.scrollingElement : e.target;
+  if (!box || (box !== document.scrollingElement && box.id !== 'home')) return;
+  document.body.classList.toggle('scrolled', box.scrollTop > 40);
+}, {capture: true, passive: true});
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape' || $('#account-menu').hidden) return;
   // Sinon Echap fermerait aussi le lecteur.
@@ -1761,9 +1918,15 @@ function clockPosition(seconds) {
 $('#resume-close').onclick = () => { hideResume(); tabStore.remove('playing'); };
 
 // Dialog films
+// Bandeau d'une fiche : l'affiche floutee en fond, l'affiche nette devant.
+function sheetArt(selector, icon, title) {
+  $(selector).replaceChildren(artwork(icon, title), artwork(icon, title, 'sheet-poster'));
+}
+
 async function seriesDialog(show) {
   if (state.mode === 'series') setRoute(routeHash('series', show.provider_id, show.series_id), true);
   $('#series-title').textContent = show.title || show.name || '';
+  sheetArt('#series-art', show.icon, show.title || show.name);
   $('#series-details').textContent = '';
   $('#series-plot').textContent = '';
   $('#series-message').textContent = 'Chargement des saisons…';
@@ -1779,6 +1942,7 @@ async function seriesDialog(show) {
   }
   const seasons = info.seasons || [];
   $('#series-title').textContent = info.title || show.title;
+  if (info.icon !== show.icon || !show.title) sheetArt('#series-art', info.icon || show.icon, info.title || show.title);
   $('#series-plot').textContent = info.plot || '';
   $('#series-details').textContent = [
     seasons.length ? seasons.length + (seasons.length > 1 ? ' saisons' : ' saison') : '',
@@ -1814,7 +1978,7 @@ async function seriesDialog(show) {
       button.append(
         el('span', 'ep-num', numero || '—'),
         el('span', 'ep-title', redundant ? 'Épisode ' + (ep.episode || '?') : raw),
-        el('span', 'ep-dur', ep.duration || '')
+        el('span', 'ep-dur', readableDuration(ep.duration))
       );
       button.onclick = () => {
         $('#series-dialog').close();
@@ -1847,8 +2011,10 @@ function episodeDialog(show, episode) {
     plot: episode.plot || show.plot || ''
   };
   movieWording('episode');
-  $('#movie-title').textContent = label;
-  $('#movie-details').textContent = readableDuration(episode.duration);
+  sheetArt('#movie-art', show.icon, show.title);
+  $('#movie-kicker').textContent = 'Épisode · ' + (show.title || '');
+  $('#movie-title').textContent = reste ? brut : (show.title || label);
+  $('#movie-details').textContent = [seasonEpisode(episode.season, episode.episode), readableDuration(episode.duration)].filter(Boolean).join(' · ');
   $('#movie-plot').textContent = state.movie.plot;
   $('#movie-message').textContent = '';
   $('#track-fields').hidden = true;
@@ -1860,6 +2026,8 @@ function episodeDialog(show, episode) {
 async function movieDialog(c) {
   if (state.mode === 'vod') setRoute(routeHash('vod', c.provider_id, c.stream_id), true);
   $('#movie-title').textContent = c.title || '';
+  $('#movie-kicker').textContent = 'Film';
+  sheetArt('#movie-art', c.icon, c.title);
   $('#movie-message').textContent = 'Chargement des informations…';
   $('#movie-details').textContent = '';
   $('#movie-plot').textContent = '';
@@ -1871,6 +2039,7 @@ async function movieDialog(c) {
     const info = await api('/vod/info?provider=' + encodeURIComponent(c.provider_id) + '&id=' + c.stream_id);
     state.movie = {...info, kind: 'movie'};
     $('#movie-title').textContent = info.title;
+    if (info.icon !== c.icon || !c.title) sheetArt('#movie-art', info.icon || c.icon, info.title);
     $('#movie-details').textContent = [readableDuration(info.duration), info.size_bytes ? 'Source : ≈ ' + size(info.size_bytes) : ''].filter(Boolean).join(' · ');
     $('#movie-plot').textContent = info.plot || '';
     $('#movie-message').textContent = '';
@@ -2017,29 +2186,33 @@ async function watchWhenPlayable(job, start) {
 async function refreshJobs() {
   const jobs = await api('/preparations').catch(() => []);
   $('#jobs').replaceChildren();
-  if (!jobs.length) $('#jobs').append(el('p', 'empty', 'Choisissez un film dans la bibliothèque pour préparer une version plus légère.'));
+  if (!jobs.length) $('#jobs').append(el('p', 'empty', 'Aucun film prêt pour l’instant. Ouvrez un film ou un épisode et choisissez « Préparer sans regarder ».'));
   jobs.forEach(job => {
+    const item = historyItem(watchOfJob(job));
     const card = el('article', 'job');
-    const status = (job.state === 'ready' ? size(job.size_bytes) + ' · prêt à regarder' :
+    const art = artwork(item && item.icon, job.title);
+    if (item && !item.finished && item.duration > 0 && item.position >= 120) art.append(bar(item.position / item.duration));
+    const body = el('div', 'job-body');
+    const status = (job.state === 'ready' ? job.height + 'p · ' + size(job.size_bytes) + ' · prêt' :
       job.state === 'failed' ? (job.error || 'Échec de la préparation.') :
       job.stage === 'subtitles' ? 'Récupération des sous-titres…' :
-      'Préparation sur le serveur · ' + job.progress + ' %' + (job.playable ? ' · lisible dès maintenant' : ''));
-    card.append(el('h3', '', job.title), el('p', 'muted small', job.height + 'p · ' + status));
+      job.height + 'p · préparation ' + job.progress + ' %' + (job.playable ? ' · lisible dès maintenant' : ''));
+    body.append(el('h3', '', job.title), el('p', 'job-status' + (job.state === 'failed' ? ' failed' : ''), status));
     if (job.state === 'preparing') {
       const p = el('progress');
       p.max = 100;
       p.value = job.progress;
       p.setAttribute('aria-label', 'Progression de la préparation');
-      card.append(p);
+      body.append(p);
     }
     const actions = el('div', 'job-actions');
     if (job.state === 'ready' || (job.state === 'preparing' && job.playable)) {
-      const playButton = el('button', 'primary', jobPosition(job) ? 'Reprendre ▶' : 'Regarder ▶');
+      const playButton = el('button', 'primary', jobPosition(job) ? '▶ Reprendre' : '▶ Regarder');
       playButton.onclick = () => playJob(job).catch(failure);
       actions.append(playButton);
     }
     if (job.state === 'ready') {
-      const download = el('a', '', 'Télécharger ↓');
+      const download = el('a', '', 'Télécharger');
       download.href = '/media/' + job.id + '/' + job.download + '?download=1';
       download.setAttribute('download', '');
       actions.append(download);
@@ -2052,7 +2225,8 @@ async function refreshJobs() {
     const remove = el('button', 'quiet', 'Supprimer');
     remove.onclick = () => deletePreparation(job, remove).catch(failure);
     actions.append(remove);
-    if (actions.children.length) card.append(actions);
+    body.append(actions);
+    card.append(art, body);
     $('#jobs').append(card);
   });
 }

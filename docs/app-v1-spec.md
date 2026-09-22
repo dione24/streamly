@@ -136,7 +136,7 @@ Analyse en flux (le fichier peut faire 60 Mo) : `#EXTINF:-1 tvg-id tvg-name tvg-
 
 ### Direction visuelle
 
-Sombre, esprit Netflix / Apple TV, accent violet — identique à l'app web (`web/style.css`) : fond `#0a0a14`, panneaux `#12121f` / `#1a1a2e`, lignes `#262639`, texte `#f5f5fa`, texte secondaire `#9d9db4`, accent `#a78bfa` (survol `#c4b5fd`), dégradé principal `#7c3aed → #a855f7`, danger `#ff7b92`, badge direct rouge `#ff4d5e`. **Pas de vert.** Coins 12–16 px, grandes cibles tactiles (48 dp), focus toujours visible.
+Sombre, esprit Netflix / Apple TV, accent violet — identique à l’app web (`web/app.css`) : fond `#0a0a14`, panneaux `#12121f` / `#1a1a2e`, lignes `#262639`, texte `#f5f5fa`, texte secondaire `#9d9db4`, accent `#a78bfa` (survol `#c4b5fd`), dégradé principal `#7c3aed → #a855f7`, danger `#ff7b92`, badge direct rouge `#ff4d5e`. **Pas de vert.** Coins 12–16 px, grandes cibles tactiles (48 dp), focus toujours visible.
 
 **Télécommande dès le départ** : toute l'app doit se piloter au D-pad (`FocusTraversalGroup`, focus initial sur chaque écran, touches média). C'est ce qui rendra Android TV possible sans réécriture.
 
