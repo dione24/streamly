@@ -938,6 +938,34 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(len(self.history(awa)['items']), 1)
         self.state.cfg['users'] = []
         self.assertEqual(self.history(self.login())['items'], [])
+    def test_web_files_are_compressed_cached_and_revalidated(self):
+        versioned = self.request('/app.js?v=test', headers={'Accept-Encoding': 'gzip'})
+        self.assertEqual(versioned.headers['Content-Encoding'], 'gzip')
+        self.assertIn('immutable', versioned.headers['Cache-Control'])
+        body = gzip.decompress(versioned.read())
+        self.assertEqual(body, pathlib.Path(config.WEB_DIR, 'app.js').read_bytes())
+        # index.html n'est jamais fige : revalide, et 304 s'il n'a pas change.
+        page = self.request('/')
+        self.assertEqual(page.headers['Cache-Control'], 'no-cache')
+        etag = page.headers['ETag']
+        self.assertEqual(self.request('/', headers={'If-None-Match': etag}).status, 304)
+        self.assertEqual(self.request('/', headers={'If-None-Match': '"autre"'}).status, 200)
+    def test_me_reports_the_instance_quality_bound(self):
+        cookie = self.login()
+        self.assertEqual(json.loads(self.request('/api/me', cookie=cookie).read())['max_mode'], 'sport')
+        self.state.cfg['max_mode'] = 'balanced'
+        self.assertEqual(json.loads(self.request('/api/me', cookie=cookie).read())['max_mode'], 'balanced')
+    def test_episode_label_skips_a_title_that_repeats_the_number(self):
+        cat = self.state.catalog
+        cat._db.execute("INSERT INTO series(provider_id,series_id,name,title) VALUES ('p',10,'The Winter King','The Winter King')")
+        cat._db.commit()
+        _, episodes = parse_series_info({'episodes': {'1': [
+            {'id': '904', 'episode_num': '4', 'title': 'S01E04', 'container_extension': 'mkv'},
+            {'id': '905', 'episode_num': '5', 'title': 'La bataille', 'container_extension': 'mkv'}]}})
+        cat.series_set_episodes('p', 10, '', episodes)
+        handler = app.Handler.__new__(app.Handler)
+        self.assertEqual(handler._episode_source('p', 904)[0]['title'], 'The Winter King S01E04')
+        self.assertEqual(handler._episode_source('p', 905)[0]['title'], 'The Winter King S01E05 — La bataille')
     def test_remember_me_controls_cookie_lifetime(self):
         kept = self.request('/api/login', {'token': 'test-admin', 'remember': True})
         self.assertIn('Max-Age=604800', kept.headers['Set-Cookie'])

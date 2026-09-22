@@ -448,6 +448,78 @@ body.mode-vod .skeleton-logo, body.mode-series .skeleton-logo { aspect-ratio: 2 
 .recents button { flex: 0 0 auto; min-height: 32px; font-size: 0.8rem; font-weight: 500; border-radius: 999px; }
 
 /* ====================================================================
+   Commandes du lecteur
+   ==================================================================== */
+.video-stage:fullscreen, .video-stage.is-fullscreen { max-height: none; aspect-ratio: auto; width: 100%; height: 100%; border-radius: 0; box-shadow: none; }
+.video-stage:-webkit-full-screen { max-height: none; width: 100%; height: 100%; border-radius: 0; }
+.player-ui {
+  position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; justify-content: flex-end;
+  opacity: 0; transition: opacity 0.25s; pointer-events: none;
+}
+.video-stage.ui-on .player-ui, .video-stage.paused .player-ui { opacity: 1; }
+.video-stage.ui-on .player-ui > *, .video-stage.paused .player-ui > * { pointer-events: auto; }
+.video-stage:not(.ui-on):not(.paused) { cursor: none; }
+.pui-big {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  display: none; place-items: center; width: 78px; min-height: 78px; padding: 0; border-radius: 50%;
+  background: rgba(8, 8, 15, 0.55); color: #fff; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+}
+.pui-big:hover { background: rgba(8, 8, 15, 0.7); }
+.pui-big:active { transform: translate(-50%, -50%) scale(0.95); }
+.pui-big svg { width: 34px; height: 34px; margin-left: 4px; }
+.video-stage.paused .pui-big { display: grid; }
+.pui-bottom { padding: 48px 14px 10px; background: linear-gradient(0deg, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.45) 55%, rgba(0, 0, 0, 0) 100%); }
+.pui-progress { position: relative; display: flex; align-items: center; height: 20px; margin: 0 4px; cursor: pointer; touch-action: none; }
+.pui-track { position: relative; width: 100%; height: 4px; border-radius: 4px; overflow: hidden; background: rgba(255, 255, 255, 0.22); transition: height 0.15s; }
+.pui-progress:hover .pui-track { height: 6px; }
+.pui-buffered, .pui-played { position: absolute; inset: 0 auto 0 0; width: 0; }
+.pui-buffered { background: rgba(255, 255, 255, 0.32); }
+.pui-played { background: linear-gradient(90deg, var(--violet-deep), #c084fc); }
+.pui-hover {
+  position: absolute; bottom: 24px; transform: translateX(-50%); padding: 3px 8px; border-radius: 6px;
+  background: rgba(8, 8, 15, 0.88); font-size: 0.74rem; font-weight: 600; font-variant-numeric: tabular-nums; pointer-events: none;
+}
+.pui-bar { display: flex; align-items: center; gap: 2px; margin-top: 2px; }
+.pui-btn { width: 40px; min-height: 40px; padding: 0; border-radius: 50%; background: transparent; color: #fff; }
+.pui-btn:hover { background: rgba(255, 255, 255, 0.14); }
+.pui-btn svg { width: 22px; height: 22px; }
+#pui-cc[aria-pressed="false"] { opacity: 0.45; }
+.pui-volume { display: flex; align-items: center; }
+.pui-volume input[type="range"] {
+  width: 0; min-height: 0; height: 4px; padding: 0; margin: 0; border: 0; border-radius: 4px; opacity: 0;
+  background: rgba(255, 255, 255, 0.3); accent-color: #fff; cursor: pointer; transition: width 0.2s, opacity 0.2s, margin 0.2s;
+  -webkit-appearance: none; appearance: none;
+}
+.pui-volume:hover input[type="range"], .pui-volume input[type="range"]:focus-visible { width: 84px; opacity: 1; margin: 0 8px 0 2px; }
+.pui-volume input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: #fff; }
+.pui-volume input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: #fff; }
+.pui-time { margin-left: 8px; font-size: 0.82rem; font-weight: 500; font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, 0.92); white-space: nowrap; }
+.pui-live {
+  min-height: 28px; margin-left: 8px; padding: 0 10px; gap: 6px; border-radius: 6px;
+  background: var(--live); color: #fff; font-size: 0.68rem; font-weight: 800; letter-spacing: 0.06em;
+}
+.pui-live.behind { background: rgba(255, 255, 255, 0.16); }
+.pui-live.behind .pulse-dot { animation: none; opacity: 0.6; }
+.pui-spacer { flex: 1 1 auto; }
+.pui-quality { flex-direction: row; align-items: center; gap: 6px; margin-right: 4px; font-size: 0.78rem; color: rgba(255, 255, 255, 0.75); }
+.pui-quality select {
+  width: auto; min-height: 30px; padding: 0 28px 0 10px; border: 0; border-radius: 7px;
+  background-color: rgba(255, 255, 255, 0.14); background-position: right 9px center; color: #fff; font-size: 0.8rem; font-weight: 600;
+}
+.video-stage.is-live .vod-only, .video-stage.is-live .pui-progress { display: none; }
+.video-stage:not(.is-live) .live-only { display: none; }
+.video-stage.is-live .pui-bottom { padding-top: 56px; }
+
+/* Fenetre de confirmation */
+dialog.confirm { width: min(420px, 92vw); padding: 24px 0 22px; }
+dialog.confirm h2 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em; }
+dialog.confirm p { margin-top: 8px; font-size: 0.9rem; line-height: 1.5; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.confirm-actions button { min-height: 42px; padding: 0 18px; }
+.btn-danger { background: #e5484d; color: #fff; }
+.btn-danger:hover { background: #f25c61; }
+
+/* ====================================================================
    Accueil
    ==================================================================== */
 .home { padding-bottom: 60px; }
@@ -803,6 +875,11 @@ dialog.sheet > :not(form):not(.sheet-art) { margin-left: 24px; margin-right: 24p
   body.is-playing .player { position: sticky; top: calc(var(--top) + env(safe-area-inset-top)); z-index: 20; padding-bottom: 12px; background: var(--bg); }
   body.is-playing .player > :not(.video-stage) { margin: 0 16px; }
   .video-stage { border-radius: 0; max-height: none; box-shadow: none; }
+  .pui-bottom { padding: 36px 6px 4px; }
+  .pui-volume input[type="range"], .pui-quality > span, #pip { display: none; }
+  .pui-btn { width: 36px; min-height: 36px; }
+  .pui-time { font-size: 0.74rem; margin-left: 4px; }
+  .confirm-actions button { flex: 1 1 0; }
   .player-heading h1 { font-size: 1.1rem; }
   .toggle-sidebar-btn { display: none; }
   .telemetry { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -117,11 +117,16 @@ function getChannelColor(str) {
 async function connected(role) {
   state.role = role;
   $('#login').hidden = true; $('#app').hidden = false; $('#tab-conf').hidden = role !== 'admin';
-  state.favorites = await api('/favorites').catch(() => []);
-  await migrateRecents();
-  await loadHistory();
-  await loadFilters();
+  api('/me', {skipAuthRedirect: true}).then(me => applyMaxMode(me.max_mode)).catch(() => {});
   const route = parseRoute();
+  const [favorites] = await Promise.all([
+    api('/favorites').catch(() => []),
+    migrateRecents().then(() => loadHistory())
+  ]);
+  state.favorites = favorites;
+  // Les filtres ne servent qu'aux catalogues : l'accueil s'affiche sans eux.
+  const filters = loadFilters();
+  if (route.mode !== 'home') await filters;
   await setMode(route.mode, {route: false});
   // Normalise l'adresse (#/accueil au premier chargement) sans empiler d'entree.
   window.history.replaceState(null, '', location.hash && route.id ? location.hash : routeHash(route.mode));
@@ -160,7 +165,17 @@ $('#logout').onclick = async () => {
 };
 
 // Preferences
-$('#play-mode').value = store.get('playmode', 'balanced');
+$('#play-mode').value = store.get('playmode', 'sport');
+// L'instance peut etre bornee (max_mode) : on ne propose pas plus haut, sinon
+// le serveur baisserait la qualite sans le dire.
+const MODE_RANK = {eco: 0, balanced: 1, sport: 2};
+function applyMaxMode(max) {
+  const limit = MODE_RANK[max] === undefined ? 2 : MODE_RANK[max];
+  [...$('#play-mode').options].forEach(o => { if (o.value in MODE_RANK) o.hidden = o.disabled = MODE_RANK[o.value] > limit; });
+  const current = $('#play-mode').value;
+  if (current in MODE_RANK && MODE_RANK[current] > limit) $('#play-mode').value = Object.keys(MODE_RANK)[limit];
+  modeHint();
+}
 $('#connection').value = store.get('connection', 'stable');
 function modeHint() {
   const mode = $('#play-mode').value;
@@ -168,7 +183,7 @@ function modeHint() {
   $('#mode-hint').textContent = {
     eco: 'Qualité plafonnée pour préserver votre forfait mobile.',
     balanced: 'Un équilibre optimal entre netteté et consommation.',
-    sport: 'Cadence d’images source préservée (jusqu’à 60 fps) pour un direct ultra fluide.',
+    sport: 'La meilleure image que votre connexion permet, jusqu’à 720p, cadence d’origine.',
     budget: 'Volume et durée dédiés à cette séance avec coupure automatique protectrice.'
   }[mode] || '';
 }
@@ -472,6 +487,12 @@ function playbackUI(title, live) {
 
   $('#live-badge').innerHTML = live ? '<span class="pulse-dot" aria-hidden="true"></span> DIRECT' : 'FILM';
   $('#live-badge').classList.toggle('film', !live);
+  $('#video-stage').classList.toggle('is-live', live);
+  $('#pui-time').textContent = '';
+  $('#pui-played').style.width = '0';
+  $('#pui-buffered').style.width = '0';
+  $('#quality').replaceChildren(new Option('Auto', '-1'));
+  showControls();
   $('#toggle-sidebar').hidden = true;
   renderLiveRail(live);
   $('#back-live').hidden = !live;
@@ -530,12 +551,44 @@ async function play(channel) {
   }
 }
 
+// Le moteur video (400 Ko) n'est charge qu'a la premiere lecture : l'accueil
+// et les catalogues s'affichent sans l'attendre.
+let hlsLoading = null;
+function loadHls() {
+  if (window.Hls) return Promise.resolve();
+  if (!hlsLoading) {
+    hlsLoading = new Promise(resolve => {
+      const script = document.createElement('script');
+      script.src = 'vendor/hls.min.js?v=1.5';
+      script.onload = resolve;
+      script.onerror = () => { hlsLoading = null; resolve(); };
+      document.head.append(script);
+    });
+  }
+  return hlsLoading;
+}
+
+// Premiere estimation du debit : la mesure faite au demarrage d'une chaine si
+// elle est recente, sinon 1,5 Mbit/s. Partir trop bas imposait une image
+// floue pendant les premieres secondes, le temps de remonter.
+function startEstimate() {
+  const net = store.json('net', null);
+  if (net && Date.now() - net.at < 3600000 && net.mbps > 0) return Math.round(net.mbps * 850000);
+  return 1500000;
+}
+
 function attach(url, live, attempt) {
   if (attempt !== state.playback) return;
+  if (!window.Hls) { loadHls().then(() => attach(url, live, attempt)); return; }
   if (state.hls) state.hls.destroy();
   state.hls = null;
   const v = $('#video');
+  // Lecture automatique refusee (son actif sans geste recent, iPhone) : on
+  // retire l'ecran d'attente pour laisser voir le bouton ▶, sinon il le cachait.
   const startPlaying = () => v.play().catch(() => {
+    if (attempt !== state.playback) return;
+    stageScreen(null);
+    syncPlayState();
     $('#player-status').textContent = 'Appuyez sur ▶ pour démarrer.';
   });
 
@@ -551,8 +604,12 @@ function attach(url, live, attempt) {
       liveSyncDuration: unstable ? 30 : 6,
       liveMaxLatencyDuration: unstable ? 65 : 25,
       maxLiveSyncPlaybackRate: 1,
-      abrEwmaDefaultEstimate: 450000,
-      capLevelToPlayerSize: true,
+      abrEwmaDefaultEstimate: startEstimate(),
+      // La meilleure image que la connexion permet, quelle que soit la
+      // taille du lecteur ; monter en qualite des que le debit le permet.
+      capLevelToPlayerSize: false,
+      abrBandWidthUpFactor: 0.8,
+      startFragPrefetch: true,
       // Film en preparation : apres un saut, le serveur encode le passage
       // demande avant de repondre. On attend plutot que d'abandonner.
       ...(live ? {} : {startPosition: state.startAt || 0, fragLoadPolicy: {default: {
@@ -567,7 +624,7 @@ function attach(url, live, attempt) {
     hls.loadSource(url);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       const select = $('#quality');
-      select.replaceChildren(new Option('Automatique', '-1'));
+      select.replaceChildren(new Option('Auto', '-1'));
       hls.levels.forEach((level, i) => {
         select.add(new Option((level.height ? level.height + 'p' : 'Qualité ' + (i + 1)) + ' · ≈ ' + size(level.bitrate * 3600 / 8) + '/h', String(i)));
       });
@@ -576,6 +633,8 @@ function attach(url, live, attempt) {
     hls.on(Hls.Events.LEVEL_SWITCHED, (_, d) => {
       const level = hls.levels[d.level];
       if (level) $('#bitrate').textContent = (level.height ? level.height + 'p · ' : '') + '≈ ' + size(level.bitrate * 3600 / 8) + '/h';
+      // En automatique, le menu dit quelle qualite est jouee en ce moment.
+      if (level && hls.autoLevelEnabled && level.height) $('#quality').options[0].text = 'Auto · ' + level.height + 'p';
     });
     hls.on(Hls.Events.ERROR, (_, d) => {
       if (attempt !== state.playback) return;
@@ -600,7 +659,7 @@ function attach(url, live, attempt) {
     });
   } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
     v.src = url;
-    $('#quality').replaceChildren(new Option('Auto · plafond respecté', '-1'));
+    $('#quality').replaceChildren(new Option('Auto', '-1'));
     startPlaying();
   } else {
     $('#player-status').textContent = 'Ce navigateur ne peut pas lire ce flux. Essayez un navigateur récent.';
@@ -616,18 +675,23 @@ $('#back-live').onclick = () => {
   if (state.hls && state.hls.liveSyncPosition) v.currentTime = state.hls.liveSyncPosition;
   else if (v.seekable.length) v.currentTime = Math.max(0, v.seekable.end(v.seekable.length - 1) - 6);
 };
-$('#fullscreen').onclick = async () => {
-  const v = $('#video');
+// Plein ecran sur le cadre entier : nos commandes restent visibles. L'iPhone
+// ne le permet que sur la video elle-meme, avec ses propres commandes.
+async function toggleFullscreen() {
+  const box = $('#video-stage'), v = $('#video');
   try {
-    if (document.fullscreenElement) {
-      await document.exitFullscreen();
-    } else if (v.requestFullscreen) {
-      await v.requestFullscreen();
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      await (document.exitFullscreen ? document.exitFullscreen() : document.webkitExitFullscreen());
+    } else if (box.requestFullscreen) {
+      await box.requestFullscreen();
+    } else if (box.webkitRequestFullscreen) {
+      box.webkitRequestFullscreen();
     } else if (v.webkitEnterFullscreen) {
       v.webkitEnterFullscreen();
     }
   } catch (err) { failure(err); }
-};
+}
+$('#fullscreen').onclick = () => toggleFullscreen();
 $('#pip').hidden = !document.pictureInPictureEnabled;
 $('#pip').onclick = () => {
   if (document.pictureInPictureElement) document.exitPictureInPicture().catch(failure);
@@ -669,6 +733,165 @@ video.addEventListener('loadedmetadata', () => {
   state.startAt = 0;
   if (state.job && start && Math.abs(video.currentTime - start) > 3) video.currentTime = start;
 });
+
+// ====================================================================
+// Commandes du lecteur : les notres plutot que celles du navigateur, pour
+// une interface identique partout, qui s'efface pendant la lecture.
+// ====================================================================
+const stageBox = $('#video-stage');
+const PUI_ICONS = {
+  play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12.5-7.5z" fill="currentColor"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 4.5h3.8v15H6.5zM13.7 4.5h3.8v15h-3.8z" fill="currentColor"/></svg>',
+  sound: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5h3.5L12 5v14l-4.5-4.5H4z" fill="currentColor"/><path d="M16 9a4.2 4.2 0 0 1 0 6M18.6 6.4a8 8 0 0 1 0 11.2"/></svg>',
+  muted: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5h3.5L12 5v14l-4.5-4.5H4z" fill="currentColor"/><path d="M16.5 9.5l5 5M21.5 9.5l-5 5"/></svg>',
+  expand: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
+  shrink: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>'
+};
+
+function clockOf(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return (h ? h + ':' + pad2(m) : m) + ':' + pad2(s % 60);
+}
+
+function togglePlay() {
+  if (video.paused) video.play().catch(() => {});
+  else video.pause();
+}
+
+function seekBy(delta) {
+  if (!Number.isFinite(video.duration)) return;
+  video.currentTime = Math.max(0, Math.min(video.duration - 1, video.currentTime + delta));
+  showControls();
+}
+
+let controlsTimer = null;
+function showControls() {
+  stageBox.classList.add('ui-on');
+  clearTimeout(controlsTimer);
+  if (!video.paused) controlsTimer = setTimeout(() => stageBox.classList.remove('ui-on'), 3000);
+}
+
+function syncPlayState() {
+  const paused = video.paused;
+  $('#pui-play').innerHTML = paused ? PUI_ICONS.play : PUI_ICONS.pause;
+  $('#pui-play').setAttribute('aria-label', paused ? 'Lecture' : 'Pause');
+  stageBox.classList.toggle('paused', paused);
+  showControls();
+}
+
+function syncVolume() {
+  const silent = video.muted || video.volume === 0;
+  $('#pui-mute').innerHTML = silent ? PUI_ICONS.muted : PUI_ICONS.sound;
+  $('#pui-mute').setAttribute('aria-label', silent ? 'Rétablir le son' : 'Couper le son');
+  $('#pui-vol').value = video.muted ? 0 : video.volume;
+}
+
+function syncTimeline() {
+  const d = video.duration, t = video.currentTime;
+  if (Number.isFinite(d) && d > 0) {
+    $('#pui-played').style.width = (t / d * 100) + '%';
+    let ahead = t;
+    for (let i = 0; i < video.buffered.length; i++) {
+      if (video.buffered.start(i) <= t + 1 && video.buffered.end(i) > ahead) ahead = video.buffered.end(i);
+    }
+    $('#pui-buffered').style.width = (ahead / d * 100) + '%';
+    $('#pui-time').textContent = clockOf(t) + ' / ' + clockOf(d);
+  }
+  // Direct : le bouton signale qu'on regarde en differe.
+  if (state.hls && state.hls.liveSyncPosition) {
+    $('#back-live').classList.toggle('behind', state.hls.liveSyncPosition - t > 12);
+  }
+}
+
+function syncFullscreen() {
+  const on = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  $('#fullscreen').innerHTML = on ? PUI_ICONS.shrink : PUI_ICONS.expand;
+  $('#fullscreen').setAttribute('aria-label', on ? 'Quitter le plein écran' : 'Plein écran');
+  stageBox.classList.toggle('is-fullscreen', on);
+}
+
+function syncSubtitles() {
+  const track = video.textTracks[0];
+  $('#pui-cc').hidden = !track;
+  if (track) $('#pui-cc').setAttribute('aria-pressed', String(track.mode === 'showing'));
+}
+
+['play', 'pause'].forEach(ev => video.addEventListener(ev, syncPlayState));
+video.addEventListener('volumechange', () => { syncVolume(); store.set('volume', String(video.volume)); });
+['timeupdate', 'durationchange', 'progress', 'seeked'].forEach(ev => video.addEventListener(ev, syncTimeline));
+video.textTracks.addEventListener('addtrack', syncSubtitles);
+document.addEventListener('fullscreenchange', syncFullscreen);
+document.addEventListener('webkitfullscreenchange', syncFullscreen);
+
+video.volume = Math.min(1, Math.max(0, Number(store.get('volume', '1')) || 1));
+syncPlayState();
+syncVolume();
+syncFullscreen();
+
+$('#pui-play').onclick = togglePlay;
+$('#pui-big').onclick = togglePlay;
+$('#pui-back').onclick = () => seekBy(-10);
+$('#pui-fwd').onclick = () => seekBy(10);
+$('#pui-mute').onclick = () => {
+  if (video.muted || video.volume === 0) { video.muted = false; if (!video.volume) video.volume = 0.6; }
+  else video.muted = true;
+};
+$('#pui-vol').oninput = e => { video.volume = Number(e.target.value); video.muted = video.volume === 0; };
+$('#pui-cc').onclick = () => {
+  const track = video.textTracks[0];
+  if (track) track.mode = track.mode === 'showing' ? 'hidden' : 'showing';
+  syncSubtitles();
+};
+
+// Souris : les commandes apparaissent au moindre mouvement ; un clic sur
+// l'image met en pause, un double clic passe en plein ecran. Tactile : un
+// premier toucher montre les commandes, le suivant les masque.
+stageBox.addEventListener('pointermove', e => { if (e.pointerType === 'mouse') showControls(); });
+stageBox.addEventListener('mouseleave', () => { if (!video.paused) stageBox.classList.remove('ui-on'); });
+video.addEventListener('click', () => {
+  if (matchMedia('(hover: none)').matches) {
+    if (stageBox.classList.contains('ui-on')) stageBox.classList.remove('ui-on');
+    else showControls();
+  } else {
+    togglePlay();
+  }
+});
+video.addEventListener('dblclick', () => toggleFullscreen());
+
+// Barre de progression : survol pour voir le temps, glisser pour se deplacer.
+const progressBox = $('#pui-progress');
+function fractionAt(e) {
+  const r = progressBox.getBoundingClientRect();
+  return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+}
+function previewAt(e) {
+  const f = fractionAt(e), hover = $('#pui-hover');
+  if (!Number.isFinite(video.duration)) return f;
+  hover.textContent = clockOf(f * video.duration);
+  hover.style.left = (f * 100) + '%';
+  hover.hidden = false;
+  return f;
+}
+let scrubbing = false;
+progressBox.addEventListener('pointerdown', e => {
+  if (!Number.isFinite(video.duration)) return;
+  scrubbing = true;
+  progressBox.setPointerCapture(e.pointerId);
+  $('#pui-played').style.width = previewAt(e) * 100 + '%';
+});
+progressBox.addEventListener('pointermove', e => {
+  if (!Number.isFinite(video.duration)) return;
+  const f = previewAt(e);
+  if (scrubbing) $('#pui-played').style.width = f * 100 + '%';
+  showControls();
+});
+progressBox.addEventListener('pointerup', e => {
+  if (!scrubbing) return;
+  scrubbing = false;
+  video.currentTime = fractionAt(e) * video.duration;
+  $('#pui-hover').hidden = true;
+});
+progressBox.addEventListener('pointerleave', () => { if (!scrubbing) $('#pui-hover').hidden = true; });
 
 let statusBusy = false;
 setInterval(async () => {
@@ -1320,10 +1543,40 @@ window.addEventListener('popstate', () => {
 // Historique : ce que le compte a regarde, garde par le serveur pour que
 // tous les appareils le partagent.
 // ====================================================================
-async function loadHistory() {
+// maxAge : reutiliser un historique charge il y a moins de maxAge ms.
+async function loadHistory(maxAge = 0) {
+  if (maxAge && state.historyAt && Date.now() - state.historyAt < maxAge) return state.history;
   const data = await api('/history', {skipAuthRedirect: true}).catch(() => null);
-  if (data && Array.isArray(data.items)) state.history = {items: data.items, next: data.next || {}};
+  if (data && Array.isArray(data.items)) {
+    state.history = {items: data.items, next: data.next || {}};
+    state.historyAt = Date.now();
+  }
   return state.history;
+}
+
+// « The Winter King S01E04 — S01E04 » : certains panels donnent comme titre
+// d'episode son numero ; les preparations d'avant la correction le gardent.
+function cleanTitle(title) {
+  return String(title || '').replace(/\b(S\d+\s*E\d+)\s*[—–-]\s*\1\s*$/i, '$1');
+}
+
+// Confirmation dans le style de l'app, plutot que la boite du navigateur.
+function askConfirm({title, text = '', ok = 'Confirmer', danger = false}) {
+  const box = $('#confirm-dialog'), okButton = $('#confirm-ok'), cancel = $('#confirm-cancel');
+  $('#confirm-title').textContent = title;
+  $('#confirm-text').textContent = text;
+  okButton.textContent = ok;
+  okButton.className = danger ? 'btn-danger' : 'btn-play';
+  return new Promise(resolve => {
+    const done = value => { box.close(); resolve(value); };
+    okButton.onclick = () => done(true);
+    cancel.onclick = () => done(false);
+    box.oncancel = e => { e.preventDefault(); done(false); };
+    box.onclick = e => { if (e.target === box) done(false); };
+    box.showModal();
+    // Action destructive : le focus va sur « Annuler », pas sur le danger.
+    (danger ? cancel : okButton).focus();
+  });
 }
 
 function watchOfJob(job) {
@@ -1778,7 +2031,7 @@ async function renderHome() {
   const serial = ++state.homeRender;
   const hour = new Date().getHours();
   $('#home-greeting').textContent = hour >= 5 && hour < 18 ? 'Bonjour' : 'Bonsoir';
-  const [data, jobs] = await Promise.all([loadHistory(), api('/preparations', {skipAuthRedirect: true}).catch(() => [])]);
+  const [data, jobs] = await Promise.all([loadHistory(4000), api('/preparations', {skipAuthRedirect: true}).catch(() => [])]);
   if (serial !== state.homeRender || state.mode !== 'home') return;
   const {hero, watching, upNext, channels} = homeSections(data);
   renderHero(hero);
@@ -1826,7 +2079,7 @@ async function renderHome() {
     rows.push(homeRow('Prêts hors connexion', ready.map(job => {
       const item = historyItem(watchOfJob(job));
       return posterCard({
-        title: job.title, icon: item && item.icon,
+        title: cleanTitle(job.title), icon: item && item.icon,
         badge: job.state === 'ready' ? job.height + 'p · ' + size(job.size_bytes) : 'Préparation ' + job.progress + ' %',
         sub: item && !item.finished && item.position >= 120 ? progressLine(item) : (job.state === 'ready' ? 'Prêt' : 'Lisible pendant la préparation'),
         item: item && !item.finished && item.position >= 120 ? item : null,
@@ -2106,7 +2359,8 @@ function movieEstimate() {
     ? 'Environ ' + size(rate * seconds) + ' après préparation.'
     : 'Environ ' + size(rate * 3600) + '/h après préparation.';
 }
-$('#movie-height').onchange = movieEstimate;
+$('#movie-height').value = store.get('movie_height', '720');
+$('#movie-height').onchange = () => { store.set('movie_height', $('#movie-height').value); movieEstimate(); };
 
 $('#check-tracks').onclick = async () => {
   if (!state.movie) return;
@@ -2183,8 +2437,8 @@ async function watchWhenPlayable(job, start) {
   const attempt = state.playback;
   await stopping;
   if (attempt !== state.playback) return;
-  state.current = {label: job.title};
-  playbackUI(job.title, false);
+  state.current = {label: cleanTitle(job.title)};
+  playbackUI(cleanTitle(job.title), false);
   $('#player-status').textContent = 'Analyse du film sur le serveur…';
   let deadline = Date.now() + 60000;
   while (attempt === state.playback && Date.now() < deadline) {
@@ -2210,14 +2464,14 @@ async function refreshJobs() {
   jobs.forEach(job => {
     const item = historyItem(watchOfJob(job));
     const card = el('article', 'job');
-    const art = artwork(item && item.icon, job.title);
+    const art = artwork(item && item.icon, cleanTitle(job.title));
     if (item && !item.finished && item.duration > 0 && item.position >= 120) art.append(bar(item.position / item.duration));
     const body = el('div', 'job-body');
     const status = (job.state === 'ready' ? job.height + 'p · ' + size(job.size_bytes) + ' · prêt' :
       job.state === 'failed' ? (job.error || 'Échec de la préparation.') :
       job.stage === 'subtitles' ? 'Récupération des sous-titres…' :
       job.height + 'p · préparation ' + job.progress + ' %' + (job.playable ? ' · lisible dès maintenant' : ''));
-    body.append(el('h3', '', job.title), el('p', 'job-status' + (job.state === 'failed' ? ' failed' : ''), status));
+    body.append(el('h3', '', cleanTitle(job.title)), el('p', 'job-status' + (job.state === 'failed' ? ' failed' : ''), status));
     if (job.state === 'preparing') {
       const p = el('progress');
       p.max = 100;
@@ -2252,10 +2506,14 @@ async function refreshJobs() {
 }
 
 async function deletePreparation(job, button) {
-  const question = job.state === 'preparing'
-    ? 'Arrêter la préparation de « ' + job.title + ' » et la supprimer ?'
-    : 'Supprimer « ' + job.title + ' » ? Il faudra le préparer à nouveau pour le regarder.';
-  if (!confirm(question)) return;
+  const ok = await askConfirm({
+    title: job.state === 'preparing' ? 'Arrêter et supprimer ?' : 'Supprimer ce film ?',
+    text: '« ' + cleanTitle(job.title) + ' » ' + (job.state === 'preparing'
+      ? 'est encore en préparation. Elle sera arrêtée et le fichier effacé.'
+      : 'sera effacé du serveur. Il faudra le préparer à nouveau pour le regarder.'),
+    ok: 'Supprimer', danger: true
+  });
+  if (!ok) return;
   button.disabled = true;
   try {
     if (state.job && state.job.id === job.id) await stop();
@@ -2299,8 +2557,8 @@ async function playJob(job, start) {
   state.savedAt = Date.now();
   hideResume();
   tabStore.set('playing', {kind: 'watch', watch: state.watch, position: state.startAt});
-  state.current = {label: job.title};
-  playbackUI(job.title, false);
+  state.current = {label: cleanTitle(job.title)};
+  playbackUI(cleanTitle(job.title), false);
   attach('/media/' + job.id + '/master.m3u8', false, attempt);
   jobUsage(job);
   if (job.subtitles_ready) subtitleTrack(job);
@@ -2320,6 +2578,7 @@ function subtitleTrack(job) {
   track.src = '/media/' + job.id + '/subtitles.vtt';
   track.default = true;
   video.append(track);
+  setTimeout(syncSubtitles, 0);
 }
 
 // Film lance avant la fin de sa preparation : progression, et sous-titres des
@@ -2415,7 +2674,7 @@ async function refreshConfig() {
     sync.onclick = async () => { await post('/sync', {id: p.id}); message('Synchronisation démarrée.'); };
     const del = el('button', 'quiet', 'Supprimer');
     del.onclick = async () => {
-      if (confirm('Supprimer cet abonnement ?')) {
+      if (await askConfirm({title: 'Supprimer cet abonnement ?', text: '« ' + p.name + ' » et son catalogue seront retirés de ce serveur.', ok: 'Supprimer', danger: true})) {
         await post('/providers/delete', {id: p.id});
         await refreshConfig();
       }
@@ -2570,7 +2829,7 @@ async function loadPlayerAccess() {
     const renew = el('button', 'quiet', 'Nouveau mot de passe');
     renew.type = 'button';
     renew.onclick = async () => {
-      if (!confirm('L’ancien mot de passe cessera aussitôt de fonctionner : chaque lecteur devra être reconfiguré. Continuer ?')) return;
+      if (!await askConfirm({title: 'Nouveau mot de passe ?', text: 'L’ancien cessera aussitôt de fonctionner : chaque lecteur devra être reconfiguré.', ok: 'Générer', danger: true})) return;
       try {
         await post('/player-credentials', {username: player.username, regenerate: true});
         $('#player-msg').textContent = 'Nouveau mot de passe généré.';
@@ -2594,7 +2853,7 @@ async function loadDevices() {
     li.append(el('span', 'provider-name', device.name), el('span', 'detail-line', 'associé le ' + since));
     const remove = el('button', 'quiet', 'Retirer');
     remove.onclick = async () => {
-      if (!confirm('Retirer cet appareil ? Sa lecture en cours s’arrêtera.')) return;
+      if (!await askConfirm({title: 'Retirer cet appareil ?', text: '« ' + device.name + ' » ne pourra plus utiliser ce serveur. Sa lecture en cours s’arrêtera.', ok: 'Retirer', danger: true})) return;
       await post('/devices/delete', {id: device.id});
       await loadDevices();
     };
@@ -2626,6 +2885,18 @@ window.addEventListener('keydown', e => {
   const activeEl = document.activeElement;
   const isInput = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'SELECT' || activeEl.tagName === 'TEXTAREA');
 
+  // Lecteur a l'ecran : espace pour la pause, fleches pour avancer (film) ou
+  // zapper (chaine). Un bouton qui a le focus garde son comportement.
+  const onButton = activeEl && (activeEl.tagName === 'BUTTON' || activeEl.tagName === 'A');
+  if (!isInput && document.body.classList.contains('is-playing') && !$('#player-wrap').hidden
+      && !document.querySelector('dialog[open]')) {
+    if ((e.key === ' ' && !onButton) || e.key === 'k' || e.key === 'K') { togglePlay(); e.preventDefault(); return; }
+    if (state.job && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { seekBy(e.key === 'ArrowLeft' ? -10 : 10); e.preventDefault(); return; }
+    if (!state.job && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && (state.mode === 'live' || state.mode === 'favorites')) {
+      zapChannel(e.key === 'ArrowUp' ? -1 : 1); e.preventDefault(); return;
+    }
+  }
+
   // Raccourcis globaux si non en cours de saisie
   if (!isInput) {
     if (e.key === 'PageUp') {
@@ -2639,6 +2910,7 @@ window.addEventListener('keydown', e => {
       return;
     }
     if (e.key === 'Escape') {
+      if (document.querySelector('dialog[open]')) return;
       if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
         e.preventDefault();

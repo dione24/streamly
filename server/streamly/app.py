@@ -104,6 +104,31 @@ def _duration_seconds(text):
     return total
 
 
+_WEB_CACHE = {}
+_WEB_LOCK = threading.Lock()
+
+
+def _web_file(full, mtime, packed=False):
+    """Fichier de l'interface, et sa version gzip, gardes en memoire.
+
+    Compresser app.js a chaque visite couterait plus que l'envoyer : on le
+    fait une fois par version du fichier.
+    """
+    key = (full, mtime, packed)
+    with _WEB_LOCK:
+        if key in _WEB_CACHE:
+            return _WEB_CACHE[key]
+    with open(full, "rb") as fh:
+        data = fh.read()
+    if packed:
+        data = gzip.compress(data, 9)
+    with _WEB_LOCK:
+        for old in [k for k in _WEB_CACHE if k[0] == full and k[1] != mtime]:
+            del _WEB_CACHE[old]
+        _WEB_CACHE[key] = data
+    return data
+
+
 class State:
     def __init__(self):
         self.cfg = cfgmod.load()
@@ -287,8 +312,13 @@ class Handler(BaseHTTPRequestHandler):
         headers = {"Cache-Control": "no-store"}
         if extra:
             headers.update(extra)
-        self._raw(code, json.dumps(obj, ensure_ascii=False, indent=1),
-                  "application/json; charset=utf-8", headers)
+        body = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        # Une page de catalogue ou l'historique pesent quelques dizaines de Ko :
+        # compresses, ils arrivent bien plus vite sur une connexion mobile.
+        if len(body) > GZIP_MIN_BYTES and "gzip" in (self.headers.get("Accept-Encoding") or "").lower():
+            body = gzip.compress(body, 5)
+            headers.update({"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+        self._raw(code, body, "application/json; charset=utf-8", headers)
 
     def _err(self, code, msg):
         self._json({"error": msg}, code)
@@ -627,7 +657,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_get(path, params)
             except (ValueError, TypeError):
                 return self._err(400, "paramètres invalides")
-        return self._serve_web(path)
+        return self._serve_web(path, params)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -696,7 +726,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------- fichiers web
 
-    def _serve_web(self, path):
+    def _serve_web(self, path, params=None):
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         rel = posixpath.normpath(rel)
         if rel.startswith("..") or os.path.isabs(rel):
@@ -705,10 +735,27 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.isfile(full):
             return self._err(404, "introuvable")
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
-        with open(full, "rb") as fh:
-            # Sans cela, une mise a jour du client reste invisible derriere le
-            # cache du navigateur — symptome classique d'une interface « morte ».
-            self._raw(200, fh.read(), ctype, {"Cache-Control": "no-cache"})
+        stat = os.stat(full)
+        etag = '"%x-%x"' % (int(stat.st_mtime), stat.st_size)
+        # Une adresse versionnee (app.js?v=...) ne change jamais de contenu : le
+        # navigateur la garde un an. Le reste (index.html, sw.js) est revalide a
+        # chaque visite, sans retelecharger s'il n'a pas bouge (304). Sans cela,
+        # une mise a jour du client reste invisible derriere le cache.
+        cache = "public, max-age=31536000, immutable" if (params or {}).get("v") else "no-cache"
+        headers = {"Cache-Control": cache, "ETag": etag, "Vary": "Accept-Encoding"}
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            for k, v in headers.items():
+                self.send_header(k, v)
+            self.end_headers()
+            return
+        body = _web_file(full, stat.st_mtime)
+        textual = ctype.startswith("text/") or ctype in ("application/javascript", "application/json",
+                                                           "image/svg+xml", "application/manifest+json")
+        if textual and len(body) > GZIP_MIN_BYTES and "gzip" in (self.headers.get("Accept-Encoding") or "").lower():
+            body = _web_file(full, stat.st_mtime, packed=True)
+            headers["Content-Encoding"] = "gzip"
+        self._raw(200, body, ctype, headers)
 
     # -------------------------------------------------------------- flux
 
@@ -780,8 +827,11 @@ class Handler(BaseHTTPRequestHandler):
         label = show.get('title') or 'Serie'
         if episode.get('season') or episode.get('episode'):
             label = '%s S%02dE%02d' % (label, episode.get('season') or 0, episode.get('episode') or 0)
-        if episode.get('title'):
-            label = '%s — %s' % (label, episode['title'])
+        # Beaucoup de panels donnent comme titre le numero lui-meme : « S01E04 ».
+        extra = (episode.get('title') or '').strip()
+        code = '%s S%02dE%02d' % (show.get('title') or '', episode.get('season') or 0, episode.get('episode') or 0)
+        if extra and not re.fullmatch(r'(?:S\d+\s*E\d+|(?:episode|épisode)\s*\d+)', extra, re.I) and extra not in code:
+            label = '%s — %s' % (label, extra)
         # Movies.start() attend une fiche de film : un episode en presente une
         # equivalente, ce qui evite un second chemin de preparation.
         movie = {'provider_id': pid, 'stream_id': int(eid), 'title': label, 'kind': 'episode',
@@ -963,7 +1013,9 @@ class Handler(BaseHTTPRequestHandler):
         cat = STATE.catalog
 
         if path == '/api/me':
-            return self._json({'role': self._session()['role']})
+            # max_mode : l'interface ne propose pas une qualite que l'instance
+            # refuserait ensuite en silence.
+            return self._json({'role': self._session()['role'], 'max_mode': STATE.cfg.get('max_mode') or 'sport'})
         if path == '/api/playback':
             ticket = one('ticket')
             if not STATE.transcoder.ticket(ticket, self._session()['id'], touch=False):
