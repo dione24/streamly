@@ -17,7 +17,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server'))
-from streamly.transcoder import Transcoder
+from streamly.transcoder import Transcoder, CapacityError
 from streamly.vod import Movies, SEGMENT
 
 HAVE_FFMPEG = bool(shutil.which('ffmpeg') and shutil.which('ffprobe'))
@@ -200,6 +200,29 @@ class ProgressiveMovieTests(unittest.TestCase):
         self.assertIn('Fin du film', (folder / 'subtitles.vtt').read_text())
         self.assertIsNotNone(self.movies.segment(jid, 0, 0, timeout=30))
 
+    def test_next_episode_pauses_the_previous_preparation(self):
+        # Abonnement a une connexion : l'episode 6 se prepare encore quand on
+        # lance le 7.
+        self.cfg['providers'][0]['max_connections'] = 1
+        six = self.movies.start({'provider_id': 'p', 'stream_id': 6, 'title': 'Episode 6'}, self.source, 240, account='moi')
+        self.wait(six['id'], lambda j: j.get('playable'))
+        self.assertIsNotNone(self.movies.segment(six['id'], 0, 0, timeout=30))
+        # Un autre compte ne coupe pas une preparation qu'on regarde, et sa
+        # demande refusee ne laisse rien dans la liste.
+        with self.assertRaises(CapacityError):
+            self.movies.start({'provider_id': 'p', 'stream_id': 9, 'title': 'Autre'}, self.source, 240, account='autre')
+        self.assertEqual(len(self.movies.jobs), 1)
+        # Le meme compte passe a l'episode suivant : le 6 cede sa connexion.
+        seven = self.movies.start({'provider_id': 'p', 'stream_id': 7, 'title': 'Episode 7'}, self.source, 240, account='moi')
+        self.assertEqual(self.movies.jobs[seven['id']]['state'], 'preparing')
+        self.assertEqual(self.movies.jobs[six['id']]['state'], 'paused')
+        # Ce qui etait fait du 6 reste lisible.
+        self.assertIsNotNone(self.movies.segment(six['id'], 0, 0, timeout=1))
+        self.wait(seven['id'], lambda j: j['state'] == 'ready')
+        # Connexion rendue : le 6 reprend ou il en etait, jusqu'au bout.
+        self.wait(six['id'], lambda j: j['state'] == 'ready')
+        self.assertFalse(self.transcoder.reservations)
+
     def test_delete_while_preparing(self):
         job = self.movies.start({'provider_id': 'p', 'stream_id': 1, 'title': 'Film'}, self.source, 480, subtitle=2)
         jid = job['id']
@@ -223,6 +246,21 @@ class ProgressiveMovieTests(unittest.TestCase):
         self.assertFalse(self.movies.delete(jid))
         # Plus aucun FFmpeg ne travaille pour cette preparation.
         self.assertFalse(subprocess.run(['pgrep', '-f', jid], capture_output=True).stdout)
+
+
+class EpisodeSourceTests(unittest.TestCase):
+    def test_resumed_episode_is_read_under_series(self):
+        class Catalog:
+            def episode_get(self, pid, eid):
+                return {'episode_id': eid, 'container': 'mkv'}
+            def vod_get(self, pid, sid):
+                return {'stream_id': sid, 'container': 'mp4'}
+        with tempfile.TemporaryDirectory() as root:
+            cfg = {'providers': [{'id': 'p', 'host': 'http://panel', 'username': 'u', 'password': 'pw'}]}
+            movies = Movies(cfg, root, Catalog(), None)
+            self.assertEqual(movies._job_source({'provider': 'p', 'movie': 904, 'kind': 'episode'}),
+                             'http://panel/series/u/pw/904.mkv')
+            self.assertEqual(movies._job_source({'provider': 'p', 'movie': 7}), 'http://panel/movie/u/pw/7.mp4')
 
 
 if __name__ == '__main__':

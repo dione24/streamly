@@ -29,6 +29,15 @@ _RUN_PLAYLIST = re.compile(r'^r(\d+)_q(\d+)\.m3u8$')
 _RUN_SEGMENT = re.compile(r'^r(\d+)_q(\d+)_(\d+)\.ts$')
 
 
+# Sans segment demande depuis ce delai, personne ne regarde la preparation :
+# elle peut ceder sa connexion a une lecture qui la reclame.
+IDLE_BEFORE_PAUSE = 60
+
+
+class _Paused(Exception):
+    """La preparation cede sa connexion ; elle reprendra ou elle en etait."""
+
+
 class Movies:
     def __init__(self, cfg, root, catalog, transcoder):
         self.cfg, self.root, self.catalog, self.transcoder = cfg, root, catalog, transcoder
@@ -36,6 +45,8 @@ class Movies:
         self.changed = threading.Condition(self.lock)
         # Etat d'encodage en memoire : index des segments complets, passe en cours.
         self.runtime = {}
+        # Adresse de chaque preparation lancee : une pause repart sans relire le catalogue.
+        self._sources = {}
         self._closed = threading.Event()
         os.makedirs(root, exist_ok=True)
         to_resume = []
@@ -48,7 +59,8 @@ class Movies:
                     if job.get('format') == 2:
                         self.runtime[name] = self._load_runtime(job)
                     continue
-                if job['state'] == 'preparing':
+                if job['state'] in ('preparing', 'paused'):
+                    job['state'] = 'preparing'
                     job.setdefault('progress', 0)
                     job['error'] = 'Reprise automatique de la préparation en cours…'
                     self.jobs[name] = job
@@ -62,7 +74,7 @@ class Movies:
                 continue
         for job in to_resume:
             try:
-                _, source = self._movie_source(job['provider'], job['movie'])
+                source = self._job_source(job)
             except Exception as exc:
                 with self.lock:
                     job.update(state='failed', error=str(exc))
@@ -77,17 +89,25 @@ class Movies:
                 return provider
         return None
 
-    def _movie_source(self, pid, sid):
+    def _movie_source(self, pid, sid, kind='movie'):
         provider = self._provider(pid)
-        movie = self.catalog.vod_get(pid, sid) if provider else None
+        # Film et episode ont chacun leur numerotation, et leur chemin chez le
+        # panel : un episode relu sous /movie/ designerait un autre fichier.
+        if kind == 'episode':
+            movie = self.catalog.episode_get(pid, sid) if provider else None
+        else:
+            movie = self.catalog.vod_get(pid, sid) if provider else None
         if not provider or not provider.get('enabled', True) or not movie:
-            raise ValueError('film indisponible')
+            raise ValueError('épisode indisponible' if kind == 'episode' else 'film indisponible')
         container = (movie.get('container') or 'mp4').lstrip('.')
         if not re.fullmatch(r'[a-zA-Z0-9]+', container):
             raise ValueError('conteneur invalide')
-        return movie, '%s/movie/%s/%s/%s.%s' % (
-            provider['host'].rstrip('/'), provider['username'], provider['password'],
-            int(sid), container)
+        return movie, '%s/%s/%s/%s/%s.%s' % (
+            provider['host'].rstrip('/'), 'series' if kind == 'episode' else 'movie',
+            provider['username'], provider['password'], int(sid), container)
+
+    def _job_source(self, job):
+        return self._movie_source(job['provider'], job['movie'], job.get('kind', 'movie'))[1]
 
     def _cleanup(self, path):
         for filename in os.listdir(path):
@@ -98,18 +118,81 @@ class Movies:
             except OSError:
                 pass
 
-    def _start(self, job, source, clear_files=False):
+    def _start(self, job, source, clear_files=False, new=False, preempt=False):
+        """Lance l'encodage si l'abonnement a une connexion libre.
+
+        `preempt` : une demande de l'utilisateur met en pause les preparations
+        qui tiennent la connexion sans etre regardees. Sans connexion, une
+        nouvelle preparation leve CapacityError (rien n'est garde) ; une
+        reprise se met en pause et repartira a la prochaine place libre.
+        """
         try:
             self.transcoder.reserve(job['id'], job['provider'])
         except CapacityError as exc:
-            job.update(state='failed', error=str(exc), progress=0)
-            self._save(job)
-            return
+            if not (preempt and self._make_room(job['provider'], job.get('account'), keep=job['id'])):
+                return self._no_room(job, exc, new)
+            try:
+                self.transcoder.reserve(job['id'], job['provider'])
+            except CapacityError as exc:
+                return self._no_room(job, exc, new)
         if clear_files:
             self._cleanup(os.path.join(self.root, job['id']))
         with self.lock:
-            self.runtime[job['id']] = self._load_runtime(job)
+            rt = self.runtime[job['id']] = self._load_runtime(job)
+            rt['seen'] = time.time()
+            self._sources[job['id']] = source
         threading.Thread(target=self._run, args=(job, source), daemon=True).start()
+
+    def _no_room(self, job, exc, new):
+        with self.lock:
+            if new:
+                self.jobs.pop(job['id'], None)
+                shutil.rmtree(os.path.join(self.root, job['id']), ignore_errors=True)
+                raise exc
+            job.update(state='paused', error='En pause : la connexion de l’abonnement est occupée. Reprise automatique dès qu’elle se libère.')
+            self._save(job)
+
+    def _make_room(self, provider, account, keep=None):
+        """Met en pause les preparations du meme abonnement que personne ne
+        regarde, ou lancees par le meme compte (il est passe a autre chose).
+        Rend vrai si une connexion a ete rendue."""
+        now = time.time()
+        with self.lock:
+            paused = []
+            for jid, j in self.jobs.items():
+                rt = self.runtime.get(jid)
+                if jid == keep or j['state'] != 'preparing' or j['provider'] != provider or not rt:
+                    continue
+                if (account is not None and j.get('account') == account) or now - rt.get('seen', 0) > IDLE_BEFORE_PAUSE:
+                    rt['paused'] = True
+                    for proc in (rt.get('proc'), rt.get('subs_proc')):
+                        if proc and proc.poll() is None:
+                            proc.kill()
+                    paused.append(jid)
+            self.changed.notify_all()
+        # Le fil d'encodage voit la marque et rend sa connexion.
+        deadline = time.time() + 10
+        held = lambda: any(k in self.transcoder.reservations for jid in paused for k in (jid, jid + ':st'))
+        while paused and held() and time.time() < deadline:
+            time.sleep(.1)
+        return bool(paused) and not held()
+
+    def _resume_paused(self):
+        """Une connexion vient de se liberer : la plus ancienne pause repart."""
+        with self.lock:
+            waiting = sorted((j for j in self.jobs.values() if j['state'] == 'paused'), key=lambda j: j['created'])
+        for job in waiting:
+            try:
+                source = self._sources.get(job['id']) or self._job_source(job)
+            except Exception:
+                continue
+            with self.lock:
+                if job['state'] != 'paused' or self.jobs.get(job['id']) is not job:
+                    continue
+                job.update(state='preparing', error=None)
+            self._start(job, source)
+            if job['state'] == 'preparing':
+                return
 
     def _save(self, job):
         path = os.path.join(self.root, job['id'], 'job.json')
@@ -127,16 +210,21 @@ class Movies:
                 'subtitles': [{'index': s['index'], 'label': (s.get('tags') or {}).get('language', 'Sous-titres %s' % s['index']),
                     'supported': s.get('codec_name') in TEXT_SUBTITLES} for s in media['streams'] if s.get('codec_type') == 'subtitle']}
 
-    def start(self, movie, source, height=480, audio=None, subtitle=None):
+    def start(self, movie, source, height=480, audio=None, subtitle=None, account=None):
         if height not in (240, 360, 480, 720):
             raise ValueError('Qualité invalide')
         with self.lock:
             # Film et episode ont chacun leur numerotation chez le panel : un meme
             # numero peut designer les deux.
             kind = movie.get('kind') or 'movie'
-            same = [j for j in self.jobs.values() if j['provider'] == movie['provider_id'] and j['movie'] == movie['stream_id'] and j.get('kind', 'movie') == kind and j['height'] == height and j.get('audio') == audio and j.get('subtitle') == subtitle and j['state'] in ('preparing', 'ready')]
-            if same:
+            same = [j for j in self.jobs.values() if j['provider'] == movie['provider_id'] and j['movie'] == movie['stream_id'] and j.get('kind', 'movie') == kind and j['height'] == height and j.get('audio') == audio and j.get('subtitle') == subtitle and j['state'] in ('preparing', 'ready', 'paused')]
+            if same and same[0]['state'] == 'paused':
+                paused = same[0]
+            elif same:
+                same[0]['account'] = account
                 return dict(same[0])
+            else:
+                paused = None
             for key, j in list(self.jobs.items()):
                 if j['state'] != 'preparing' and time.time() - max(j['created'], j.get('last_access', 0)) > 7 * 86400:
                     shutil.rmtree(os.path.join(self.root, key), ignore_errors=True)
@@ -144,15 +232,20 @@ class Movies:
             if self._used_bytes() > int(self.cfg.get('vod_cache_bytes', 8_000_000_000)) * .75 or shutil.disk_usage(self.root).free < 2_000_000_000:
                 raise CapacityError('Espace de préparation insuffisant. Libérez une ancienne préparation.')
             jid = secrets.token_urlsafe(18)
+        if paused:
+            return self.retry(paused['id'], account)
+        with self.lock:
+            jid = secrets.token_urlsafe(18)
             job = dict(id=jid, provider=movie['provider_id'], movie=movie['stream_id'], title=movie['title'],
-                       kind=kind,
+                       kind=kind, account=account,
                        height=height, audio=audio, subtitle=subtitle, state='preparing', created=time.time(),
                        progress=0, format=2, playable=False)
             self.jobs[jid] = job
             os.makedirs(os.path.join(self.root, jid))
             self._save(job)
-            self._start(job, source)
-            return dict(job)
+        # Hors du verrou : faire de la place attend que d'autres fils le rendent.
+        self._start(job, source, new=True, preempt=True)
+        return dict(job)
 
     # ------------------------------------------------------------ segments
 
@@ -229,6 +322,8 @@ class Movies:
             if not job or n < 0 or n >= self._total(job) or rung >= len(job.get('qualities') or []):
                 return None
             rt = self.runtime.get(jid)
+            if rt:
+                rt['seen'] = asked
             while True:
                 if self.jobs.get(jid) is not job:
                     return None  # supprimee pendant l'attente
@@ -315,6 +410,8 @@ class Movies:
                 return 'done'
             if rt.get('deleted'):
                 raise RuntimeError('Préparation supprimée.')
+            if rt.get('paused'):
+                raise _Paused()
             rt['run'] += 1
             run = rt['run']
             rt['start'], rt['cursor'] = start, start
@@ -372,6 +469,8 @@ class Movies:
                     raise RuntimeError('Préparation interrompue par l’arrêt du serveur.')
                 if rt.get('deleted'):
                     raise RuntimeError('Préparation supprimée.')
+                if rt.get('paused'):
+                    raise _Paused()
                 if shutil.disk_usage(path).free < 1_000_000_000 or time.time() - started > limit:
                     raise RuntimeError('Préparation arrêtée : limite de temps ou espace disque atteint.')
                 if ticks % 20 == 0 and self._used_bytes() > cache:
@@ -440,7 +539,7 @@ class Movies:
             if proc.returncode == 0 and os.path.exists(os.path.join(path, 'subtitles.part')):
                 os.replace(os.path.join(path, 'subtitles.part'), final)
                 job['subtitles_ready'] = True
-            elif not self._closed.is_set():
+            elif not self._closed.is_set() and not rt.get('paused'):
                 # La video reste lisible : on le signale sans faire echouer la preparation.
                 job['subtitles_error'] = 'Sous-titres indisponibles pour cette source.'
             self._save(job)
@@ -516,6 +615,8 @@ class Movies:
                     raise RuntimeError('Préparation interrompue par l’arrêt du serveur.')
                 if rt.get('deleted'):
                     raise RuntimeError('Préparation supprimée.')
+                if rt.get('paused'):
+                    raise _Paused()
                 outcome = self._encode(job, source, media, rt, started)
                 if outcome == 'done':
                     break
@@ -539,6 +640,15 @@ class Movies:
                 # Arret du serveur : la preparation reprendra au prochain
                 # demarrage. Suppression : delete() a deja tout efface.
                 return
+            if isinstance(exc, _Paused):
+                with self.lock:
+                    subs = (self.runtime.get(job['id']) or {}).get('subs_proc')
+                    if subs and subs.poll() is None:
+                        subs.kill()
+                    # Les segments faits restent : la reprise repart de la.
+                    self.runtime[job['id']]['paused'] = False
+                    job.update(state='paused', error='En pause pour laisser la connexion à une autre lecture. Reprise automatique ensuite.')
+                return
             with self.lock:
                 subs = (self.runtime.get(job['id']) or {}).get('subs_proc')
                 if subs and subs.poll() is None:
@@ -555,6 +665,10 @@ class Movies:
                     pass
                 self.changed.notify_all()
             self.transcoder.unreserve(job['id'])
+            # Connexion rendue : une preparation en pause peut repartir. Pas
+            # celle-ci si elle vient de ceder sa place.
+            if job['state'] != 'paused' and not self._closed.is_set():
+                self._resume_paused()
 
     # ----------------------------------------------------------- playlists
 
@@ -586,7 +700,7 @@ class Movies:
         lines.append('#EXT-X-ENDLIST')
         return '\n'.join(lines) + '\n'
 
-    def retry(self, jid):
+    def retry(self, jid, account=None):
         with self.lock:
             job = self.jobs.get(jid)
             if not job:
@@ -594,18 +708,28 @@ class Movies:
             if job['state'] == 'preparing':
                 return dict(job)
             try:
-                _, source = self._movie_source(job['provider'], job['movie'])
+                source = self._job_source(job)
             except Exception as exc:
                 job.update(state='failed', error=str(exc))
                 self._save(job)
                 return dict(job)
+            if job['state'] == 'paused':
+                job.update(state='preparing', error=None, account=account if account is not None else job.get('account'))
+                self._save(job)
+                resume = True
+            else:
+                resume = False
+        if resume:
+            self._start(job, source, preempt=True)
+            return dict(job)
+        with self.lock:
             job.update(state='preparing', progress=0, error='Reprise demandée par l’utilisateur…',
                        created=time.time(), format=2, playable=False)
             for key in ('segments', 'rungs', 'qualities', 'download', 'size_bytes', 'open',
                         'subtitles_ready', 'subtitles_error', 'stage'):
                 job.pop(key, None)
             self._save(job)
-        self._start(job, source, clear_files=True)
+        self._start(job, source, clear_files=True, preempt=True)
         return dict(job)
 
     def delete(self, jid):

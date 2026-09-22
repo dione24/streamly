@@ -1336,7 +1336,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 job = STATE.movies.start(movie, source, int(body.get('height', 480)),
                     int(body['audio']) if body.get('audio') is not None else None,
-                    int(body['subtitle']) if body.get('subtitle') is not None else None)
+                    int(body['subtitle']) if body.get('subtitle') is not None else None,
+                    account=self._session().get('account') or '')
             except CapacityError as exc:
                 return self._err(409, str(exc))
             return self._json(job)
@@ -1345,7 +1346,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(404, 'Préparation introuvable.')
             return self._json({'ok': True})
         if path == '/api/prepare/retry':
-            job = STATE.movies.retry(body.get('job_id') or body.get('id'))
+            try:
+                job = STATE.movies.retry(body.get('job_id') or body.get('id'), self._session().get('account') or '')
+            except CapacityError as exc:
+                return self._err(409, str(exc))
             if not job:
                 return self._err(404, 'Préparation introuvable.')
             return self._json(job)

@@ -2668,6 +2668,7 @@ async function refreshJobs() {
     const body = el('div', 'job-body');
     const status = (job.state === 'ready' ? job.height + 'p · ' + size(job.size_bytes) + ' · prêt' :
       job.state === 'failed' ? (job.error || 'Échec de la préparation.') :
+      job.state === 'paused' ? 'En pause · ' + job.progress + ' % · reprendra dès que la connexion se libère' :
       job.stage === 'subtitles' ? 'Récupération des sous-titres…' :
       job.height + 'p · préparation ' + job.progress + ' %' + (job.playable ? ' · lisible dès maintenant' : ''));
     body.append(el('h3', '', cleanTitle(job.title)), el('p', 'job-status' + (job.state === 'failed' ? ' failed' : ''), status));
@@ -2679,7 +2680,7 @@ async function refreshJobs() {
       body.append(p);
     }
     const actions = el('div', 'job-actions');
-    if (job.state === 'ready' || (job.state === 'preparing' && job.playable)) {
+    if (job.state === 'ready' || ((job.state === 'preparing' || job.state === 'paused') && job.playable)) {
       const playButton = el('button', 'primary', jobPosition(job) ? '▶ Reprendre' : '▶ Regarder');
       playButton.onclick = () => playJob(job).catch(failure);
       actions.append(playButton);
@@ -2690,8 +2691,8 @@ async function refreshJobs() {
       download.setAttribute('download', '');
       actions.append(download);
     }
-    if (job.state === 'failed') {
-      const retry = el('button', '', 'Relancer');
+    if (job.state === 'failed' || job.state === 'paused') {
+      const retry = el('button', '', job.state === 'paused' ? 'Reprendre maintenant' : 'Relancer');
       retry.onclick = () => retryPreparation(job, retry).catch(failure);
       actions.append(retry);
     }
@@ -2706,8 +2707,8 @@ async function refreshJobs() {
 
 async function deletePreparation(job, button) {
   const ok = await askConfirm({
-    title: job.state === 'preparing' ? 'Arrêter et supprimer ?' : 'Supprimer ce film ?',
-    text: '« ' + cleanTitle(job.title) + ' » ' + (job.state === 'preparing'
+    title: job.state === 'preparing' || job.state === 'paused' ? 'Arrêter et supprimer ?' : 'Supprimer ce film ?',
+    text: '« ' + cleanTitle(job.title) + ' » ' + (job.state === 'preparing' || job.state === 'paused'
       ? 'est encore en préparation. Elle sera arrêtée et le fichier effacé.'
       : 'sera effacé du serveur. Il faudra le préparer à nouveau pour le regarder.'),
     ok: 'Supprimer', danger: true
@@ -2731,7 +2732,7 @@ async function retryPreparation(job, button) {
   try {
     await post('/prepare/retry', {id: job.id});
     await refreshJobs();
-    message('Relance demandée. Reprenez le statut dans quelques instants.');
+    message(job.state === 'paused' ? 'Préparation reprise.' : 'Relance demandée. Reprenez le statut dans quelques instants.');
   } catch (err) {
     failure(err);
   } finally {
