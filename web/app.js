@@ -366,7 +366,7 @@ if (toggleTelemBtn) {
 // toutes les sources de la chaine ont echoue.
 const STAGE_SCREENS = {
   prepare: ['Préparation du direct…', 'COMPRESSION ADAPTÉE À VOTRE CONNEXION'],
-  movie: ['Ouverture du film…', 'VERSION ADAPTÉE À VOTRE FORFAIT'],
+  movie: ['Ouverture du film…', 'VERSION ADAPTÉE À VOTRE CONNEXION INTERNET'],
   wait: ['Reprise du direct…', 'LA SOURCE EST INSTABLE · MERCI DE PATIENTER QUELQUES SECONDES'],
   offline: ['Votre connexion Internet est interrompue', 'LA LECTURE REPRENDRA DÈS SON RETOUR'],
   slow: ['Votre connexion est trop lente pour cette qualité', 'STREAMLY PASSE À UNE QUALITÉ PLUS LÉGÈRE · RAPPROCHEZ-VOUS DU WI-FI OU CHANGEZ DE RÉSEAU'],
