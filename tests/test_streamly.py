@@ -473,6 +473,32 @@ class SessionStoreTests(unittest.TestCase):
         self.assertIsNotNone(sessions.get('streamly_session=' + last))
 
 
+class ProbeTests(unittest.TestCase):
+    OK = json.dumps({'streams': [{'index': 0, 'codec_type': 'video', 'height': 720, 'width': 1280, 'avg_frame_rate': '25/1'}],
+                     'format': {'duration': '3183.7'}}).encode()
+    def run_probe(self, replies):
+        import subprocess
+        from streamly import transcoder
+        calls = []
+        def run(cmd, **kw):
+            calls.append(cmd)
+            reply = replies[min(len(calls), len(replies)) - 1]
+            if reply is not self.OK:
+                raise subprocess.CalledProcessError(1, cmd, b'', reply)
+            return Mock(stdout=reply)
+        with patch('streamly.transcoder.subprocess.run', side_effect=run), patch('streamly.transcoder.time.sleep') as sleep:
+            return transcoder.probe('http://panel/series/u/p/1.mp4', 'VLC'), len(calls), sleep.call_count
+    def test_probe_waits_for_the_panel_to_release_the_connection(self):
+        # Abonnement a une connexion : la precedente n'est pas encore liberee.
+        refused = b'http://panel/series/u/p/1.mp4: Server returned 401 Unauthorized (authorization failed)'
+        media, calls, sleeps = self.run_probe([refused, refused, self.OK])
+        self.assertEqual((media['height'], media['duration'], calls, sleeps), (720, '3183.7', 3, 2))
+        self.assertNotIn('unverified', media)
+    def test_probe_gives_up_on_other_errors_and_after_a_few_refusals(self):
+        media, calls, _ = self.run_probe([b'Invalid data found when processing input'])
+        self.assertEqual((media.get('unverified'), calls), (True, 1))
+        media, calls, _ = self.run_probe([b'Server returned 403 Forbidden'])
+        self.assertEqual((media.get('unverified'), calls), (True, 4))
 class MetadataTests(unittest.TestCase):
     def test_tmdb_images_are_resized(self):
         self.assertEqual(metadata.tmdb_image('/abc.jpg', 'w780'), 'https://image.tmdb.org/t/p/w780/abc.jpg')
@@ -1013,6 +1039,8 @@ class HTTPTests(unittest.TestCase):
         self.request('/api/history', {'kind': 'movie', 'provider': 'p', 'id': 7, 'position': 600}, cookie=cookie)
         item = json.loads(self.request('/api/history', cookie=cookie).read())['items'][0]
         self.assertEqual(item['backdrop'], extra['backdrop'])
+        # Et le resume de la fiche ; OMDb pas encore interroge : pas de `omdb`.
+        self.assertEqual(item['sheet'], {'year': '2019', 'genre': 'Thriller, Drama', 'rating': 6.2, 'plot': 'Un resume'})
     def test_ratings_come_from_omdb_once(self):
         self.seed_movie()
         cookie = self.login()
@@ -1036,6 +1064,11 @@ class HTTPTests(unittest.TestCase):
         self.assertIn('y=2019', calls[0])
         self.assertTrue(self.state.catalog.has_icon('https://m.media-amazon.com/p.jpg'))
         self.request('/api/ratings?provider=p&id=7', cookie=cookie).read()
+        self.assertEqual(len(calls), 1)
+        # L'accueil recoit les notes gardees, sans rappeler OMDb.
+        self.request('/api/history', {'kind': 'movie', 'provider': 'p', 'id': 7, 'position': 600}, cookie=cookie)
+        item = json.loads(self.request('/api/history', cookie=cookie).read())['items'][0]
+        self.assertEqual(item['sheet']['omdb'], {'imdb_rating': '6.8', 'rotten_tomatoes': '81%'})
         self.assertEqual(len(calls), 1)
     def test_remember_me_controls_cookie_lifetime(self):
         kept = self.request('/api/login', {'token': 'test-admin', 'remember': True})

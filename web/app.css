@@ -564,6 +564,10 @@ dialog.confirm p { margin-top: 8px; font-size: 0.9rem; line-height: 1.5; }
 .billboard-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--muted); font-size: 0.9rem; }
 .billboard-meta .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--faint); }
 .pill { padding: 1px 6px; border: 1px solid rgba(255, 255, 255, 0.28); border-radius: 4px; font-size: 0.7rem; font-weight: 700; color: rgba(255, 255, 255, 0.82); }
+.billboard-facts { margin: 0 0 12px; }
+.billboard-facts .score { background: rgba(255, 255, 255, 0.12); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.billboard-facts .facts-line { color: rgba(255, 255, 255, 0.86); font-size: 0.88rem; font-weight: 600; }
+.billboard-plot { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; max-width: 520px; margin: 14px 0 0; color: rgba(255, 255, 255, 0.78); font-size: 0.95rem; line-height: 1.45; }
 .billboard-progress { display: flex; align-items: center; gap: 12px; margin-top: 18px; font-size: 0.82rem; color: var(--muted); }
 .billboard-progress .bar { flex: 0 0 180px; }
 .billboard-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
@@ -620,6 +624,13 @@ dialog.confirm p { margin-top: 8px; font-size: 0.9rem; line-height: 1.5; }
   padding: 2px 7px; border-radius: 5px; font-size: 0.66rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   background: rgba(8, 8, 15, 0.74); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
 }
+.art .rating {
+  position: absolute; top: 8px; right: 8px; z-index: 2; display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 6px 2px 2px; border-radius: 5px; font-size: 0.7rem; font-weight: 700;
+  background: rgba(8, 8, 15, 0.74); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+}
+.card.poster .art .rating { top: auto; right: auto; bottom: 10px; left: 8px; }
+.art .rating b { padding: 0 4px; border-radius: 3px; background: #f5c518; color: #000; font-size: 0.6rem; font-weight: 800; }
 .card.channel { width: 210px; }
 .tile {
   position: relative; display: grid; place-items: center; aspect-ratio: 16 / 9; overflow: hidden;
@@ -898,6 +909,8 @@ a.btn-ghost { display: inline-flex; align-items: center; justify-content: center
   .billboard-poster { display: none; }
   .billboard h1 { font-size: 2.3rem; }
   .billboard-meta { font-size: 0.8rem; }
+  .billboard-facts { margin-bottom: 10px; }
+  .billboard-plot { -webkit-line-clamp: 2; font-size: 0.85rem; margin-top: 10px; }
   .billboard-progress .bar { flex-basis: 120px; }
   .billboard-actions { gap: 8px; margin-top: 16px; }
   .billboard-actions .btn-play, .billboard-actions .btn-ghost { min-height: 40px; padding: 0 16px; font-size: 0.88rem; }

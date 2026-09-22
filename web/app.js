@@ -1892,6 +1892,7 @@ function wideCard(item) {
   // Image de fond au format paysage si on l'a, sinon l'affiche recadree.
   const art = artwork(item.backdrop_small || item.icon, item.title, item.backdrop_small ? 'landscape' : '');
   art.append(bar(item.duration > 0 ? item.position / item.duration : 0.05));
+  ratingChip(art, item.sheet);
   const sub = [item.kind === 'episode' ? seasonEpisode(d.season, d.episode) : '', progressLine(item)].filter(Boolean).join(' · ');
   const card = el('article', 'card wide');
   card.append(
@@ -1903,9 +1904,10 @@ function wideCard(item) {
   return card;
 }
 
-function posterCard({title, sub, icon, badge, label, onPlay, item, actions}) {
+function posterCard({title, sub, icon, badge, label, onPlay, item, actions, sheet}) {
   const art = artwork(icon, title);
   if (badge) art.append(el('span', 'badge', badge));
+  ratingChip(art, sheet);
   if (item && item.duration > 0) art.append(bar(item.position / item.duration));
   const card = el('article', 'card poster');
   card.append(cardHit(label || title, art, onPlay), cardLine(title, sub, actions ? moreButton(title, actions) : null));
@@ -2059,30 +2061,98 @@ function renderHero(hero) {
   }
   const more = action('⋯', 'btn-ghost btn-round', () => {}, 'Plus d’options');
   more.onclick = e => { e.stopPropagation(); openCardMenu(more, menu); };
-  body.append(kicker, el('h1', '', title), meta);
+  body.append(kicker, el('h1', '', title));
+  const facts = el('div', 'scores billboard-facts');
+  const plot = el('p', 'billboard-plot');
+  const sheet = type === 'next' ? (next.sheet || item.sheet) : item.sheet;
+  if (type !== 'live') {
+    showFacts(facts, plot, sheet);
+    body.append(facts);
+  }
+  body.append(meta);
+  if (type !== 'live') body.append(plot);
   if (progress) body.append(progress);
   body.append(actions);
   box.append(scene);
   if (!backdropUrl) box.append(poster);
   box.append(body);
-  // Fiche jamais ouverte : on va chercher son image de fond, sans attendre.
-  if (!backdropUrl && type !== 'live') {
-    fetchBackdrop(item).then(url => {
-      if (!url || !scene.isConnected) return;
-      const img = imageFor(url);
-      img.classList.add('sharp');
-      scene.replaceChildren(img);
-      poster.remove();
+  // Fiche jamais ouverte ou notes jamais demandees : on complete, sans attendre.
+  if (type !== 'live' && (!sheet || !sheet.omdb)) {
+    completeSheet(item, sheet).then(found => {
+      if (!found || !scene.isConnected) return;
+      showFacts(facts, plot, found.sheet);
+      if (found.backdrop && !backdropUrl) {
+        const img = imageFor(found.backdrop);
+        img.classList.add('sharp');
+        scene.replaceChildren(img);
+        poster.remove();
+      }
     });
   }
 }
 
-function fetchBackdrop(item) {
+// Notes (IMDb, Rotten Tomatoes), annee et genres sous le titre ; resume dessous.
+function showFacts(box, plot, sheet) {
+  sheet = sheet || {};
+  showScores(box, sheet, sheet.omdb || {});
+  const genres = String(sheet.genre || '').split(/\s*[,/]\s*/).filter(Boolean).slice(0, 2).join(', ');
+  const line = [sheet.year, genres].filter(Boolean).join(' · ');
+  if (line) box.append(el('span', 'facts-line', line));
+  box.hidden = !box.children.length;
+  plot.textContent = sheet.plot || '';
+  plot.hidden = !sheet.plot;
+}
+
+// Film ou serie d'une entree d'historique : l'adresse de sa fiche.
+function sheetRef(item) {
   const d = item.data || {};
-  const path = item.kind === 'movie'
-    ? '/vod/info?provider=' + encodeURIComponent(d.provider_id) + '&id=' + d.stream_id
-    : '/series/info?provider=' + encodeURIComponent(d.provider_id) + '&id=' + d.series_id;
-  return api(path, {skipAuthRedirect: true}).then(info => (info.extra || {}).backdrop).catch(() => null);
+  return item.kind === 'movie'
+    ? {kind: 'movie', provider: d.provider_id, id: d.stream_id}
+    : {kind: 'series', provider: d.provider_id, id: d.series_id};
+}
+
+// Complete le resume d'une fiche : fiche du panel si jamais lue, puis notes OMDb.
+// Rend {sheet, backdrop} ou null.
+async function completeSheet(item, sheet) {
+  const ref = sheetRef(item);
+  if (!ref.provider || ref.id == null) return null;
+  const query = '?provider=' + encodeURIComponent(ref.provider) + '&id=' + ref.id;
+  let backdrop = null;
+  try {
+    if (!sheet) {
+      const info = await api((ref.kind === 'movie' ? '/vod/info' : '/series/info') + query, {skipAuthRedirect: true});
+      const extra = info.extra || {};
+      backdrop = extra.backdrop || null;
+      sheet = {year: extra.year, genre: extra.genre, rating: extra.rating, plot: String(info.plot || '').slice(0, 320)};
+    }
+    if (!sheet.omdb) sheet = {...sheet, omdb: await api('/ratings' + query + '&kind=' + ref.kind, {skipAuthRedirect: true}) || {}};
+  } catch {
+    if (!sheet) return null;
+  }
+  return {sheet, backdrop};
+}
+
+// Note IMDb dans le coin d'une vignette.
+function ratingChip(art, sheet) {
+  const imdb = sheet && sheet.omdb && sheet.omdb.imdb_rating;
+  if (!imdb || art.querySelector('.rating')) return;
+  const chip = el('span', 'rating');
+  chip.append(el('b', '', 'IMDb'), document.createTextNode(' ' + imdb));
+  art.append(chip);
+}
+
+function queueCard(queue, item, sheet, card) {
+  if (!sheet || !sheet.omdb) queue.push({item, sheet, art: card.querySelector('.art')});
+  return card;
+}
+
+// Notes des cartes de l'accueil jamais demandees : une a la fois, en fond.
+async function completeCards(queue, serial) {
+  for (const {item, sheet, art} of queue.slice(0, 12)) {
+    if (serial !== state.homeRender || !art.isConnected) return;
+    const found = await completeSheet(item, sheet);
+    if (found) ratingChip(art, found.sheet);
+  }
 }
 
 async function renderHome() {
@@ -2097,13 +2167,14 @@ async function renderHome() {
   $('#home-empty').hidden = !!hero;
   const rows = [];
 
+  const pending = [];
   const others = watching.filter(e => e !== hero);
-  if (others.length) rows.push(homeRow('Continuer à regarder', others.map(({item}) => wideCard(item))));
+  if (others.length) rows.push(homeRow('Continuer à regarder', others.map(({item}) => queueCard(pending, item, item.sheet, wideCard(item)))));
 
   const series = upNext.filter(e => e !== hero);
   if (series.length) {
-    rows.push(homeRow('Séries en cours', series.map(({item, next}) => posterCard({
-      title: item.title, icon: item.icon,
+    rows.push(homeRow('Séries en cours', series.map(({item, next}) => queueCard(pending, item, next.sheet || item.sheet, posterCard({
+      title: item.title, icon: item.icon, sheet: next.sheet || item.sheet,
       sub: [seasonEpisode(next.season, next.episode), episodeTitle(next.title, episodeCode(next.season, next.episode))].filter(Boolean).join(' · '),
       badge: (next.episode ? 'É' + next.episode : 'Épisode') + ' à suivre',
       label: 'Lancer ' + item.title + ' ' + episodeCode(next.season, next.episode),
@@ -2112,7 +2183,7 @@ async function renderHome() {
         {label: 'Tous les épisodes', run: () => openSeriesOf(next, item)},
         {label: 'Retirer de la liste', run: () => forget(item), danger: true}
       ]
-    }))));
+    })))));
   }
 
   const recent = channels.filter(i => !hero || hero.item !== i).slice(0, 14);
@@ -2146,6 +2217,7 @@ async function renderHome() {
     }), {label: 'Tout voir', mode: 'prepared'}));
   }
   $('#home-rows').replaceChildren(...rows);
+  completeCards(pending, serial);
 
   // Programme en cours sous chaque chaine, depuis le guide en cache.
   const tiles = [...$$('#home .card.channel[data-epg-id]')];

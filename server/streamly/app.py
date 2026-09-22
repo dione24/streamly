@@ -1007,10 +1007,28 @@ class Handler(BaseHTTPRequestHandler):
                 (cat.series_set_extra if kind == 'series' else cat.vod_set_extra)(pid, iid, extra)
         return extra.get('omdb') or {}
 
-    def _backdrop(self, kind, pid, iid):
+    def _sheet(self, kind, pid, iid):
+        """Image de fond et resume de la fiche, pour l'accueil.
+
+        `sheet` manque si la fiche du panel n'a jamais ete lue ; `sheet.omdb`
+        manque si OMDb n'a pas encore ete interroge : le client sait alors
+        quoi demander.
+        """
         row = STATE.catalog.series_get(pid, iid) if kind == 'series' else STATE.catalog.vod_get(pid, iid)
-        extra = (row or {}).get('extra') or {}
-        return {k: extra[k] for k in ('backdrop', 'backdrop_small') if extra.get(k)}
+        if not row:
+            return {}
+        extra = row.get('extra')
+        found = {k: extra[k] for k in ('backdrop', 'backdrop_small') if (extra or {}).get(k)}
+        if extra is not None:
+            sheet = {k: extra[k] for k in ('year', 'genre', 'rating') if extra.get(k)}
+            plot = str(row.get('plot') or '').strip()
+            if plot:
+                sheet['plot'] = plot[:320]
+            if extra.get('omdb_at'):
+                sheet['omdb'] = {k: v for k, v in (extra.get('omdb') or {}).items()
+                                 if k in ('imdb_rating', 'rotten_tomatoes', 'metacritic', 'rated')}
+            found['sheet'] = sheet
+        return found
 
     def _history(self, account):
         """Historique du compte, et l'episode a suivre de chaque serie terminee."""
@@ -1020,12 +1038,12 @@ class Handler(BaseHTTPRequestHandler):
             pid = item['data'].get('provider_id')
             if item['kind'] != 'live' and pid not in configured:
                 continue
-            # Image de fond de la fiche, si elle a deja ete lue : l'accueil en
-            # fait son affiche plein cadre.
+            # Fond, notes et resume de la fiche, si elle a deja ete lue :
+            # l'accueil en fait son affiche plein cadre.
             if item['kind'] == 'movie':
-                item.update(self._backdrop('movie', pid, item['data'].get('stream_id')))
+                item.update(self._sheet('movie', pid, item['data'].get('stream_id')))
             elif item['kind'] == 'episode' and item['data'].get('series_id') is not None:
-                item.update(self._backdrop('series', pid, item['data']['series_id']))
+                item.update(self._sheet('series', pid, item['data']['series_id']))
             items.append(item)
             if item['kind'] == 'episode':
                 latest.setdefault(item['grp'], item)
@@ -1038,7 +1056,7 @@ class Handler(BaseHTTPRequestHandler):
             if nxt:
                 upcoming[grp] = dict(nxt, provider_id=d['provider_id'], series_id=d['series_id'],
                                      height=d.get('height'), series_title=item['title'], icon=item['icon'],
-                                     **self._backdrop('series', d['provider_id'], d['series_id']))
+                                     **self._sheet('series', d['provider_id'], d['series_id']))
         return {'items': items, 'next': upcoming}
 
     # --------------------------------------------------------------- API

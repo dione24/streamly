@@ -110,26 +110,43 @@ def _bps(value):
     return int(float(value[:-1]) * {'k': 1000, 'm': 1000000}[value[-1]]) if value[-1:] in ('k', 'm') else int(float(value))
 
 
-def probe(source, user_agent, guarded=False):
-    try:
-        result = subprocess.run([
-            'ffprobe', '-v', 'error', '-rw_timeout', '5000000',
-            '-user_agent', user_agent, '-show_streams', '-show_format',
-            '-of', 'json'] + (RELAY_INPUT_OPTIONS if guarded else []) + [source],
-            capture_output=True, timeout=7, check=True)
-        data = json.loads(result.stdout)
-        video = next(s for s in data['streams'] if s['codec_type'] == 'video')
-        audio = next((s for s in data['streams'] if s['codec_type'] == 'audio'), {})
-        fps = float(Fraction(video.get('avg_frame_rate') or video.get('r_frame_rate') or '25'))
-        return {'height': int(video['height']), 'width': int(video['width']),
-                'fps': max(1, min(60, fps or 25)), 'codec': video.get('codec_name'),
-                'pix_fmt': video.get('pix_fmt'), 'video_bitrate': _int0(video.get('bit_rate')),
-                'bitrate': _int0(data.get('format', {}).get('bit_rate')),
-                'audio_codec': audio.get('codec_name'),
-                'audio_bitrate_src': _int0(audio.get('bit_rate')),
-                'streams': data['streams'], 'duration': data.get('format', {}).get('duration')}
-    except (OSError, ValueError, KeyError, StopIteration, ZeroDivisionError, subprocess.SubprocessError):
-        return {'height': 720, 'width': 1280, 'fps': 25, 'unverified': True, 'streams': []}
+# Refus du panel : abonnement a une connexion dont la precedente n'est pas
+# encore liberee (fiche puis preparation, episode suivant), ou trop d'appels.
+REFUSED = re.compile(rb'\b(401|403|429|458|509)\b|Unauthorized|Forbidden|Too Many', re.I)
+
+
+def probe(source, user_agent, guarded=False, attempts=4):
+    """Format de la source ; le panel met une a deux secondes a liberer une connexion."""
+    for attempt in range(attempts):
+        try:
+            return _probe_once(source, user_agent, guarded)
+        except subprocess.CalledProcessError as exc:
+            if attempt + 1 < attempts and REFUSED.search(exc.stderr or b''):
+                time.sleep(1.5 + attempt)
+                continue
+        except (OSError, ValueError, KeyError, StopIteration, ZeroDivisionError, subprocess.SubprocessError):
+            pass
+        break
+    return {'height': 720, 'width': 1280, 'fps': 25, 'unverified': True, 'streams': []}
+
+
+def _probe_once(source, user_agent, guarded):
+    result = subprocess.run([
+        'ffprobe', '-v', 'error', '-rw_timeout', '5000000',
+        '-user_agent', user_agent, '-show_streams', '-show_format',
+        '-of', 'json'] + (RELAY_INPUT_OPTIONS if guarded else []) + [source],
+        capture_output=True, timeout=7, check=True)
+    data = json.loads(result.stdout)
+    video = next(s for s in data['streams'] if s['codec_type'] == 'video')
+    audio = next((s for s in data['streams'] if s['codec_type'] == 'audio'), {})
+    fps = float(Fraction(video.get('avg_frame_rate') or video.get('r_frame_rate') or '25'))
+    return {'height': int(video['height']), 'width': int(video['width']),
+            'fps': max(1, min(60, fps or 25)), 'codec': video.get('codec_name'),
+            'pix_fmt': video.get('pix_fmt'), 'video_bitrate': _int0(video.get('bit_rate')),
+            'bitrate': _int0(data.get('format', {}).get('bit_rate')),
+            'audio_codec': audio.get('codec_name'),
+            'audio_bitrate_src': _int0(audio.get('bit_rate')),
+            'streams': data['streams'], 'duration': data.get('format', {}).get('duration')}
 
 
 class CapacityError(RuntimeError):
