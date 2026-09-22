@@ -36,9 +36,10 @@ abonnement IPTV ──▶ Streamly (FFmpeg, à la demande) ──▶ interface w
   téléphone), grande affiche d'ouverture, rangées de cartes, fiches avec
   affiche ; une affiche est générée avec le titre quand le fournisseur n'en
   donne pas.
-- Direct : catégories, chaînes numérotées avec le programme en cours, lecteur
-  toujours visible avec « maintenant / ensuite » ; grilles d'affiches pour les
-  films et les séries ; pilotable au clavier et à la télécommande.
+- Direct, films et séries en grilles : vignettes de chaînes numérotées avec le
+  programme en cours, pastilles de catégories, affiches ; en lecture, « maintenant
+  / ensuite » et la rangée des chaînes sous l'image pour zapper ; pilotable au
+  clavier et à la télécommande.
 - Écrans explicites plutôt qu'une image figée : préparation (avec le débit
   mesuré de votre connexion), reprise du direct, connexion trop lente pour la
   qualité en cours, connexion interrompue, chaîne indisponible chez le

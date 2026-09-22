@@ -221,8 +221,15 @@ function clearZapOverlay() {
 
 function markNowPlaying(channel) {
   const key = channelKey(channel);
-  const cards = Array.from($$('#channels li[data-channel-key]'));
+  const cards = Array.from($$('#channels li[data-channel-key], #live-rail li[data-channel-key]'));
   cards.forEach(card => card.classList.toggle('now-playing', card.dataset.channelKey === key));
+  const inRail = cards.find(card => card.closest('#live-rail') && card.dataset.channelKey === key);
+  // Defilement horizontal seul : scrollIntoView ferait aussi descendre la page
+  // et cacherait le haut de la video.
+  if (inRail) {
+    const rail = $('#live-rail');
+    rail.scrollTo({left: inRail.offsetLeft - (rail.clientWidth - inRail.offsetWidth) / 2, behavior: 'smooth'});
+  }
   if (!channel) return;
   const idx = state.channelList.findIndex(item => sameChannel(item, channel));
   state.selectedChannelIndex = idx >= 0 ? idx : state.selectedChannelIndex;
@@ -230,7 +237,7 @@ function markNowPlaying(channel) {
 
 function nextChannelFromCurrent(offset) {
   if (!state.current) return null;
-  if (state.mode !== 'live') return null;
+  if (state.mode !== 'live' && state.mode !== 'favorites') return null;
   const list = state.channelList;
   if (!list.length) return null;
   const idx = list.findIndex(item => sameChannel(item, state.current));
@@ -256,7 +263,7 @@ function showZapOverlay(channel, direction) {
 }
 
 function zapChannel(offset) {
-  if (!state.current || state.mode !== 'live' || $('#player-wrap').hidden) return;
+  if (!state.current || (state.mode !== 'live' && state.mode !== 'favorites') || $('#player-wrap').hidden) return;
   const target = nextChannelFromCurrent(offset);
   if (!target) return;
   showZapOverlay(target, offset);
@@ -276,6 +283,7 @@ async function stop() {
   state.startAt = 0;
   clearTimeout(state.liveTimer);
   tabStore.remove('playing');
+  markNowPlaying(null);
   clearZapOverlay();
   $('#player-wrap').hidden = true;
   stageScreen(null);
@@ -453,8 +461,7 @@ function playbackUI(title, live) {
   document.body.classList.add('is-playing', 'reader-focus');
 
   // Restaurer état plié/déplié de la barre latérale & télémétrie
-  const prefCollapsed = store.get('sidebar_collapsed') === '1';
-  document.body.classList.toggle('catalogue-collapsed', prefCollapsed);
+  document.body.classList.remove('catalogue-collapsed');
   updateSidebarUI();
 
   const telem = $('#telemetry');
@@ -465,8 +472,8 @@ function playbackUI(title, live) {
 
   $('#live-badge').innerHTML = live ? '<span class="pulse-dot" aria-hidden="true"></span> DIRECT' : 'FILM';
   $('#live-badge').classList.toggle('film', !live);
-  // Sans liste de chaines a cote (accueil, films), rien a masquer.
-  $('#toggle-sidebar').hidden = !(live && (state.mode === 'live' || state.mode === 'favorites'));
+  $('#toggle-sidebar').hidden = true;
+  renderLiveRail(live);
   $('#back-live').hidden = !live;
   $('#player-status').textContent = 'Préparation de la lecture…';
   // L'encodeur met quelques secondes a produire : on le dit, plutot qu'un ecran noir.
@@ -748,76 +755,85 @@ function renderSkeletons(count = 6) {
 // Catalogue row
 function row(c, kind = 'channel', number = 0) {
   const movie = kind === 'movie' || kind === 'series';
-  const li = el('li', 'channel-card' + (movie ? ' movie-card' : ''));
+  return movie ? posterRow(c, kind) : channelRow(c, number);
+}
+
+// Film ou serie : affiche, titre et categorie dessous.
+function posterRow(c, kind) {
+  const li = el('li', 'channel-card movie-card');
   li.dataset.channelKey = channelKey(c);
   const button = el('button', 'channel-main');
   button.type = 'button';
-  if (!movie && number) button.append(el('span', 'ch-num', String(number)));
-  const nameLabel = movie ? c.title : c.label;
-  const fallback = (nameLabel || '?').trim().slice(0, 2).toUpperCase();
   // Affiche : l'image du panel, sinon une affiche generee avec le titre.
-  const iconSlot = movie ? artwork(c.icon, nameLabel, 'logo-slot') : el('span', 'logo-slot');
-  if (!movie) iconSlot.style.backgroundColor = getChannelColor(nameLabel);
-  const placeholder = el('span', 'logo-placeholder', fallback);
-  if (!movie) iconSlot.append(placeholder);
-
-  if (!movie && c.icon && /^https?:\/\//.test(c.icon)) {
-    // Les logos viennent de serveurs tiers, lents, et souvent en http (bloques
-    // sur une page https). Le serveur les relaie et les garde : la vignette
-    // s'affiche tout de suite, le logo la remplace quand il arrive.
-    const img = el('img', 'channel-logo');
-    img.src = '/api/logo?u=' + encodeURIComponent(c.icon);
-    img.alt = '';
-    img.loading = 'lazy';
-    img.decoding = 'async';
-    img.onload = () => { img.classList.add('ready'); placeholder.hidden = true; };
-    img.onerror = () => img.remove();
-    iconSlot.append(img);
-  }
-
-  button.append(iconSlot);
+  button.append(artwork(c.icon, c.title, 'logo-slot'));
   const meta = el('span', 'meta');
-  meta.append(
-    el('div', 'name', nameLabel),
-    el('div', 'sub', movie ? (c.category_name || (kind === 'series' ? 'Série' : 'Film'))
-                           : [c.category || 'Direct', c.lang].filter(Boolean).join(' · '))
-  );
-  if (!movie && c.epg_id) {
-    // Rempli apres coup par loadNowNext : la liste s'affiche sans attendre le guide.
-    const now = el('div', 'epg-now');
-    now.dataset.epgId = c.epg_id;
-    now.hidden = true;
-    now.append(el('span', 'epg-title'), el('span', 'epg-bar'));
-    meta.append(now);
-  }
+  meta.append(el('div', 'name', c.title), el('div', 'sub', c.category_name || (kind === 'series' ? 'Série' : 'Film')));
   button.append(meta);
-  button.onclick = () => (kind === 'series' ? seriesDialog(c)
-                        : kind === 'movie' ? movieDialog(c) : play(c)).catch(failure);
-  if (!movie) button.ondblclick = () => fullscreenWhenReady();
+  button.onclick = () => (kind === 'series' ? seriesDialog(c) : movieDialog(c)).catch(failure);
+  li.append(button);
+  return li;
+}
+
+// Chaine : vignette 16:9 (logo, numero, avancement du programme), puis le nom
+// et le programme en cours, rempli apres coup par loadNowNext.
+function channelRow(c, number = 0) {
+  const li = el('li', 'channel-card live-card');
+  li.dataset.channelKey = channelKey(c);
+  if (c.epg_id) li.dataset.epgId = c.epg_id;
+  const button = el('button', 'channel-main');
+  button.type = 'button';
+  const tile = paint(el('span', 'tile'), c.label);
+  if (number) tile.append(el('span', 'ch-num', String(number)));
+  tile.append(el('span', 'brand', c.label || c.canonical));
+  // Les logos viennent de serveurs tiers, lents, et souvent en http (bloques
+  // sur une page https). Le serveur les relaie et les garde : la vignette
+  // s'affiche tout de suite, le logo la remplace quand il arrive.
+  const img = imageFor(c.icon, () => tile.classList.add('has-img'));
+  if (img) tile.append(img);
+  const progress = bar(0);
+  progress.hidden = true;
+  tile.append(progress);
+  const meta = el('span', 'meta');
+  meta.append(el('div', 'name', c.label),
+    el('div', 'sub', [c.category || 'Direct', c.lang].filter(Boolean).join(' · ')));
+  button.append(tile, meta);
+  button.onclick = () => play(c).catch(failure);
+  button.ondblclick = () => fullscreenWhenReady();
   li.append(button);
 
-  if (!movie) {
-    const star = el('button', 'star' + (isFav(c) ? ' on' : ''), '★');
-    star.setAttribute('aria-label', 'Favori : ' + c.label);
-    star.setAttribute('aria-pressed', String(isFav(c)));
-    star.onclick = async e => {
-      e.stopPropagation();
-      star.disabled = true;
-      try {
-        await post(isFav(c) ? '/favorites/delete' : '/favorites', {lang: c.lang, canonical: c.canonical, label: c.label});
-        state.favorites = await api('/favorites').catch(() => []);
-        star.classList.toggle('on', isFav(c));
-        star.setAttribute('aria-pressed', String(isFav(c)));
-        if (state.mode === 'favorites') await renderChannels();
-      } catch (err) {
-        failure(err);
-      } finally {
-        star.disabled = false;
-      }
-    };
-    li.append(star);
-  }
+  const star = el('button', 'star' + (isFav(c) ? ' on' : ''), '★');
+  star.type = 'button';
+  star.setAttribute('aria-label', 'Ma liste : ' + c.label);
+  star.setAttribute('aria-pressed', String(isFav(c)));
+  star.onclick = async e => {
+    e.stopPropagation();
+    star.disabled = true;
+    try {
+      await post(isFav(c) ? '/favorites/delete' : '/favorites', {lang: c.lang, canonical: c.canonical, label: c.label});
+      state.favorites = await api('/favorites').catch(() => []);
+      star.classList.toggle('on', isFav(c));
+      star.setAttribute('aria-pressed', String(isFav(c)));
+      if (state.mode === 'favorites') await renderChannels();
+    } catch (err) {
+      failure(err);
+    } finally {
+      star.disabled = false;
+    }
+  };
+  li.append(star);
   return li;
+}
+
+// Sous le lecteur, les chaines de la liste en cours : on zappe sans quitter
+// l'image. Reconstruite seulement quand la liste change.
+function renderLiveRail(live) {
+  const list = live ? state.channelList.slice(0, 150) : [];
+  $('#live-rail-wrap').hidden = !list.length;
+  const key = list.length + '|' + list.map(channelKey).slice(0, 3).join('|');
+  if (!list.length || key === state.railKey) return;
+  state.railKey = key;
+  $('#live-rail').replaceChildren(...list.map((c, i) => channelRow(c, i + 1)));
+  loadNowNext(list).catch(() => {});
 }
 
 // Programme en cours : une requete par page de chaines, sur le guide en cache du serveur.
@@ -828,13 +844,17 @@ async function loadNowNext(items) {
   const ids = [...new Set(items.map(c => c.epg_id).filter(Boolean))];
   if (!ids.length) return;
   const guide = await api('/guide/now?ids=' + encodeURIComponent(ids.join(',')), {skipAuthRedirect: true});
-  $$('#channels .epg-now').forEach(slot => {
-    const entry = guide[slot.dataset.epgId];
+  $$('#channels li[data-epg-id], #live-rail li[data-epg-id]').forEach(card => {
+    const entry = guide[card.dataset.epgId];
     const program = entry && (entry.now || entry.next);
     if (!program) return;
-    slot.querySelector('.epg-title').textContent = (entry.now ? '' : clock(program.start) + ' · ') + program.title;
-    slot.querySelector('.epg-bar').style.setProperty('--progress', (entry.now ? progressOf(entry.now) : 0) + '%');
-    slot.hidden = false;
+    card.querySelector('.meta .sub').textContent = (entry.now ? '' : 'À ' + clock(program.start) + ' · ') + program.title;
+    card.classList.add('has-program');
+    if (entry.now) {
+      const progress = card.querySelector('.tile .bar');
+      progress.firstChild.style.width = progressOf(entry.now) + '%';
+      progress.hidden = false;
+    }
   });
 }
 
@@ -895,7 +915,7 @@ async function renderChannels(more = false) {
     if (serial !== state.request) return;
     const hasMore = state.mode !== 'favorites' && items.length > state.pageSize;
     if (hasMore) items.pop();
-    if (state.mode === 'live') {
+    if (state.mode === 'live' || state.mode === 'favorites') {
       state.channelList = more ? state.channelList.concat(items) : [...items];
     } else {
       state.channelList = [];
@@ -1149,7 +1169,7 @@ async function setMode(mode, {route = true} = {}) {
   $('#home').hidden = mode !== 'home';
   $('#preparations').hidden = mode !== 'prepared';
   $('#catalogue').hidden = mode === 'prepared' || mode === 'home';
-  $('#filters').hidden = mode === 'favorites' || mode === 'prepared' || mode === 'home';
+  $('#filters').hidden = mode === 'prepared' || mode === 'home';
   $('#recent-wrap').hidden = mode !== 'live' || !recentChannels().length;
   if (mode === 'live') renderRecents();
   

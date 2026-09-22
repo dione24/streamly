@@ -219,163 +219,148 @@ body.mode-home:not(.scrolled):not(.is-playing):not(.view-config) .topbar::before
   #app.tv { height: 100dvh; overflow: hidden; }
   .stage { height: 100dvh; display: flex; flex-direction: column; }
   body.mode-home:not(.is-playing):not(.view-config) .stage { padding-top: 0; }
-  .workspace { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
+  .workspace { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 
-  /* --- Direct : categories | chaines | lecteur */
-  body.mode-live .workspace { grid-template-columns: 240px minmax(330px, 0.85fr) minmax(0, 1.55fr); }
-  body.mode-live #filters { grid-column: 1; }
-  body.mode-live #catalogue { grid-column: 2; }
-  body.mode-live #viewer { grid-column: 3; }
-
-  /* --- Ma liste : chaines | lecteur */
-  body.mode-favorites .workspace { grid-template-columns: minmax(330px, 0.85fr) minmax(0, 1.55fr); }
-  body.mode-favorites #filters { display: none; }
-
-  /* Mode cinema : le lecteur seul */
-  body.catalogue-collapsed .workspace { grid-template-columns: minmax(0, 1fr) !important; }
-  body.catalogue-collapsed #filters, body.catalogue-collapsed #catalogue { display: none !important; }
-  body.catalogue-collapsed #viewer { grid-column: 1 !important; padding-inline: clamp(24px, 8vw, 160px); }
-
-  #filters { min-height: 0; overflow-y: auto; padding: 22px 14px 30px 24px; border-right: 1px solid var(--line); }
-  #catalogue { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
-  #catalogue .catalogue-heading { padding: 22px 20px 14px; }
-  #channels { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 10px 20px; }
-  #viewer { min-height: 0; overflow-y: auto; padding: 22px 28px 32px; display: flex; flex-direction: column; gap: 18px; }
-
-  /* --- Films et series : en-tete, filtres en ligne, grille d'affiches */
-  body.mode-vod .workspace, body.mode-series .workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto; }
-  body.mode-vod #catalogue, body.mode-series #catalogue { display: contents; }
-  body.mode-vod #catalogue .catalogue-heading, body.mode-series #catalogue .catalogue-heading { grid-row: 1; padding: 26px var(--pad) 12px; }
-  body.mode-vod #filters, body.mode-series #filters { grid-row: 2; }
-  body.mode-vod #channels, body.mode-series #channels { grid-row: 3; overflow-y: auto; padding: 8px var(--pad) 40px; }
-  body.mode-vod #empty, body.mode-series #empty, body.mode-vod #load-more, body.mode-series #load-more { grid-row: 4; }
-  body.mode-vod #viewer, body.mode-series #viewer { display: none; }
+  /* --- Direct, Ma liste, Films, Series : en-tete, filtres en ligne, grille */
+  body.mode-live .workspace, body.mode-favorites .workspace,
+  body.mode-vod .workspace, body.mode-series .workspace { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+  #catalogue { display: contents; }
+  #catalogue .catalogue-heading { grid-row: 1; padding: 26px var(--pad) 12px; }
+  #filters { grid-row: 2; }
+  #channels { grid-row: 3; min-height: 0; overflow-y: auto; padding: 8px var(--pad) 40px; }
+  #empty, #load-more { grid-row: 4; }
+  #viewer { grid-row: 1 / -1; min-height: 0; overflow-y: auto; padding: 22px clamp(24px, 8vw, 160px) 40px; display: flex; flex-direction: column; gap: 16px; }
+  body:not(.is-playing) #viewer { display: none; }
 
   /* --- Pages pleine largeur */
   #home, #preparations, #config { grid-column: 1 / -1; grid-row: 1 / -1; min-height: 0; overflow-y: auto; }
-  body.mode-home #filters, body.mode-home #catalogue, body.mode-home #viewer,
-  body.mode-prepared #filters, body.mode-prepared #catalogue, body.mode-prepared #viewer,
+  body.mode-home #filters, body.mode-home #catalogue,
+  body.mode-prepared #filters, body.mode-prepared #catalogue,
   body.view-config #filters, body.view-config #catalogue, body.view-config #viewer { display: none; }
 
-  /* Lecture depuis une page : le lecteur prend toute la scene */
-  body.is-playing.mode-home .workspace, body.is-playing.mode-prepared .workspace,
-  body.is-playing.mode-vod .workspace, body.is-playing.mode-series .workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
-  body.is-playing.mode-home #viewer, body.is-playing.mode-prepared #viewer,
-  body.is-playing.mode-vod #viewer, body.is-playing.mode-series #viewer { display: flex; grid-column: 1; grid-row: 1; padding-inline: clamp(24px, 8vw, 160px); }
-  body.is-playing.mode-home #home, body.is-playing.mode-prepared #preparations,
-  body.is-playing.mode-vod #catalogue, body.is-playing.mode-series #catalogue,
-  body.is-playing.mode-vod #filters, body.is-playing.mode-series #filters { display: none; }
+  /* Lecture : le lecteur prend toute la scene, la rangee des chaines dessous */
+  body.is-playing .workspace { grid-template-rows: minmax(0, 1fr); }
+  body.is-playing #catalogue, body.is-playing #filters, body.is-playing #home, body.is-playing #preparations { display: none; }
 }
 
 /* ====================================================================
-   Filtres
+   Filtres (en ligne sous le titre)
    ==================================================================== */
-.filters { display: flex; flex-direction: column; gap: 14px; }
-.filters .category-filter { gap: 6px; }
-.category-search-box { position: relative; display: flex; align-items: center; }
-.category-search-box input[type="search"] { min-height: 34px; padding-left: 30px; font-size: 0.84rem; }
-.category-search-box .search-icon { left: 10px; font-size: 0.95rem; }
-.category-chips { display: flex; flex-direction: column; gap: 1px; }
+.filters { display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-end; gap: 10px; padding: 0 var(--pad) 12px; }
+.filters > label, .filters .preferences > label { width: 210px; min-width: 0; }
+.filters .preferences { display: contents; }
+.preference-intro { display: none; }
+#mode-hint { align-self: center; max-width: 260px; font-size: 0.74rem; color: var(--faint); }
+.budget-fields { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.budget-fields label { width: 120px; }
+.budget-presets { display: flex; gap: 6px; }
+.budget-preset-btn { min-height: 40px; font-size: 0.8rem; }
+#count { margin-left: auto; padding-bottom: 10px; font-size: 0.74rem; color: var(--faint); }
+/* Direct : pastilles de categories en bande ; films et series : un menu */
+.filters .category-filter { flex: 1 1 100%; order: 10; min-width: 0; width: auto; font-size: 0; gap: 0; }
+body.mode-vod .filters .category-filter, body.mode-series .filters .category-filter { flex: 0 0 auto; order: 0; width: 210px; font-size: 0.78rem; gap: 6px; }
+.category-search-box, #category-empty { display: none !important; }
+.category-chips { display: flex; gap: 8px; overflow-x: auto; margin: 4px calc(var(--pad) * -1) 0; padding: 2px var(--pad) 4px; scrollbar-width: none; }
+.category-chips::-webkit-scrollbar { display: none; }
 .category-chip {
-  justify-content: flex-start; min-height: 34px; padding: 0 10px; border-radius: 8px;
-  background: transparent; color: var(--muted); font-weight: 500; font-size: 0.86rem; text-align: left;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; line-height: 34px;
+  flex: 0 0 auto; min-height: 34px; padding: 0 16px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07); color: var(--muted); font-weight: 500; font-size: 0.84rem; white-space: nowrap;
 }
-.category-chip:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
-.category-chip.active { background: rgba(139, 92, 246, 0.18); color: #fff; }
-#count { font-size: 0.74rem; color: var(--faint); }
-/* Direct : liste de categories ; films et series : un simple menu */
+.category-chip:hover { background: rgba(255, 255, 255, 0.12); color: var(--text); }
+.category-chip.active { background: #fff; color: #0b0b12; }
 body.mode-live .category-select, body.mode-favorites .category-select { display: none; }
-body.mode-vod .category-search-box, body.mode-series .category-search-box,
-body.mode-vod #category-chips, body.mode-series #category-chips,
-body.mode-vod #category-empty, body.mode-series #category-empty { display: none !important; }
-
-@media (min-width: 1000px) {
-  body.mode-vod #filters, body.mode-series #filters {
-    flex-direction: row; align-items: flex-end; flex-wrap: wrap; gap: 10px;
-    padding: 0 var(--pad) 10px; border: 0; overflow: visible;
-  }
-  body.mode-vod #filters label, body.mode-series #filters label { width: 220px; }
-  body.mode-vod #filters #count, body.mode-series #filters #count { margin-left: auto; padding-bottom: 10px; }
-}
+body.mode-vod #category-chips, body.mode-series #category-chips { display: none !important; }
+/* Ma liste : ni abonnement, ni langue, ni categorie ; les reglages de lecture restent */
+body.mode-favorites .filters > label, body.mode-favorites #count { display: none; }
+/* Films et series : pas de reglages de lecture du direct */
+body.mode-vod #preferences, body.mode-series #preferences { display: none; }
 
 /* ====================================================================
    En-tete de catalogue
    ==================================================================== */
-.catalogue-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.catalogue-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .catalogue-heading .eyebrow { display: none; }
-.catalogue-heading h2 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; }
+.catalogue-heading h2 { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; }
 .catalogue-heading .accent { display: none; }
-.catalogue-heading .search-box { flex: 1 1 200px; max-width: 340px; }
-body.mode-live .catalogue-heading, body.mode-favorites .catalogue-heading { flex-direction: column; align-items: stretch; gap: 12px; }
-body.mode-live .catalogue-heading .search-box, body.mode-favorites .catalogue-heading .search-box { flex: none; max-width: none; }
+.catalogue-heading .search-box { flex: 0 1 340px; min-width: 0; }
 
 /* ====================================================================
-   Liste des chaines
+   Grilles : chaines en vignettes, films et series en affiches
    ==================================================================== */
-.channels { list-style: none; margin: 0; }
-.channel-card { position: relative; display: flex; align-items: center; border-radius: var(--radius); content-visibility: auto; contain-intrinsic-size: auto 60px; }
+.channels { list-style: none; margin: 0; display: grid; align-content: start; }
+body.mode-live .channels, body.mode-favorites .channels { grid-template-columns: repeat(auto-fill, minmax(214px, 1fr)); gap: 22px 14px; }
+body.mode-vod .channels, body.mode-series .channels { grid-template-columns: repeat(auto-fill, minmax(138px, 1fr)); gap: 24px 14px; }
+.channel-card { position: relative; display: block; min-width: 0; content-visibility: auto; }
 .channel-main {
-  flex: 1 1 auto; min-width: 0; justify-content: flex-start; gap: 12px;
-  min-height: 60px; padding: 8px 44px 8px 10px; border-radius: var(--radius);
-  background: transparent; font-weight: 400; text-align: left;
+  display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: 100%;
+  min-height: 0; padding: 0; background: transparent; font-weight: 400; text-align: left;
 }
-.channel-main:hover { background: rgba(255, 255, 255, 0.05); }
+.channel-main:hover { background: transparent; }
 .channel-main:active { transform: none; }
-.ch-num { flex: 0 0 24px; font-size: 0.74rem; font-variant-numeric: tabular-nums; color: var(--faint); text-align: right; }
-.logo-slot { position: relative; flex: 0 0 56px; width: 56px; height: 38px; display: grid; place-items: center; overflow: hidden; border-radius: 7px; }
-.logo-slot:not(.art) { background-color: #1a1a2a; }
-.channel-logo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 5px; opacity: 0; transition: opacity 0.3s; }
-.channel-logo.ready { opacity: 1; }
-.logo-placeholder { font: 700 0.86rem/1 var(--display); letter-spacing: 0.02em; color: rgba(255, 255, 255, 0.72); text-transform: uppercase; }
-.meta { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; }
-.meta .name { font-size: 0.9rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.meta .sub { font-size: 0.74rem; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.epg-now { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
-.epg-title { font-size: 0.76rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.epg-bar { position: relative; height: 2px; max-width: 160px; border-radius: 2px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
-.epg-bar::after { content: ""; position: absolute; inset: 0 auto 0 0; width: var(--progress, 0%); background: rgba(255, 255, 255, 0.7); }
+.channel-main:focus-visible { outline: none; }
+.meta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.meta .name { font-size: 0.88rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meta .sub { font-size: 0.76rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Vignette de chaine */
+.live-card { contain-intrinsic-size: auto 180px; }
+.live-card .tile { border-radius: var(--radius); transition: transform 0.25s var(--ease), box-shadow 0.25s; }
+.live-card .channel-main:hover .tile, .live-card .channel-main:focus-visible .tile, .live-card.keyboard-selected .tile {
+  transform: scale(1.035); box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9), 0 16px 40px rgba(0, 0, 0, 0.6);
+}
+.live-card .meta { padding-right: 30px; }
+.live-card.has-program .meta .sub { color: rgba(235, 232, 250, 0.78); }
+.tile .ch-num {
+  position: absolute; top: 8px; left: 8px; z-index: 2; padding: 2px 7px; border-radius: 5px;
+  font-size: 0.66rem; font-weight: 700; font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, 0.85);
+  background: rgba(8, 8, 15, 0.66);
+}
+.live-card.now-playing .tile { box-shadow: 0 0 0 2px var(--violet), 0 16px 40px rgba(124, 58, 237, 0.35); }
+.live-card.now-playing .tile::after {
+  content: "EN COURS"; position: absolute; top: 8px; right: 8px; z-index: 2; padding: 2px 7px; border-radius: 5px;
+  font-size: 0.6rem; font-weight: 800; letter-spacing: 0.06em; background: var(--violet-deep); color: #fff;
+}
+.live-card.now-playing .meta .name { color: var(--accent); }
 .star {
-  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  position: absolute; right: -4px; bottom: 4px; z-index: 3;
   width: 32px; min-height: 32px; padding: 0; border-radius: 50%;
   background: transparent; color: var(--faint); font-size: 0.95rem; opacity: 0; transition: opacity 0.15s, color 0.15s;
 }
-.star:active { transform: translateY(-50%) scale(0.9); }
+.star:hover { background: rgba(255, 255, 255, 0.08); }
 .channel-card:hover .star, .star:focus-visible, .star.on { opacity: 1; }
 .star.on { color: var(--accent); }
-.channel-card.now-playing .channel-main { background: rgba(139, 92, 246, 0.16); box-shadow: inset 3px 0 0 var(--violet); }
-.channel-card.keyboard-selected .channel-main { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.85); }
 @media (hover: none) { .star { opacity: 1; } }
 
 /* Squelettes de chargement */
-.skeleton-card { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 8px 10px 8px 46px; }
-.skeleton-logo { flex: 0 0 56px; height: 38px; border-radius: 7px; background: var(--surface-2); }
-.skeleton-lines { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.skeleton-card { display: flex; flex-direction: column; gap: 8px; }
+.skeleton-logo { width: 100%; aspect-ratio: 16 / 9; border-radius: var(--radius); background: var(--surface-2); }
+body.mode-vod .skeleton-logo, body.mode-series .skeleton-logo { aspect-ratio: 2 / 3; }
+.skeleton-lines { display: flex; flex-direction: column; gap: 8px; }
 .skeleton-line { height: 9px; border-radius: 5px; background: var(--surface-2); }
 .skeleton-line.title { width: 60%; } .skeleton-line.subline { width: 35%; }
 .shimmer { animation: shimmer 1.4s ease-in-out infinite; }
 
-.load-more { align-self: center; margin: 10px auto 20px; }
+.load-more { justify-self: center; margin: 10px auto 20px; }
 
-/* --- Grille d'affiches (films, series) */
-body.mode-vod .channels, body.mode-series .channels {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(138px, 1fr)); gap: 24px 14px; align-content: start;
-}
-body.mode-vod .skeleton-card, body.mode-series .skeleton-card { flex-direction: column; align-items: stretch; padding: 0; gap: 8px; }
-body.mode-vod .skeleton-logo, body.mode-series .skeleton-logo { flex: none; width: 100%; height: auto; aspect-ratio: 2 / 3; border-radius: var(--radius); }
-.movie-card { display: block; contain-intrinsic-size: auto 280px; }
-.movie-card .channel-main { display: flex; width: 100%; flex-direction: column; align-items: stretch; gap: 8px; min-height: 0; padding: 0; background: transparent; }
-.movie-card .channel-main:hover { background: transparent; }
+/* Affiches des films et series */
+.logo-slot { position: relative; display: grid; place-items: center; overflow: hidden; }
+.logo-placeholder { font: 700 0.86rem/1 var(--display); letter-spacing: 0.02em; color: rgba(255, 255, 255, 0.72); text-transform: uppercase; }
+.movie-card { contain-intrinsic-size: auto 280px; }
 .movie-card .logo-slot {
-  flex: none; width: 100%; height: auto; aspect-ratio: 2 / 3; border-radius: var(--radius);
+  width: 100%; aspect-ratio: 2 / 3; border-radius: var(--radius);
   transition: transform 0.25s var(--ease), box-shadow 0.25s;
 }
-.movie-card .channel-main:hover .logo-slot, .movie-card .channel-main:focus-visible .logo-slot {
+.movie-card .channel-main:hover .logo-slot, .movie-card .channel-main:focus-visible .logo-slot, .movie-card.keyboard-selected .logo-slot {
   transform: scale(1.04); box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9), 0 18px 40px rgba(0, 0, 0, 0.6);
 }
-.movie-card .channel-main:focus-visible { outline: none; }
 .movie-card .meta .name { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-size: 0.84rem; line-height: 1.25; }
-.movie-card .meta .sub { font-size: 0.72rem; }
+.movie-card .meta .sub { font-size: 0.72rem; color: var(--faint); }
+
+/* Rangee des chaines sous le lecteur, pour zapper */
+.live-rail-wrap { margin-top: 10px; }
+.live-rail-wrap h2 { margin-bottom: 8px; font-size: 1.05rem; font-weight: 600; }
+.live-rail { position: relative; padding: 6px 4px 10px; margin: 0 -4px; }
+.live-rail .live-card { width: 200px; }
 
 /* ====================================================================
    Lecteur
@@ -458,13 +443,6 @@ body.mode-vod .skeleton-logo, body.mode-series .skeleton-logo { flex: none; widt
 .idle-hero .eyebrow { color: var(--accent); }
 .keyboard-hints { margin-top: 6px; font-size: 0.76rem; color: var(--faint); }
 
-.preferences { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 18px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); }
-.preference-intro { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 2px; }
-.preference-intro strong { font-size: 0.98rem; }
-.budget-fields { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.budget-presets { grid-column: 1 / -1; display: flex; gap: 6px; }
-.budget-preset-btn { min-height: 30px; font-size: 0.78rem; }
-#mode-hint { grid-column: 1 / -1; font-size: 0.76rem; color: var(--faint); }
 #recent-wrap .section-label { margin-bottom: 8px; }
 .recents { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
 .recents button { flex: 0 0 auto; min-height: 32px; font-size: 0.8rem; font-weight: 500; border-radius: 999px; }
@@ -788,32 +766,32 @@ dialog.sheet > :not(form):not(.sheet-art) { margin-left: 24px; margin-right: 24p
   body.mode-home:not(.is-playing):not(.view-config) .stage { padding-top: 0; }
   .workspace { display: flex; flex-direction: column; }
   #catalogue { display: contents; }
-  .catalogue-heading { order: 1; }
-  #viewer { order: 2; padding: 0 16px; display: flex; flex-direction: column; gap: 14px; }
-  body.is-playing #viewer { order: 0; }
-  #filters { order: 3; padding: 14px 16px 0; gap: 10px; }
-  #channels { order: 4; }
-  #empty, #load-more { order: 5; }
-  #recent-wrap { display: none !important; }
-  #home, #preparations, #config { order: 3; }
-  .catalogue-heading { padding: 16px 16px 10px; }
-  body.mode-live .catalogue-heading, body.mode-favorites .catalogue-heading { flex-direction: row; align-items: center; }
-  body.mode-live .catalogue-heading .search-box, body.mode-favorites .catalogue-heading .search-box { max-width: 60%; }
+  #viewer { order: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+  body:not(.is-playing) #viewer { display: none; }
+  .catalogue-heading { order: 1; padding: 16px 16px 10px; }
+  #filters { order: 2; padding: 0 16px 10px; gap: 8px; }
+  #channels { order: 3; }
+  #empty, #load-more { order: 4; }
+  #home, #preparations, #config { order: 5; }
+  #recent-wrap, .live-rail-wrap { display: none !important; }
   .catalogue-heading h2 { font-size: 1.3rem; }
-  #channels { padding: 0 8px 20px; }
-  body.mode-vod #channels, body.mode-series #channels { padding: 4px 16px 20px; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 18px 10px; }
+  .catalogue-heading .search-box { flex: 1 1 auto; max-width: 62%; }
+  #channels { padding: 4px 16px 24px; }
+  body.mode-live .channels, body.mode-favorites .channels { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 10px; }
+  body.mode-vod .channels, body.mode-series .channels { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 18px 10px; }
+  .tile .brand { font-size: 1.05rem; }
+  .live-card .meta .name { font-size: 0.82rem; }
+  .live-card .meta .sub { font-size: 0.72rem; }
 
-  /* Filtres : en ligne, categories en bande qui defile */
-  .filters { flex-direction: row; flex-wrap: wrap; }
-  .filters > label:not(.category-filter) { flex: 1 1 140px; }
-  .filters .category-filter { flex: 1 1 100%; min-width: 0; }
-  .filters > label { min-width: 0; }
-  .category-search-box { display: none; }
-  .category-chips { flex-direction: row; gap: 6px; overflow-x: auto; margin: 0 -16px; padding: 0 16px 4px; scrollbar-width: none; }
-  .category-chips::-webkit-scrollbar { display: none; }
-  .category-chip { flex: 0 0 auto; min-height: 32px; line-height: 32px; padding: 0 14px; border-radius: 999px; background: rgba(255, 255, 255, 0.07); font-size: 0.8rem; }
-  .filters .category-filter { font-size: 0; gap: 0; }
-  #count { display: none; }
+  /* Filtres : deux par ligne, categories en bande qui defile */
+  .filters > label, .filters .preferences > label,
+  body.mode-vod .filters .category-filter, body.mode-series .filters .category-filter { flex: 1 1 140px; width: auto; }
+  .filters .category-filter { flex: 1 1 100%; }
+  .category-chips { margin: 2px -16px 0; padding: 2px 16px 4px; gap: 6px; }
+  .category-chip { min-height: 32px; padding: 0 14px; font-size: 0.8rem; }
+  #mode-hint, #count { display: none; }
+  .budget-fields { flex: 1 1 100%; }
+  .budget-fields label { flex: 1 1 100px; width: auto; }
 
   /* Pages qui prennent l'ecran : on masque le reste */
   body.mode-home #filters, body.mode-home #catalogue, body.mode-prepared #filters, body.mode-prepared #catalogue,
@@ -822,10 +800,6 @@ dialog.sheet > :not(form):not(.sheet-art) { margin-left: 24px; margin-right: 24p
   body.mode-vod:not(.is-playing) #viewer, body.mode-series:not(.is-playing) #viewer { display: none; }
   body.is-playing.mode-home #home, body.is-playing.mode-prepared #preparations { display: none; }
   .idle-hero { display: none; }
-  body:not(.mode-live):not(.mode-favorites) #preferences { display: none; }
-  .preferences { grid-template-columns: 1fr 1fr; gap: 10px; padding: 12px; }
-  .preference-intro { display: none; }
-  body.is-playing #viewer { padding: 0; }
   body.is-playing .player { position: sticky; top: calc(var(--top) + env(safe-area-inset-top)); z-index: 20; padding-bottom: 12px; background: var(--bg); }
   body.is-playing .player > :not(.video-stage) { margin: 0 16px; }
   .video-stage { border-radius: 0; max-height: none; box-shadow: none; }

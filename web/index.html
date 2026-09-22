@@ -4,8 +4,8 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a14"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="app.css?v=20260923-v39">
-<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260923-v39"></script>
+<link rel="stylesheet" href="app.css?v=20260923-v40">
+<script defer src="vendor/hls.min.js"></script><script defer src="app.js?v=20260923-v40"></script>
 </head>
 <body>
 <!-- Masque au depart, comme #app : c'est /api/me qui tranche. Sans cela, le
@@ -63,6 +63,34 @@
    <aside id="filters" class="filters groups" aria-label="Catégories">
     <label>Abonnement<select id="provider"><option value="">Tous les abonnements</option></select></label>
     <label>Langue<select id="lang"><option value="">Toutes les langues</option></select></label>
+    <!-- Reglages de lecture : a cote des filtres du direct. -->
+    <section id="preferences" class="preferences" aria-label="Préférences de lecture">
+   <div class="preference-intro"><span class="eyebrow">À VOTRE MESURE</span><strong>Gardez la main sur votre forfait.</strong></div>
+   <label>Mode de lecture
+    <select id="play-mode">
+     <option value="eco">Économie</option>
+     <option value="balanced" selected>Équilibré</option>
+     <option value="sport">Sport · cadence fluide</option>
+     <option value="budget">Budget de séance</option>
+    </select>
+   </label>
+   <label>Connexion
+    <select id="connection">
+     <option value="stable">Direct réactif</option>
+     <option value="unstable">Instable · plus de réserve</option>
+    </select>
+   </label>
+   <div id="budget-fields" class="budget-fields" hidden>
+    <label>Volume (Mo)<input id="budget-mb" type="number" min="20" max="50000" value="800"></label>
+    <label>Durée (min)<input id="budget-minutes" type="number" min="5" max="1440" value="120"></label>
+    <div class="budget-presets" aria-label="Raccourcis de budget">
+     <button type="button" class="budget-preset-btn" data-mb="500" data-min="90">500 Mo</button>
+     <button type="button" class="budget-preset-btn" data-mb="1000" data-min="120">1 Go</button>
+     <button type="button" class="budget-preset-btn" data-mb="2000" data-min="180">2 Go</button>
+    </div>
+   </div>
+   <span id="mode-hint" class="small muted"></span>
+  </section>
     <label class="category-filter">Catégorie
       <select id="category" class="category-select" aria-label="Catégories">
       <option value="">Toutes les catégories</option>
@@ -157,6 +185,10 @@
     <progress id="budget-progress" max="100" value="0"></progress>
     <p class="small muted">Budget appliqué aux données vidéo servies. La consommation opérateur peut différer légèrement.</p>
    </div>
+   <section id="live-rail-wrap" class="live-rail-wrap" hidden aria-label="Autres chaînes">
+    <h2>Chaînes</h2>
+    <ul id="live-rail" class="rail live-rail"></ul>
+   </section>
   </section>
    <div id="idle-hero" class="idle-hero">
     <p class="eyebrow">PRÊT À REGARDER</p>
@@ -164,33 +196,6 @@
     <p class="muted">Un clic lance la lecture ici. Double-clic pour le plein écran.</p>
     <p class="keyboard-hints"><kbd>↑</kbd><kbd>↓</kbd> Naviguer &bull; <kbd>Entrée</kbd> Lire &bull; <kbd>PageUp</kbd>/<kbd>PageDown</kbd> Zapper &bull; <kbd>F</kbd> Plein écran</p>
    </div>
-  <section id="preferences" class="preferences" aria-label="Préférences de lecture">
-   <div class="preference-intro"><span class="eyebrow">À VOTRE MESURE</span><strong>Gardez la main sur votre forfait.</strong></div>
-   <label>Mode de lecture
-    <select id="play-mode">
-     <option value="eco">Économie</option>
-     <option value="balanced" selected>Équilibré</option>
-     <option value="sport">Sport · cadence fluide</option>
-     <option value="budget">Budget de séance</option>
-    </select>
-   </label>
-   <label>Connexion
-    <select id="connection">
-     <option value="stable">Direct réactif</option>
-     <option value="unstable">Instable · plus de réserve</option>
-    </select>
-   </label>
-   <div id="budget-fields" class="budget-fields" hidden>
-    <label>Volume (Mo)<input id="budget-mb" type="number" min="20" max="50000" value="800"></label>
-    <label>Durée (min)<input id="budget-minutes" type="number" min="5" max="1440" value="120"></label>
-    <div class="budget-presets" aria-label="Raccourcis de budget">
-     <button type="button" class="budget-preset-btn" data-mb="500" data-min="90">500 Mo</button>
-     <button type="button" class="budget-preset-btn" data-mb="1000" data-min="120">1 Go</button>
-     <button type="button" class="budget-preset-btn" data-mb="2000" data-min="180">2 Go</button>
-    </div>
-   </div>
-   <span id="mode-hint" class="small muted"></span>
-  </section>
   <section id="recent-wrap" hidden><div class="section-label">REPRENDRE LE DIRECT</div><div id="recents" class="recents"></div></section>
   </section>
   <section id="home" class="home" hidden aria-label="Accueil">
