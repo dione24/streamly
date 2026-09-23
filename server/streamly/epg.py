@@ -128,6 +128,23 @@ class Guide:
                 out[cid] = {'now': current, 'next': following}
         return out
 
+    def ready(self):
+        """Vrai quand le guide sur disque est lu : vide alors veut dire « rien »."""
+        self._index()
+        try:
+            return getattr(self, '_index_stamp', None) == os.path.getmtime(self.path)
+        except OSError:
+            return True
+
+    def window(self, ids, start, end):
+        """Programmes de chaque chaine qui recouvrent [start, end), pour la grille."""
+        index, out = self._index(), {}
+        for cid in ids:
+            rows = [[a, b, title] for a, b, title in index.get(cid) or () if b > start and a < end]
+            if rows:
+                out[cid] = rows
+        return out
+
     def ensure_fresh(self, force=False):
         """Relance la construction en tache de fond si le guide a vieilli.
 

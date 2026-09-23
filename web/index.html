@@ -4,8 +4,9 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a14"><meta name="referrer" content="no-referrer">
 <title>Streamly — Le direct, à votre rythme</title>
-<link rel="stylesheet" href="app.css?v=20260923-v47">
-<script defer src="app.js?v=20260923-v47"></script>
+<link rel="stylesheet" href="app.css?v=20260923-v48">
+<script defer src="guide.js?v=20260923-v48"></script>
+<script defer src="app.js?v=20260923-v48"></script>
 <!-- Le moteur video n'est charge qu'a la premiere lecture ; le navigateur le
      recupere en tache de fond pour qu'il soit deja la. -->
 <link rel="prefetch" href="vendor/hls.min.js?v=1.5">
@@ -47,6 +48,7 @@
    <button id="tab-fav" class="tab" type="button"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.8-5.2 2.8 1-5.8L3.6 9.7l5.8-.8z"/></svg><span class="tab-label">Ma liste</span></button>
   </nav>
   <div class="top-tools">
+   <button id="search-btn" class="icon-btn" type="button" aria-label="Rechercher partout" title="Rechercher (/)"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></button>
    <button id="account-btn" class="account-btn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu" aria-label="Compte et réglages"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.5" r="3.6"/><path d="M4.8 20c1.2-3.6 4-5.4 7.2-5.4s6 1.8 7.2 5.4"/></svg></button>
    <div id="account-menu" class="account-menu" role="menu" hidden>
     <button id="tab-prepared" type="button" role="menuitem"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10m0 0l-4-4m4 4l4-4M5 19h14"/></svg><span>Films prêts</span></button>
@@ -64,47 +66,12 @@
   </div>
   <section class="workspace">
    <aside id="filters" class="filters groups" aria-label="Catégories">
-    <label>Abonnement<select id="provider"><option value="">Tous les abonnements</option></select></label>
-    <label>Langue<select id="lang"><option value="">Toutes les langues</option></select></label>
-    <!-- Reglages de lecture : a cote des filtres du direct. -->
-    <section id="preferences" class="preferences" aria-label="Préférences de lecture">
-   <div class="preference-intro"><span class="eyebrow">À VOTRE MESURE</span><strong>Une qualité adaptée à votre connexion Internet.</strong></div>
-   <label>Mode de lecture
-    <select id="play-mode">
-     <option value="sport" selected>Meilleure qualité · 720p</option>
-     <option value="balanced">Équilibré · 480p</option>
-     <option value="eco">Économie · 360p</option>
-     <option value="budget">Budget de séance</option>
-    </select>
-   </label>
-   <label>Connexion
-    <select id="connection">
-     <option value="stable">Direct réactif</option>
-     <option value="unstable">Instable · plus de réserve</option>
-    </select>
-   </label>
-   <div id="budget-fields" class="budget-fields" hidden>
-    <label>Volume (Mo)<input id="budget-mb" type="number" min="20" max="50000" value="800"></label>
-    <label>Durée (min)<input id="budget-minutes" type="number" min="5" max="1440" value="120"></label>
-    <div class="budget-presets" aria-label="Raccourcis de budget">
-     <button type="button" class="budget-preset-btn" data-mb="500" data-min="90">500 Mo</button>
-     <button type="button" class="budget-preset-btn" data-mb="1000" data-min="120">1 Go</button>
-     <button type="button" class="budget-preset-btn" data-mb="2000" data-min="180">2 Go</button>
-    </div>
-   </div>
-   <span id="mode-hint" class="small muted"></span>
-  </section>
+    <button id="filters-btn" class="filters-btn" type="button" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M7 12h10M10 18h4"/></svg><span>Filtres</span><span id="filters-count" class="filters-count" hidden></span></button>
     <label class="category-filter">Catégorie
       <select id="category" class="category-select" aria-label="Catégories">
       <option value="">Toutes les catégories</option>
       </select>
-      <div class="category-search-box">
-       <span class="search-icon" aria-hidden="true">⌕</span>
-       <input id="category-search" type="search" placeholder="Filtrer les catégories…" aria-label="Filtrer les catégories" autocomplete="off">
-       <button id="category-search-clear" type="button" class="search-clear" aria-label="Effacer le filtre de catégories" hidden>✕</button>
-      </div>
       <div id="category-chips" class="category-chips" role="tablist" aria-label="Catégories"></div>
-      <p id="category-empty" class="small muted" hidden>Aucune catégorie ne correspond.</p>
     </label>
     <span id="count" class="small muted"></span>
    </aside>
@@ -114,6 +81,10 @@
      <p class="eyebrow" id="catalogue-kicker">VOTRE BIBLIOTHÈQUE</p>
      <h2 id="catalogue-title">À l’antenne<span class="accent">.</span></h2>
     </div>
+    <div id="live-view" class="segmented" role="tablist" aria-label="Affichage du direct">
+     <button id="view-grid" type="button" role="tab" aria-selected="true">Chaînes</button>
+     <button id="view-guide" type="button" role="tab" aria-selected="false">Guide TV</button>
+    </div>
     <div class="search-box">
      <span class="search-icon" aria-hidden="true">⌕</span>
      <input id="search" type="search" placeholder="Rechercher une chaîne…" aria-label="Rechercher dans la bibliothèque">
@@ -121,6 +92,7 @@
     </div>
    </div>
    <ul id="channels" class="channels" tabindex="0" aria-label="Liste des chaînes (utilisez les flèches pour naviguer)"></ul>
+   <div id="guide" class="guide" hidden aria-label="Guide des programmes"></div>
    <p id="empty" class="empty" hidden>Aucun résultat pour ces critères.</p>
    <button id="load-more" class="load-more" hidden>Afficher la suite ↓</button>
   </section>
@@ -163,6 +135,7 @@
        <button id="back-live" class="pui-live live-only" type="button" title="Revenir au direct"><span class="pulse-dot" aria-hidden="true"></span>DIRECT</button>
        <span class="pui-spacer"></span>
        <button id="pui-channels" class="pui-pill live-only" type="button" hidden aria-expanded="false" title="Chaînes (C)"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="5" width="7" height="6" rx="1.5"/><rect x="14" y="5" width="7" height="6" rx="1.5"/><rect x="3" y="14" width="7" height="6" rx="1.5"/><rect x="14" y="14" width="7" height="6" rx="1.5"/></svg><span>Chaînes</span></button>
+       <button id="pui-settings" class="pui-btn live-only" type="button" aria-expanded="false" aria-controls="play-settings" aria-label="Réglages de lecture" title="Réglages de lecture"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button>
        <label class="pui-quality"><span>Qualité</span><select id="quality"><option value="-1">Auto</option></select></label>
        <button id="pui-cc" class="pui-btn" type="button" hidden aria-label="Sous-titres" aria-pressed="true" title="Sous-titres"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10 10.2a2 2 0 1 0 0 3.6M16.5 10.2a2 2 0 1 0 0 3.6"/></svg></button>
        <button id="pip" class="pui-btn" type="button" hidden aria-label="Mini-lecteur" title="Mini-lecteur (P)"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2.5"/><rect x="12" y="11" width="7" height="6" rx="1.2" fill="currentColor" stroke="none"/></svg></button>
@@ -185,6 +158,36 @@
      <button id="toggle-telemetry" class="pui-btn telem-toggle-btn" type="button" aria-expanded="false" aria-label="Données de lecture" title="Données de lecture (I)"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></button>
      <button id="toggle-sidebar" class="toggle-sidebar-btn" type="button" hidden><span id="toggle-sidebar-text"></span></button>
     </header>
+    <section id="play-settings" class="play-settings pui-panel" hidden aria-label="Réglages de lecture">
+     <section id="preferences" class="preferences">
+      <div class="preference-intro"><strong>Réglages de lecture</strong><span class="small muted">Gardés sur cet appareil pour toutes les chaînes.</span></div>
+      <label>Mode de lecture
+       <select id="play-mode">
+        <option value="sport" selected>Meilleure qualité · 720p</option>
+        <option value="balanced">Équilibré · 480p</option>
+        <option value="eco">Économie · 360p</option>
+        <option value="budget">Budget de séance</option>
+       </select>
+      </label>
+      <label>Connexion
+       <select id="connection">
+        <option value="stable">Direct réactif</option>
+        <option value="unstable">Instable · plus de réserve</option>
+       </select>
+      </label>
+      <div id="budget-fields" class="budget-fields" hidden>
+       <label>Volume (Mo)<input id="budget-mb" type="number" min="20" max="50000" value="800"></label>
+       <label>Durée (min)<input id="budget-minutes" type="number" min="5" max="1440" value="120"></label>
+       <div class="budget-presets" aria-label="Raccourcis de budget">
+        <button type="button" class="budget-preset-btn" data-mb="500" data-min="90">500 Mo</button>
+        <button type="button" class="budget-preset-btn" data-mb="1000" data-min="120">1 Go</button>
+        <button type="button" class="budget-preset-btn" data-mb="2000" data-min="180">2 Go</button>
+       </div>
+       <button id="budget-apply" type="button" class="primary">Appliquer le budget</button>
+      </div>
+      <span id="mode-hint" class="small muted"></span>
+     </section>
+    </section>
     <div id="telemetry" class="telemetry pui-panel" hidden>
     <div class="telem-chip"><span class="telem-label">DÉBIT</span><span id="bitrate" class="telem-val">Qualité automatique</span></div>
     <div class="telem-chip"><span class="telem-label">VOLUME</span><span id="usage" class="telem-val">0 Mo de vidéo</span></div>
@@ -197,7 +200,11 @@
      <span class="stage-loader-bar"></span>
      <p id="stage-loader-net" class="stage-net" hidden></p>
      <small id="stage-loader-sub">COMPRESSION ADAPTÉE À VOTRE CONNEXION</small>
-     <button id="stage-retry" class="quiet" type="button" hidden>Réessayer</button>
+     <ul id="stage-busy" class="stage-busy" hidden></ul>
+     <div class="stage-actions">
+      <button id="stage-retry" class="btn-play" type="button" hidden>Réessayer</button>
+      <button id="stage-back" class="btn-ghost" type="button" hidden>Retour</button>
+     </div>
     </div>
     <div id="channel-zap-overlay" class="channel-zap-overlay" hidden aria-live="polite" role="status">
       <button id="zap-prev" class="quiet zap-btn" title="Chaîne précédente (PageUp)" aria-label="Chaîne précédente">‹</button>
@@ -233,6 +240,15 @@
     </div>
    </div>
    <div id="home-rows" class="home-rows"></div>
+  </section>
+  <section id="search-page" class="page search-page" hidden aria-label="Recherche">
+   <div class="search-box search-hero">
+    <span class="search-icon" aria-hidden="true">⌕</span>
+    <input id="global-search" type="search" placeholder="Chaînes, films, séries…" aria-label="Rechercher partout" autocomplete="off" enterkeyhint="search">
+    <button id="global-search-clear" type="button" class="search-clear" aria-label="Effacer la recherche" hidden>✕</button>
+   </div>
+   <p id="search-hint" class="search-hint muted">Tapez au moins deux lettres : chaînes, films et séries de tous vos abonnements.</p>
+   <div id="search-results" class="home-rows"></div>
   </section>
   <section id="preparations" class="page" hidden>
    <header class="page-head">
@@ -311,7 +327,10 @@
  <div id="series-ratings" class="scores" hidden></div>
  <p id="series-plot" class="sheet-plot"></p>
  <p id="series-credits" class="credits" hidden></p>
- <a id="series-trailer" class="btn-ghost trailer" target="_blank" rel="noopener noreferrer" hidden>▶ Bande-annonce</a>
+ <div class="series-actions">
+  <button id="series-save" class="btn-ghost list-btn" type="button" aria-pressed="false">＋ Ma liste</button>
+  <a id="series-trailer" class="btn-ghost trailer" target="_blank" rel="noopener noreferrer" hidden>▶ Bande-annonce</a>
+ </div>
  <label id="series-season-field" hidden>Saison<select id="series-season"></select></label>
  <ul id="series-episodes" class="episode-list"></ul>
  <p id="series-message" role="status"></p>
@@ -344,10 +363,21 @@
  <p id="movie-note" class="small muted">La lecture démarre pendant que le serveur compresse le film. Il reste ensuite dans « Mes films prêts », téléchargeable une fois la préparation terminée.</p>
  <div class="movie-actions">
   <button id="watch-movie" class="btn-play">▶ Regarder</button>
+  <button id="movie-save" class="btn-ghost list-btn" type="button" aria-pressed="false" hidden>＋ Ma liste</button>
   <a id="movie-trailer" class="btn-ghost trailer" target="_blank" rel="noopener noreferrer" hidden>Bande-annonce</a>
   <button id="prepare-movie" class="quiet">Préparer sans regarder</button>
  </div>
  <p id="movie-message" role="status"></p>
+</dialog>
+<dialog id="filters-dialog" class="sheet filters-sheet" aria-labelledby="filters-title">
+ <form method="dialog"><button class="dialog-close" aria-label="Fermer">✕</button></form>
+ <h2 id="filters-title">Filtres</h2>
+ <label id="provider-field">Abonnement<select id="provider"><option value="">Tous les abonnements</option></select></label>
+ <label>Langue<select id="lang"><option value="">Toutes les langues</option></select></label>
+ <div class="confirm-actions">
+  <button id="filters-reset" type="button" class="quiet">Réinitialiser</button>
+  <button id="filters-done" type="button" class="btn-play">Voir les résultats</button>
+ </div>
 </dialog>
 <dialog id="confirm-dialog" class="sheet confirm" aria-labelledby="confirm-title">
  <h2 id="confirm-title"></h2>

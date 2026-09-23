@@ -719,7 +719,7 @@ class Handler(BaseHTTPRequestHandler):
             STATE.sessions.logout(sid)
             self._cookie = self._clear_cookie()
             return self._raw(200, '{}', 'application/json', {'Cache-Control': 'no-store'})
-        if path.startswith('/api/providers') or path.startswith('/api/devices') or path in ('/api/sync', '/api/viewer-token', '/api/player-credentials', '/api/pair-code'):
+        if path.startswith('/api/providers') or path.startswith('/api/devices') or path in ('/api/sync', '/api/viewer-token', '/api/player-credentials', '/api/pair-code', '/api/streams/stop'):
             if not self._admin():
                 return self._err(403, 'accès administrateur requis')
         try:
@@ -1172,7 +1172,10 @@ class Handler(BaseHTTPRequestHandler):
                 offset=max(0, int(one("offset", 0)))))
 
         if path == "/api/favorites":
-            return self._json(cat.favorites())
+            return self._json(cat.saved(self._session().get('account') or '', one('kind') or None))
+
+        if path == "/api/search":
+            return self._json(cat.search(one('q'), limit=max(1, min(int(one('limit', 12)), 48))))
 
         if path == '/api/speedtest':
             # Mesure du debit du spectateur pendant que l'encodeur demarre.
@@ -1190,6 +1193,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/guide/now':
             ids = [i for i in (one('ids') or '').split(',') if i][:300]
             return self._compact(STATE.guide.now_next(ids))
+        if path == '/api/guide/grid':
+            # Grille du guide : au plus 12 h a la fois, pour une page de chaines.
+            ids = [i for i in (one('ids') or '').split(',') if i][:120]
+            start = int(float(one('from') or time.time()))
+            end = min(int(float(one('to') or start + 4 * 3600)), start + 12 * 3600)
+            return self._compact({'ready': STATE.guide.ready(), 'programs': STATE.guide.window(ids, start, end)})
 
         if path == '/api/history':
             return self._json(self._history(self._session().get('account') or ''))
@@ -1437,13 +1446,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'ok': True})
 
         if path == "/api/favorites":
-            cat.add_favorite(body.get("lang") or "", body.get("canonical") or "",
-                             body.get("label") or "")
+            if not cat.save(self._session().get('account') or '', body.get('kind') or 'live', body):
+                return self._err(404, 'élément introuvable')
             return self._json({"ok": True})
 
         if path == "/api/favorites/delete":
-            cat.remove_favorite(body.get("lang") or "", body.get("canonical") or "")
+            cat.unsave(self._session().get('account') or '', body.get('kind') or 'live', body)
             return self._json({"ok": True})
+
+        if path == '/api/streams/stop':
+            # Reglages et ecran « connexions occupees » : liberer l'abonnement
+            # retenu par une autre lecture (onglet oublie, lecteur externe).
+            if not STATE.transcoder.stop_worker(str(body.get('key') or '')):
+                return self._err(404, 'lecture introuvable')
+            return self._json({'ok': True})
 
         if path == '/api/play':
             lang, canonical = body.get('lang') or None, body.get('canonical') or ''

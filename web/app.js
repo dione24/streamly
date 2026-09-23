@@ -21,13 +21,21 @@ const state = {
   generation: null, retries: 0, statusMisses: 0, recoveryTimer: null, playback: 0, stalls: 0, started: 0,
   frames: false, movie: null, job: null, role: 'viewer', configTimer: null, jobTimer: null,
   configOpen: false, configReturnMode: 'live', configSnapshot: null,
-  channelList: [], zapTimer: null,
+  channelList: [], zapTimer: null, liveView: store.get('live_view', 'grid') === 'guide' ? 'guide' : 'grid',
   selectedChannelIndex: -1,
   // Historique du compte (serveur) ; watch : film ou episode en lecture.
   history: {items: [], next: {}}, watch: null, startAt: 0, savedAt: 0, liveTimer: null, homeRender: 0
 };
 
-function message(text) { $('#notice').textContent = text; $('#notice').hidden = !text; }
+// Bandeau passager : il s'efface seul, sinon il restait sur l'ecran, et par-
+// dessus le titre du lecteur, jusqu'au message suivant.
+let noticeTimer = null;
+function message(text) {
+  $('#notice').textContent = text;
+  $('#notice').hidden = !text;
+  clearTimeout(noticeTimer);
+  if (text) noticeTimer = setTimeout(() => { $('#notice').hidden = true; }, 4500);
+}
 function tokenForApi() { return (store.get('token') || '').trim(); }
 function requestHeaders(extra = {}, includeToken = true) {
   const headers = {'Content-Type': 'application/json', ...(extra || {})};
@@ -72,6 +80,7 @@ async function api(path, options = {}) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const err = new Error(data.error || 'Erreur serveur ' + res.status);
+      err.status = res.status;
       if (res.status === 401 && path !== '/login' && !options.skipAuthRedirect) {
         store.remove('token');
         requireLogin(err.message);
@@ -98,8 +107,53 @@ function el(tag, className, text) {
   return e;
 }
 function size(n) { return n >= 1e9 ? (n / 1e9).toFixed(2) + ' Go' : Math.round(n / 1e6) + ' Mo'; }
-function favKey(c) { return (c.lang || '') + '|' + (c.canonical || c.label || c.title); }
+// « Ma liste » garde des chaines, des films et des series, par compte.
+function itemKind(c) {
+  if (c.kind === 'live' || c.kind === 'movie' || c.kind === 'series') return c.kind;
+  if (c.series_id !== undefined) return 'series';
+  return c.stream_id !== undefined && c.canonical === undefined ? 'movie' : 'live';
+}
+function favKey(c) {
+  const kind = itemKind(c);
+  if (kind === 'live') return 'live|' + (c.lang || '') + '|' + (c.canonical || c.label || c.title);
+  return kind + '|' + c.provider_id + ':' + (kind === 'series' ? c.series_id : c.stream_id);
+}
 function isFav(c) { return state.favorites.some(f => favKey(f) === favKey(c)); }
+const savedChannels = () => state.favorites.filter(f => itemKind(f) === 'live');
+const savedTitles = () => state.favorites.filter(f => itemKind(f) !== 'live');
+
+async function toggleFav(c) {
+  const kind = itemKind(c);
+  const body = kind === 'live' ? {kind, lang: c.lang, canonical: c.canonical, label: c.label}
+    : {kind, provider_id: c.provider_id, [kind === 'series' ? 'series_id' : 'stream_id']: kind === 'series' ? c.series_id : c.stream_id};
+  const adding = !isFav(c);
+  await post(adding ? '/favorites' : '/favorites/delete', body);
+  state.favorites = await api('/favorites').catch(() => state.favorites);
+  if (state.mode === 'favorites' && !state.configOpen) await renderChannels();
+  message(adding ? 'Ajouté à Ma liste.' : 'Retiré de Ma liste.');
+  return adding;
+}
+
+function starButton(c, label) {
+  const star = el('button', 'star' + (isFav(c) ? ' on' : ''), '★');
+  star.type = 'button';
+  star.setAttribute('aria-label', 'Ma liste : ' + label);
+  star.setAttribute('aria-pressed', String(isFav(c)));
+  star.onclick = async e => {
+    e.stopPropagation();
+    star.disabled = true;
+    try {
+      await toggleFav(c);
+      star.classList.toggle('on', isFav(c));
+      star.setAttribute('aria-pressed', String(isFav(c)));
+    } catch (err) {
+      failure(err);
+    } finally {
+      star.disabled = false;
+    }
+  };
+  return star;
+}
 function sameChannel(a, b) { return channelKey(a) === channelKey(b); }
 function channelKey(c) {
   if (!c) return '';
@@ -197,21 +251,36 @@ async function changePreferences() {
     await play(c);
   }
 }
-$('#play-mode').onchange = () => changePreferences().catch(failure);
-$('#connection').onchange = () => changePreferences().catch(failure);
-$('#budget-mb').onchange = $('#budget-minutes').onchange = () => {
-  if (state.ticket) message('Le nouveau budget sera appliqué à la prochaine séance.');
+// Budget : on attend « Appliquer », le temps de regler volume et duree.
+$('#play-mode').onchange = () => {
+  if ($('#play-mode').value === 'budget') { modeHint(); store.set('playmode', 'budget'); return; }
+  changePreferences().catch(failure);
 };
+$('#connection').onchange = () => changePreferences().catch(failure);
 
-// Presets Budget
+// Presets Budget : le budget s'applique d'un geste, en relancant la chaine.
 $$('.budget-preset-btn').forEach(btn => {
   btn.onclick = () => {
     $('#budget-mb').value = btn.dataset.mb;
     $('#budget-minutes').value = btn.dataset.min;
-    if (state.ticket) message('Le nouveau budget sera appliqué à la prochaine séance.');
   };
 });
+$('#budget-apply').onclick = () => { setPlaySettings(false); changePreferences().catch(failure); };
 modeHint();
+
+// Reglages de lecture : un panneau du lecteur, la ou l'on voit leur effet.
+function setPlaySettings(open) {
+  $('#play-settings').hidden = !open;
+  $('#pui-settings').setAttribute('aria-expanded', String(open));
+  $('#pui-settings').classList.toggle('active', open);
+  $('#video-stage').classList.toggle('settings-open', open);
+  if (open) {
+    setRail(false);
+    $('#play-mode').focus({preventScroll: true});
+  }
+  showControls();
+}
+$('#pui-settings').onclick = () => setPlaySettings($('#play-settings').hidden);
 
 function destroyPlayer() {
   clearTimeout(state.recoveryTimer);
@@ -236,7 +305,7 @@ function clearZapOverlay() {
 
 function markNowPlaying(channel) {
   const key = channelKey(channel);
-  const cards = Array.from($$('#channels li[data-channel-key], #live-rail li[data-channel-key]'));
+  const cards = Array.from($$('#channels li[data-channel-key], #live-rail li[data-channel-key], #guide .guide-row[data-channel-key]'));
   cards.forEach(card => card.classList.toggle('now-playing', card.dataset.channelKey === key));
   const inRail = cards.find(card => card.closest('#live-rail') && card.dataset.channelKey === key);
   // Defilement horizontal seul : scrollIntoView ferait aussi descendre la page
@@ -250,9 +319,12 @@ function markNowPlaying(channel) {
   state.selectedChannelIndex = idx >= 0 ? idx : state.selectedChannelIndex;
 }
 
+// Onglets ou les chaines forment une liste dans laquelle on zappe.
+const zappable = () => state.mode === 'live' || state.mode === 'favorites' || state.mode === 'search';
+
 function nextChannelFromCurrent(offset) {
   if (!state.current) return null;
-  if (state.mode !== 'live' && state.mode !== 'favorites') return null;
+  if (!zappable()) return null;
   const list = state.channelList;
   if (!list.length) return null;
   const idx = list.findIndex(item => sameChannel(item, state.current));
@@ -278,7 +350,7 @@ function showZapOverlay(channel, direction) {
 }
 
 function zapChannel(offset) {
-  if (!state.current || (state.mode !== 'live' && state.mode !== 'favorites') || $('#player-wrap').hidden) return;
+  if (!state.current || !zappable() || $('#player-wrap').hidden) return;
   const target = nextChannelFromCurrent(offset);
   if (!target) return;
   showZapOverlay(target, offset);
@@ -305,7 +377,7 @@ async function stop() {
   $('#program-info').hidden = true;
   $('#idle-hero').hidden = false;
   document.body.classList.remove('is-playing', 'reader-focus', 'catalogue-collapsed');
-  $('#preferences').hidden = false;
+  setPlaySettings(false);
   renderRecents();
   if (ticket) await post('/stop', {ticket}, {skipAuthRedirect: true}).catch(failure);
   await saving;
@@ -459,20 +531,85 @@ function stageScreen(kind) {
   $('#stage-loader-sub').textContent = sub;
   // Une panne de source n'avance pas toute seule : pas de barre animee, un bouton.
   box.classList.toggle('settled', kind === 'source');
-  $('#stage-retry').hidden = kind !== 'source';
+  box.classList.remove('failed');
+  const channel = state.current;
+  state.stageRetry = kind === 'source' && channel ? () => play(channel) : null;
+  $('#stage-retry').textContent = 'Réessayer';
+  $('#stage-retry').hidden = !state.stageRetry;
+  $('#stage-back').hidden = kind !== 'source';
+  $('#stage-busy').hidden = true;
   $('#stage-loader-net').hidden = true;
   box.hidden = false;
   if (kind === 'prepare') showConnection();
 }
 
-$('#stage-retry').onclick = () => { if (state.current) play(state.current).catch(failure); };
+// Ecran d'erreur : ce qui s'est passe et ce qu'on peut faire, a la place
+// d'une bulle posee sur le titre et d'un bouton lecture qui ne lancait rien.
+// busy : l'abonnement est retenu par une autre lecture, qu'on montre.
+function stageError(title, detail, {retry = null, retryLabel = 'Réessayer', busy = false} = {}) {
+  stageScreen('source');
+  const box = $('#stage-loader');
+  box.classList.add('failed');
+  $('#stage-loader-text').textContent = title;
+  $('#stage-loader-sub').textContent = detail || '';
+  state.stageRetry = retry;
+  $('#stage-retry').textContent = retryLabel;
+  $('#stage-retry').hidden = !retry;
+  $('#stage-back').hidden = false;
+  if (busy) showBusy(retry).catch(() => {});
+  ($('#stage-retry').hidden ? $('#stage-back') : $('#stage-retry')).focus({preventScroll: true});
+}
+
+// Ce qui occupe l'abonnement : chaines ouvertes (ailleurs, ou par un lecteur
+// externe) et preparations de films. L'administrateur peut liberer une chaine.
+async function showBusy(retry) {
+  const attempt = state.playback;
+  const [st, jobs] = await Promise.all([api('/status', {skipAuthRedirect: true}).catch(() => ({})),
+    api('/preparations', {skipAuthRedirect: true}).catch(() => [])]);
+  if (attempt !== state.playback) return;
+  const list = $('#stage-busy');
+  list.replaceChildren();
+  ((st.stream && st.stream.workers) || []).forEach(w => {
+    const li = el('li');
+    const viewers = w.viewers > 1 ? w.viewers + ' appareils' : 'un appareil';
+    li.append(el('span', 'busy-what', w.label || 'Chaîne'), el('span', 'busy-who', 'En cours sur ' + viewers));
+    if (state.role === 'admin') {
+      const free = el('button', 'quiet', 'Arrêter et regarder ici');
+      free.type = 'button';
+      free.onclick = async () => {
+        free.disabled = true;
+        try {
+          await post('/streams/stop', {key: w.key});
+          if (retry) await retry();
+        } catch (err) {
+          failure(err);
+          free.disabled = false;
+        }
+      };
+      li.append(free);
+    }
+    list.append(li);
+  });
+  jobs.filter(j => j.state === 'preparing').forEach(j => {
+    const li = el('li');
+    li.append(el('span', 'busy-what', cleanTitle(j.title)), el('span', 'busy-who', 'Préparation du film · ' + j.progress + ' %'));
+    list.append(li);
+  });
+  list.hidden = !list.children.length;
+}
+
+$('#stage-retry').onclick = () => {
+  const retry = state.stageRetry;
+  if (retry) Promise.resolve().then(retry).catch(failure);
+};
+$('#stage-back').onclick = () => stop().catch(failure);
 
 function playbackUI(title, live) {
   $('#player-wrap').hidden = false;
   $('#idle-hero').hidden = true;
   $('#program-info').hidden = true;
   $('#now-playing').textContent = title;
-  $('#preferences').hidden = true;
+  setPlaySettings(false);
   const recent = $('#recent-wrap');
   if (recent) recent.hidden = true;
   document.body.classList.add('is-playing', 'reader-focus');
@@ -549,9 +686,10 @@ async function play(channel) {
     rememberWhenWatched(channel, attempt);
   } catch (err) {
     if (attempt === state.playback) {
-      stageScreen(null);
       $('#player-status').textContent = err.message;
-      message(err.message);
+      const busy = err.status === 409;
+      stageError(busy ? 'L’abonnement est déjà utilisé' : 'Impossible d’ouvrir cette chaîne', err.message,
+        {retry: () => play(channel), busy});
     }
   }
 }
@@ -644,14 +782,22 @@ function attach(url, live, attempt) {
     hls.on(Hls.Events.ERROR, (_, d) => {
       if (attempt !== state.playback) return;
       if (d.response && d.response.code === 402) {
+        const channel = state.current;
         destroyPlayer();
         $('#player-status').textContent = 'Budget vidéo atteint. Séance arrêtée.';
+        stageError('Budget de séance atteint', 'Le volume prévu pour cette séance est consommé : la lecture s’est arrêtée pour protéger votre forfait.',
+          {retry: channel ? () => play(channel) : null, retryLabel: 'Nouvelle séance'});
         return;
       }
       if (!d.fatal) return;
       if (++state.retries > 4) {
         hls.stopLoad();
-        $('#player-status').textContent = 'Lecture interrompue. Relancez la chaîne pour réessayer.';
+        $('#player-status').textContent = 'Lecture interrompue.';
+        const channel = state.current, job = state.job, at = video.currentTime;
+        stageError('La lecture s’est interrompue', navigator.onLine
+          ? 'Le flux ne répond plus. Réessayez, ou choisissez une autre chaîne.'
+          : 'Votre connexion Internet est coupée. Réessayez dès son retour.',
+          {retry: live ? (channel ? () => play(channel) : null) : (job ? () => playJob(job, at) : null)});
         return;
       }
       $('#player-status').textContent = navigator.onLine ? 'Reconnexion en cours…' : 'Connexion Internet interrompue…';
@@ -774,12 +920,13 @@ function showControls() {
   stageBox.classList.add('ui-on');
   clearTimeout(controlsTimer);
   // Rangee des chaines ouverte : les commandes restent, on est en train de choisir.
-  if (!video.paused && !stageBox.classList.contains('rail-open')) {
+  if (!video.paused && !stageBox.classList.contains('rail-open') && !stageBox.classList.contains('settings-open')) {
     controlsTimer = setTimeout(() => stageBox.classList.remove('ui-on'), 3000);
   }
 }
 
 function setRail(open) {
+  if (open) setPlaySettings(false);
   stageBox.classList.toggle('rail-open', open);
   $('#pui-channels').setAttribute('aria-expanded', String(open));
   if (open) markNowPlaying(state.current);
@@ -1023,7 +1170,7 @@ function posterRow(c, kind) {
   meta.append(el('div', 'name', c.title), el('div', 'sub', c.category_name || (kind === 'series' ? 'Série' : 'Film')));
   button.append(meta);
   button.onclick = () => (kind === 'series' ? seriesDialog(c) : movieDialog(c)).catch(failure);
-  li.append(button);
+  li.append(button, starButton(c, c.title || ''));
   return li;
 }
 
@@ -1054,26 +1201,7 @@ function channelRow(c, number = 0) {
   button.ondblclick = () => fullscreenWhenReady();
   li.append(button);
 
-  const star = el('button', 'star' + (isFav(c) ? ' on' : ''), '★');
-  star.type = 'button';
-  star.setAttribute('aria-label', 'Ma liste : ' + c.label);
-  star.setAttribute('aria-pressed', String(isFav(c)));
-  star.onclick = async e => {
-    e.stopPropagation();
-    star.disabled = true;
-    try {
-      await post(isFav(c) ? '/favorites/delete' : '/favorites', {lang: c.lang, canonical: c.canonical, label: c.label});
-      state.favorites = await api('/favorites').catch(() => []);
-      star.classList.toggle('on', isFav(c));
-      star.setAttribute('aria-pressed', String(isFav(c)));
-      if (state.mode === 'favorites') await renderChannels();
-    } catch (err) {
-      failure(err);
-    } finally {
-      star.disabled = false;
-    }
-  };
-  li.append(star);
+  li.append(starButton(c, c.label || ''));
   return li;
 }
 
@@ -1157,7 +1285,8 @@ async function renderChannels(more = false) {
   try {
     let items;
     if (state.mode === 'favorites') {
-      items = state.favorites.filter(c => !state.query || (c.label || '').toLowerCase().includes(state.query.toLowerCase()));
+      renderSavedList();
+      return;
     } else {
       const q = new URLSearchParams({limit: String(state.pageSize + 1), offset: String(state.page * state.pageSize)});
       if (state.lang) q.set('lang', state.lang);
@@ -1176,15 +1305,20 @@ async function renderChannels(more = false) {
       state.channelList = [];
     }
     if (!more) $('#channels').replaceChildren();
-    const fragment = document.createDocumentFragment();
     const kind = {vod: 'movie', series: 'series'}[state.mode] || 'channel';
-    const first = $('#channels').children.length;
-    items.forEach((c, i) => fragment.append(row(c, kind, first + i + 1)));
-    $('#channels').append(fragment);
-    if (kind === 'channel') loadNowNext(items).catch(() => {});
+    const first = more ? state.rendered : 0;
+    state.rendered = first + items.length;
+    if (guideShown()) {
+      renderGuide(items, more, first);
+    } else {
+      const fragment = document.createDocumentFragment();
+      items.forEach((c, i) => fragment.append(row(c, kind, first + i + 1)));
+      $('#channels').append(fragment);
+      if (kind === 'channel') loadNowNext(items).catch(() => {});
+    }
     $('#load-more').hidden = !hasMore;
-    $('#empty').hidden = $('#channels').children.length > 0;
-    const totalRendered = $('#channels').children.length;
+    $('#empty').hidden = state.rendered > 0 || guideShown();
+    const totalRendered = state.rendered;
     const noun = {vod: ' films affichés', series: ' séries affichées'}[state.mode] || ' chaînes affichées';
     $('#count').textContent = totalRendered + noun + (hasMore ? ' · suite disponible' : '');
     markNowPlaying(state.current);
@@ -1214,6 +1348,52 @@ async function renderChannels(more = false) {
   }
 }
 
+// Ma liste : les chaines d'abord (on zappe de l'une a l'autre), puis les
+// films et les series. Deja en memoire : rien a demander au serveur.
+function renderSavedList() {
+  const q = state.query.toLowerCase();
+  const match = c => !q || (c.label || c.title || '').toLowerCase().includes(q);
+  const channels = savedChannels().filter(match), titles = savedTitles().filter(match);
+  state.channelList = channels;
+  state.rendered = channels.length + titles.length;
+  const list = $('#channels');
+  list.replaceChildren();
+  if (channels.length) {
+    list.append(el('li', 'list-heading', 'Chaînes'), ...channels.map((c, i) => channelRow(c, i + 1)));
+    loadNowNext(channels).catch(() => {});
+  }
+  if (titles.length) {
+    list.append(el('li', 'list-heading', 'Films et séries'),
+      ...titles.map(t => posterRow(t, itemKind(t) === 'series' ? 'series' : 'movie')));
+  }
+  $('#load-more').hidden = true;
+  $('#empty').textContent = q ? 'Rien dans votre liste ne correspond.'
+    : 'Votre liste est vide. Ajoutez une chaîne avec ★, un film ou une série depuis sa fiche.';
+  $('#empty').hidden = state.rendered > 0;
+  markNowPlaying(state.current);
+}
+
+const guideShown = () => state.mode === 'live' && state.liveView === 'guide';
+
+// Direct : vignettes des chaines, ou guide des programmes en grille.
+function syncLiveView() {
+  const guide = guideShown();
+  document.body.classList.toggle('live-guide', guide);
+  $('#guide').hidden = !guide;
+  $('#channels').hidden = guide;
+  $('#view-grid').setAttribute('aria-selected', String(!guide));
+  $('#view-guide').setAttribute('aria-selected', String(guide));
+}
+function setLiveView(view) {
+  if (state.liveView === view) return;
+  state.liveView = view;
+  store.set('live_view', view);
+  syncLiveView();
+  renderChannels().catch(failure);
+}
+$('#view-grid').onclick = () => setLiveView('grid');
+$('#view-guide').onclick = () => setLiveView('guide');
+
 $('#load-more').onclick = () => { state.page++; renderChannels(true); };
 // En colonne defilante, la suite se charge en approchant du bas : pas de bouton a viser.
 $('#channels').addEventListener('scroll', e => {
@@ -1231,8 +1411,31 @@ async function loadFilters() {
   langs.sort((x, y) => alphaSort(x.lang, y.lang)).forEach(l => sel.add(new Option(l.lang, l.lang)));
   sel.value = state.lang;
   if (sel.selectedIndex < 0) { state.lang = ''; sel.value = ''; }
+  updateFiltersCount();
   await loadCategories();
 }
+
+// Abonnement et langue : une fiche « Filtres », plutot que deux menus qui
+// prenaient la moitie de l'ecran d'un telephone avant la premiere chaine.
+function updateFiltersCount() {
+  const n = (state.provider ? 1 : 0) + (state.lang ? 1 : 0);
+  $('#filters-count').textContent = String(n);
+  $('#filters-count').hidden = !n;
+  $('#filters-btn').classList.toggle('active', n > 0);
+  $('#filters-btn').setAttribute('aria-label', n ? 'Filtres, ' + n + ' actif' + (n > 1 ? 's' : '') : 'Filtres');
+}
+$('#filters-btn').onclick = () => {
+  // Un seul abonnement : rien a choisir.
+  $('#provider-field').hidden = $('#provider').options.length <= 2;
+  $('#filters-dialog').showModal();
+};
+$('#filters-done').onclick = () => $('#filters-dialog').close();
+$('#filters-reset').onclick = async () => {
+  state.provider = ''; state.lang = ''; state.category = '';
+  store.set('provider', ''); store.set('lang', '');
+  await loadFilters();
+  await renderChannels();
+};
 
 const alphaSort = (a, b) => String(a || '').trim().localeCompare(String(b || '').trim(), 'fr', {sensitivity: 'base', numeric: true});
 
@@ -1355,10 +1558,12 @@ $('#provider').onchange = async e => {
   await renderChannels();
 };
 
+
 $('#lang').onchange = async e => {
   state.lang = e.target.value;
   state.category = '';
   store.set('lang', state.lang);
+  updateFiltersCount();
   await loadCategories();
   await renderChannels();
 };
@@ -1398,7 +1603,7 @@ searchInput.oninput = e => {
 
 // route : false quand le changement vient deja de l'adresse (retour arriere,
 // premier chargement) ; sinon l'onglet choisi s'inscrit dans l'historique.
-async function setMode(mode, {route = true} = {}) {
+async function setMode(mode, {route = true, query = ''} = {}) {
   if (!ROUTE_OF[mode]) mode = 'home';
   if (route) setRoute(routeHash(mode));
   if (state.configOpen) {
@@ -1414,8 +1619,8 @@ async function setMode(mode, {route = true} = {}) {
   $('#tab-conf').classList.remove('active');
   state.mode = mode;
   state.category = '';
-  state.query = '';
-  $('#search').value = '';
+  state.query = query;
+  $('#search').value = query;
   updateClearSearch();
   categoryFilter = '';
   if (categorySearch) categorySearch.value = '';
@@ -1423,13 +1628,19 @@ async function setMode(mode, {route = true} = {}) {
   $('#config').hidden = true;
   $('#home').hidden = mode !== 'home';
   $('#preparations').hidden = mode !== 'prepared';
-  $('#catalogue').hidden = mode === 'prepared' || mode === 'home';
-  $('#filters').hidden = mode === 'prepared' || mode === 'home';
+  $('#search-page').hidden = mode !== 'search';
+  const page = mode === 'prepared' || mode === 'home' || mode === 'search';
+  $('#catalogue').hidden = page;
+  $('#filters').hidden = page || mode === 'favorites';
+  $('#live-view').hidden = mode !== 'live';
+  $('#empty').textContent = 'Aucun résultat pour ces critères.';
+  $('#search-btn').classList.toggle('active', mode === 'search');
+  syncLiveView();
   $('#recent-wrap').hidden = mode !== 'live' || !recentChannels().length;
   if (mode === 'live') renderRecents();
   
   const modeClass = 'mode-' + (mode === 'favorites' ? 'favorites' : mode);
-  document.body.classList.remove('mode-home', 'mode-live', 'mode-vod', 'mode-series', 'mode-favorites', 'mode-prepared');
+  document.body.classList.remove('mode-home', 'mode-live', 'mode-vod', 'mode-series', 'mode-favorites', 'mode-prepared', 'mode-search');
   document.body.classList.add(modeClass);
 
   ['home', 'live', 'vod', 'series', 'fav', 'prepared'].forEach(k => {
@@ -1437,12 +1648,16 @@ async function setMode(mode, {route = true} = {}) {
   });
   $('#catalogue-title').textContent = {live: 'Direct', vod: 'Films', series: 'Séries', favorites: 'Ma liste'}[mode] || '';
   document.body.classList.toggle('scrolled', mode === 'home' && $('#home').scrollTop > 40);
-  $('#search').placeholder = {vod: 'Rechercher un film…', series: 'Rechercher une série…'}[mode]
+  $('#search').placeholder = {vod: 'Rechercher un film…', series: 'Rechercher une série…', favorites: 'Rechercher dans ma liste…'}[mode]
     || 'Rechercher une chaîne…';
+  updateClearSearch();
   
   clearInterval(state.jobTimer);
   if (mode === 'home') {
     await renderHome();
+  } else if (mode === 'search') {
+    state.channelList = [];
+    showSearchPage();
   } else if (mode === 'prepared') {
     await refreshJobs();
     state.jobTimer = setInterval(() => refreshJobs().catch(failure), 5000);
@@ -1468,7 +1683,7 @@ async function openSettings() {
   restoreSettingsSnapshot();
   document.body.classList.add('view-config');
   $$('.topbar .tab, #account-menu button').forEach(t => t.classList.toggle('active', t.id === 'tab-conf'));
-  state.configSnapshot = ['#player-wrap', '#preferences', '#recent-wrap', '#catalogue', '#preparations', '#filters', '#idle-hero', '#home']
+  state.configSnapshot = ['#player-wrap', '#search-page', '#recent-wrap', '#catalogue', '#preparations', '#filters', '#idle-hero', '#home']
     .map(id => {
       const element = $(id);
       if (!element) return null;
@@ -1504,6 +1719,7 @@ $('#tab-vod').onclick = () => setMode('vod').catch(failure);
 $('#tab-series').onclick = () => setMode('series').catch(failure);
 $('#tab-fav').onclick = () => setMode('favorites').catch(failure);
 $('#tab-prepared').onclick = () => setMode('prepared').catch(failure);
+$('#search-btn').onclick = () => setMode('search').catch(failure);
 
 function recentChannels() {
   return state.history.items.filter(i => i.kind === 'live').map(channelOf);
@@ -1524,7 +1740,7 @@ function renderRecents() {
 // Adresse de la page : onglet, et fiche ouverte. Actualiser ramene au meme
 // endroit ; le bouton retour du navigateur change d'onglet.
 // ====================================================================
-const ROUTES = {accueil: 'home', direct: 'live', films: 'vod', series: 'series', favoris: 'favorites', prets: 'prepared'};
+const ROUTES = {accueil: 'home', direct: 'live', films: 'vod', series: 'series', favoris: 'favorites', prets: 'prepared', recherche: 'search'};
 const ROUTE_OF = Object.fromEntries(Object.entries(ROUTES).map(([name, mode]) => [mode, name]));
 
 function routeHash(mode, provider, id) {
@@ -1722,20 +1938,22 @@ async function watchAgain(watch, start) {
   await watchWhenPlayable(job, start);
 }
 
-function watchFailed(err) {
-  stageScreen(null);
+// Lecteur ouvert : l'erreur s'affiche dans l'image, avec « Réessayer ».
+function watchFailed(err, retry) {
   $('#player-status').textContent = err.message;
-  failure(err);
+  if ($('#player-wrap').hidden) { failure(err); return; }
+  const busy = err.status === 409;
+  stageError(busy ? 'L’abonnement est déjà utilisé' : 'Impossible d’ouvrir ce programme', err.message, {retry, busy});
 }
 
 function resumeWatch(item, fromStart = false) {
   const start = fromStart || item.finished ? 0 : item.position;
-  return watchAgain(watchOf(item), start).catch(watchFailed);
+  return watchAgain(watchOf(item), start).catch(err => watchFailed(err, () => resumeWatch(item, fromStart)));
 }
 
 function playNext(next) {
   return watchAgain({kind: 'episode', provider: next.provider_id, id: next.episode_id, height: next.height || 480,
-    audio: null, subtitle: null}, 0).catch(watchFailed);
+    audio: null, subtitle: null}, 0).catch(err => watchFailed(err, () => playNext(next)));
 }
 
 // ====================================================================
@@ -1832,10 +2050,16 @@ let cardMenu = null;
 function closeCardMenu() {
   if (cardMenu) { cardMenu.remove(); cardMenu = null; }
 }
-function openCardMenu(anchor, actions) {
+// head : {title, sub} facultatif, au-dessus des actions (programme du guide).
+function openCardMenu(anchor, actions, head) {
   closeCardMenu();
   const menu = el('div', 'card-menu');
   menu.setAttribute('role', 'menu');
+  if (head) {
+    const top = el('div', 'card-menu-head');
+    top.append(el('strong', '', head.title || ''), el('span', '', head.sub || ''));
+    menu.append(top);
+  }
   actions.forEach(({label, run, danger}) => {
     const b = el('button', danger ? 'danger' : '', label);
     b.type = 'button';
@@ -1940,7 +2164,7 @@ function homeRow(title, cards, more) {
   if (more) {
     const link = el('button', 'row-more', more.label);
     link.type = 'button';
-    link.onclick = () => setMode(more.mode).catch(failure);
+    link.onclick = () => (more.run ? Promise.resolve().then(more.run) : setMode(more.mode)).catch(failure);
     head.append(link);
   }
   const list = el('div', 'rail');
@@ -2192,15 +2416,17 @@ async function renderHome() {
       [{label: 'Retirer des récents', run: () => forget(i), danger: true}])), {label: 'Tout le direct', mode: 'live'}));
   }
 
-  if (state.favorites.length) {
-    rows.push(homeRow('Ma liste', state.favorites.slice(0, 14).map(c => channelTile(c, [{
-      label: 'Retirer de ma liste', danger: true,
-      run: async () => {
-        await post('/favorites/delete', {lang: c.lang, canonical: c.canonical});
-        state.favorites = await api('/favorites').catch(() => []);
-        await renderHome();
-      }
-    }])), {label: 'Tout voir', mode: 'favorites'}));
+  const unsave = item => ({label: 'Retirer de ma liste', danger: true, run: async () => { await toggleFav(item); await renderHome(); }});
+  const myTitles = savedTitles(), myChannels = savedChannels();
+  if (myTitles.length) {
+    rows.push(homeRow('Ma liste', myTitles.slice(0, 20).map(t => {
+      const kind = itemKind(t);
+      return posterCard({title: t.title, icon: t.icon, sub: t.category_name || (kind === 'series' ? 'Série' : 'Film'),
+        onPlay: () => (kind === 'series' ? seriesDialog(t) : movieDialog(t)), actions: [unsave(t)]});
+    }), {label: 'Tout voir', mode: 'favorites'}));
+  }
+  if (myChannels.length) {
+    rows.push(homeRow('Mes chaînes', myChannels.slice(0, 14).map(c => channelTile(c, [unsave(c)])), {label: 'Tout voir', mode: 'favorites'}));
   }
 
   const ready = jobs.filter(j => j.state === 'ready' || (j.state === 'preparing' && j.playable)).slice(0, 14);
@@ -2219,23 +2445,94 @@ async function renderHome() {
   $('#home-rows').replaceChildren(...rows);
   completeCards(pending, serial);
 
-  // Programme en cours sous chaque chaine, depuis le guide en cache.
-  const tiles = [...$$('#home .card.channel[data-epg-id]')];
-  const ids = [...new Set(tiles.map(t => t.dataset.epgId))];
-  if (ids.length) {
-    api('/guide/now?ids=' + encodeURIComponent(ids.join(',')), {skipAuthRedirect: true}).then(guide => {
-      tiles.forEach(card => {
-        const entry = guide[card.dataset.epgId];
-        if (!entry || !entry.now) return;
-        card.querySelector('.card-title').textContent = entry.now.title;
-        card.querySelector('.card-sub').textContent = card.dataset.label + ' · ' + clock(entry.now.start);
-        const progress = card.querySelector('.tile .bar');
-        progress.firstChild.style.width = progressOf(entry.now) + '%';
-        progress.hidden = false;
-      });
-    }).catch(() => {});
-  }
+  tilePrograms($('#home'));
 }
+
+// Programme en cours sous chaque chaine d'une rangee, depuis le guide en cache.
+function tilePrograms(root) {
+  const tiles = [...root.querySelectorAll('.card.channel[data-epg-id]')];
+  const ids = [...new Set(tiles.map(t => t.dataset.epgId))];
+  if (!ids.length) return;
+  api('/guide/now?ids=' + encodeURIComponent(ids.join(',')), {skipAuthRedirect: true}).then(guide => {
+    tiles.forEach(card => {
+      const entry = guide[card.dataset.epgId];
+      if (!entry || !entry.now) return;
+      card.querySelector('.card-title').textContent = entry.now.title;
+      card.querySelector('.card-sub').textContent = card.dataset.label + ' · ' + clock(entry.now.start);
+      const progress = card.querySelector('.tile .bar');
+      progress.firstChild.style.width = progressOf(entry.now) + '%';
+      progress.hidden = false;
+    });
+  }).catch(() => {});
+}
+
+// ====================================================================
+// Recherche dans tout le catalogue : chaines, films et series d'un coup.
+// ====================================================================
+let globalSearchTimer = null, globalSearchSerial = 0;
+function showSearchPage() {
+  const input = $('#global-search');
+  if (!input.value) renderSearchResults(null, '');
+  input.focus({preventScroll: true});
+  input.select();
+}
+
+function savedAction(item, refresh) {
+  return {label: isFav(item) ? 'Retirer de ma liste' : 'Ajouter à ma liste', run: async () => { await toggleFav(item); if (refresh) refresh(); }};
+}
+
+function titleCard(t, kind) {
+  return posterCard({title: t.title, icon: t.icon, sub: t.category_name || (kind === 'series' ? 'Série' : 'Film'),
+    onPlay: () => (kind === 'series' ? seriesDialog(t) : movieDialog(t)),
+    actions: [savedAction({...t, kind})]});
+}
+
+function renderSearchResults(found, q) {
+  const box = $('#search-results'), hint = $('#search-hint');
+  if (!found) {
+    box.replaceChildren();
+    hint.textContent = 'Tapez au moins deux lettres : chaînes, films et séries de tous vos abonnements.';
+    hint.hidden = false;
+    return;
+  }
+  const rows = [];
+  if (found.channels.length) {
+    state.channelList = found.channels;
+    rows.push(homeRow('Chaînes', found.channels.map(c => channelTile(c, [savedAction(c)])),
+      {label: 'Tout voir', run: () => setMode('live', {query: q})}));
+  }
+  if (found.movies.length) {
+    rows.push(homeRow('Films', found.movies.map(m => titleCard(m, 'movie')), {label: 'Tout voir', run: () => setMode('vod', {query: q})}));
+  }
+  if (found.series.length) {
+    rows.push(homeRow('Séries', found.series.map(t => titleCard(t, 'series')), {label: 'Tout voir', run: () => setMode('series', {query: q})}));
+  }
+  box.replaceChildren(...rows);
+  hint.textContent = 'Aucun résultat pour « ' + q + ' ».';
+  hint.hidden = rows.length > 0;
+  tilePrograms(box);
+}
+
+async function runGlobalSearch() {
+  const q = $('#global-search').value.trim();
+  $('#global-search-clear').hidden = !q;
+  const serial = ++globalSearchSerial;
+  if (q.length < 2) { renderSearchResults(null, q); return; }
+  const found = await api('/search?limit=20&q=' + encodeURIComponent(q));
+  if (serial === globalSearchSerial && state.mode === 'search') renderSearchResults(found, q);
+}
+$('#global-search').oninput = () => {
+  clearTimeout(globalSearchTimer);
+  globalSearchTimer = setTimeout(() => runGlobalSearch().catch(failure), 280);
+};
+$('#global-search').onkeydown = e => {
+  if (e.key === 'Enter') { clearTimeout(globalSearchTimer); runGlobalSearch().catch(failure); }
+};
+$('#global-search-clear').onclick = () => {
+  $('#global-search').value = '';
+  runGlobalSearch().catch(failure);
+  $('#global-search').focus();
+};
 
 // Menu du compte : Films prets, Reglages, Deconnexion.
 function closeAccountMenu() {
@@ -2272,7 +2569,7 @@ $$('#home-empty [data-goto]').forEach(b => { b.onclick = () => setMode(b.dataset
 
 // Fleches dans l'accueil : gauche/droite dans une rangee, haut/bas entre rangees.
 function homeArrow(e) {
-  const rows = [...$$('#home [data-nav-row]')].map(r => [...r.querySelectorAll('[data-nav-item]')]).filter(r => r.length);
+  const rows = [...$$(state.mode === 'search' ? '#search-results [data-nav-row]' : '#home [data-nav-row]')].map(r => [...r.querySelectorAll('[data-nav-item]')]).filter(r => r.length);
   if (!rows.length) return false;
   let r = rows.findIndex(row => row.includes(document.activeElement));
   if (r < 0) { rows[0][0].focus(); return true; }
@@ -2305,7 +2602,7 @@ function offerResume() {
     const item = historyItem(playing.watch);
     $('#resume-title').textContent = item ? itemLabel(item) : 'Votre film';
     $('#resume-detail').textContent = playing.position > 5 ? 'à ' + clockPosition(playing.position) : '';
-    $('#resume-go').onclick = () => { hideResume(); watchAgain(playing.watch, playing.position).catch(watchFailed); };
+    $('#resume-go').onclick = () => { hideResume(); watchAgain(playing.watch, playing.position).catch(err => watchFailed(err)); };
   } else {
     return;
   }
@@ -2377,8 +2674,25 @@ function loadScores(kind, item, box, sheet, title) {
     }).catch(() => {});
 }
 
+// Bouton « Ma liste » d'une fiche.
+function listButton(button, item) {
+  const sync = () => {
+    const saved = isFav(item);
+    button.textContent = saved ? '✓ Dans ma liste' : '＋ Ma liste';
+    button.setAttribute('aria-pressed', String(saved));
+    button.classList.toggle('on', saved);
+  };
+  sync();
+  button.hidden = false;
+  button.onclick = async () => {
+    button.disabled = true;
+    try { await toggleFav(item); } catch (err) { failure(err); } finally { button.disabled = false; sync(); }
+  };
+}
+
 async function seriesDialog(show) {
   if (state.mode === 'series') setRoute(routeHash('series', show.provider_id, show.series_id), true);
+  listButton($('#series-save'), {kind: 'series', provider_id: show.provider_id, series_id: Number(show.series_id)});
   $('#series-title').textContent = show.title || show.name || '';
   sheetArt('#series-art', show.icon, show.title || show.name);
   $('#series-details').textContent = '';
@@ -2476,6 +2790,7 @@ function episodeDialog(show, episode) {
   $('#movie-ratings').hidden = true;
   $('#movie-credits').hidden = true;
   $('#movie-trailer').hidden = true;
+  $('#movie-save').hidden = true;
   $('#movie-kicker').textContent = 'Épisode · ' + (show.title || '');
   $('#movie-title').textContent = reste ? brut : (show.title || label);
   $('#movie-details').textContent = [seasonEpisode(episode.season, episode.episode), readableDuration(episode.duration)].filter(Boolean).join(' · ');
@@ -2491,6 +2806,7 @@ async function movieDialog(c) {
   if (state.mode === 'vod') setRoute(routeHash('vod', c.provider_id, c.stream_id), true);
   $('#movie-title').textContent = c.title || '';
   $('#movie-kicker').textContent = 'Film';
+  listButton($('#movie-save'), {kind: 'movie', provider_id: c.provider_id, stream_id: Number(c.stream_id)});
   sheetArt('#movie-art', c.icon, c.title);
   $('#movie-message').textContent = 'Chargement des informations…';
   $('#movie-details').textContent = '';
@@ -2622,10 +2938,7 @@ $('#watch-movie').onclick = async () => {
   } finally {
     movieButtons(true);
   }
-  watchWhenPlayable(job).catch(err => {
-    stageScreen(null);
-    $('#player-status').textContent = err.message;
-  });
+  watchWhenPlayable(job).catch(err => watchFailed(err, () => watchWhenPlayable(job)));
 };
 
 // Le serveur sonde la source avant de connaitre la duree du film : quelques
@@ -3093,13 +3406,18 @@ window.addEventListener('keydown', e => {
       && !document.querySelector('dialog[open]')) {
     if ((e.key === ' ' && !onButton) || e.key === 'k' || e.key === 'K') { togglePlay(); e.preventDefault(); return; }
     if (state.job && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { seekBy(e.key === 'ArrowLeft' ? -10 : 10); e.preventDefault(); return; }
-    if (!state.job && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && (state.mode === 'live' || state.mode === 'favorites')) {
+    if (!state.job && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && zappable()) {
       zapChannel(e.key === 'ArrowUp' ? -1 : 1); e.preventDefault(); return;
     }
   }
 
   // Raccourcis globaux si non en cours de saisie
   if (!isInput) {
+    if (e.key === '/' && $('#player-wrap').hidden && !document.querySelector('dialog[open]') && !$('#app').hidden) {
+      setMode('search').catch(failure);
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'PageUp') {
       zapChannel(-1);
       e.preventDefault();
@@ -3112,6 +3430,12 @@ window.addEventListener('keydown', e => {
     }
     if (e.key === 'Escape') {
       if (document.querySelector('dialog[open]')) return;
+      if (!$('#play-settings').hidden && !$('#player-wrap').hidden) {
+        setPlaySettings(false);
+        $('#pui-settings').focus({preventScroll: true});
+        e.preventDefault();
+        return;
+      }
       if (stageBox.classList.contains('rail-open') && !$('#player-wrap').hidden) {
         setRail(false);
         e.preventDefault();
@@ -3165,8 +3489,8 @@ window.addEventListener('keydown', e => {
 
   // Navigation par flèches dans la grille de chaînes
   if (['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Enter'].includes(e.key) && !isInput) {
-    // Accueil : ses propres rangees. Entree reste a l'element qui a le focus.
-    if (state.mode === 'home') {
+    // Accueil et recherche : leurs propres rangees. Entree reste a l'element qui a le focus.
+    if (state.mode === 'home' || state.mode === 'search') {
       const busy = document.body.classList.contains('is-playing') || document.querySelector('dialog[open]') || state.configOpen;
       if (!busy && e.key !== 'Enter' && homeArrow(e)) e.preventDefault();
       return;

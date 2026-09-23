@@ -61,6 +61,18 @@ CREATE TABLE IF NOT EXISTS favorites (
     PRIMARY KEY (lang, canonical)
 );
 
+-- « Ma liste » de chaque compte : chaines, films et series. Remplace
+-- « favorites », commune a tous les comptes d'un serveur.
+CREATE TABLE IF NOT EXISTS saved (
+    account  TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    ref      TEXT NOT NULL,
+    label    TEXT,
+    data     TEXT,
+    added_at INTEGER,
+    PRIMARY KEY (account, kind, ref)
+);
+
 CREATE TABLE IF NOT EXISTS vod (
     provider_id   TEXT NOT NULL,
     stream_id     INTEGER NOT NULL,
@@ -175,6 +187,18 @@ class Catalog:
                 self._db.executemany('UPDATE channels SET lang=?, canonical=? WHERE provider_id=? AND stream_id=?',
                     [(xtream.parse_name(r['name'])[0], xtream.parse_name(r['name'])[1], r['provider_id'], r['stream_id']) for r in rows])
                 self._db.execute('PRAGMA user_version=1')
+        if self._db.execute('PRAGMA user_version').fetchone()[0] < 2:
+            # Les favoris etaient communs au serveur : chaque compte deja connu
+            # les retrouve dans sa liste, personne ne perd les siens.
+            accounts = {''} | {r[0] for r in self._db.execute('SELECT DISTINCT account FROM history')}
+            rows = self._db.execute('SELECT lang, canonical, label, added_at FROM favorites').fetchall()
+            with self._db:
+                self._db.executemany(
+                    'INSERT OR IGNORE INTO saved VALUES (?,?,?,?,?,?)',
+                    [(a, 'live', (r['lang'] or '') + '|' + r['canonical'], r['label'],
+                      json.dumps({'lang': r['lang'] or '', 'canonical': r['canonical']}), r['added_at'])
+                     for a in accounts for r in rows])
+                self._db.execute('PRAGMA user_version=2')
 
     @property
     def _db(self):
@@ -700,27 +724,99 @@ class Catalog:
 
     # ------------------------------------------------------------- favoris
 
-    def favorites(self):
-        # Logo et guide des programmes, pris dans le catalogue : un favori
-        # s'affiche alors comme n'importe quelle chaine, a l'accueil aussi.
-        cur = self._db.execute(
-            "SELECT f.lang, f.canonical, f.label,"
-            " (SELECT MAX(icon) FROM channels c WHERE c.lang IS NULLIF(f.lang, '') AND c.canonical=f.canonical) AS icon,"
-            " (SELECT MAX(epg_id) FROM channels c WHERE c.lang IS NULLIF(f.lang, '') AND c.canonical=f.canonical) AS epg_id"
-            " FROM favorites f ORDER BY f.label")
-        return [{k: v for k, v in dict(r).items() if v is not None} for r in cur.fetchall()]
+    SAVED_KINDS = ('live', 'movie', 'series')
 
-    def add_favorite(self, lang, canonical, label):
+    @staticmethod
+    def saved_ref(kind, item):
+        """Cle d'un element de « Ma liste », ou None si l'element est incomplet."""
+        if kind == 'live':
+            canonical = str(item.get('canonical') or '')
+            return (str(item.get('lang') or '') + '|' + canonical) if canonical else None
+        pid = str(item.get('provider_id') or item.get('provider') or '')
+        iid = item.get('series_id' if kind == 'series' else 'stream_id', item.get('id'))
+        try:
+            return '%s:%d' % (pid, int(iid)) if pid else None
+        except (TypeError, ValueError):
+            return None
+
+    def saved(self, account, kind=None):
+        """« Ma liste » d'un compte, du plus recent au plus ancien.
+
+        Titre, logo et guide viennent du catalogue a chaque lecture : un
+        element s'affiche comme n'importe quelle chaine, film ou serie. Un
+        film retire par le fournisseur n'apparait plus.
+        """
+        sql = "SELECT kind, ref, label, data FROM saved WHERE account=?"
+        args = [account]
+        if kind:
+            sql += " AND kind=?"
+            args.append(kind)
+        items = []
+        for r in self._db.execute(sql + " ORDER BY added_at DESC, rowid DESC", args).fetchall():
+            try:
+                data = json.loads(r['data'] or '{}')
+            except ValueError:
+                data = {}
+            if r['kind'] == 'live':
+                lang, canonical = data.get('lang') or '', data.get('canonical') or ''
+                row = self._db.execute(
+                    "SELECT MAX(icon) AS icon, MAX(epg_id) AS epg_id, MAX(category_name) AS category"
+                    " FROM channels WHERE lang IS NULLIF(?, '') AND canonical=?", (lang, canonical)).fetchone()
+                item = {'kind': 'live', 'lang': lang, 'canonical': canonical, 'label': r['label'] or canonical,
+                        **{k: row[k] for k in ('icon', 'epg_id', 'category') if row[k]}}
+            else:
+                pid, _, iid = r['ref'].partition(':')
+                table, key = ('series', 'series_id') if r['kind'] == 'series' else ('vod', 'stream_id')
+                row = self._db.execute(
+                    "SELECT title, icon, category_name, rating FROM %s WHERE provider_id=? AND %s=?" % (table, key),
+                    (pid, int(iid))).fetchone()
+                if not row:
+                    continue
+                item = {'kind': r['kind'], 'provider_id': pid, key: int(iid), **{
+                    k: row[k] for k in ('title', 'icon', 'category_name', 'rating') if row[k] is not None}}
+            items.append(item)
+        return items
+
+    def save(self, account, kind, item):
+        """Ajoute a « Ma liste ». Rend False si l'element n'existe pas."""
+        ref = self.saved_ref(kind, item) if kind in self.SAVED_KINDS else None
+        if not ref:
+            return False
+        if kind == 'live':
+            data = {'lang': str(item.get('lang') or ''), 'canonical': str(item.get('canonical'))}
+            exists = self._db.execute("SELECT 1 FROM channels WHERE lang IS NULLIF(?, '') AND canonical=? LIMIT 1",
+                                      (data['lang'], data['canonical'])).fetchone()
+            label = str(item.get('label') or data['canonical'])[:200]
+        else:
+            pid, _, iid = ref.partition(':')
+            table, key = ('series', 'series_id') if kind == 'series' else ('vod', 'stream_id')
+            exists = self._db.execute("SELECT title FROM %s WHERE provider_id=? AND %s=?" % (table, key),
+                                      (pid, int(iid))).fetchone()
+            data, label = {}, exists['title'] if exists else ''
+        if not exists:
+            return False
         with self._db:
             self._db.execute(
-                "INSERT OR REPLACE INTO favorites VALUES (?,?,?,?)",
-                (lang or "", canonical, label, int(time.time())))
+                "INSERT INTO saved VALUES (?,?,?,?,?,?) ON CONFLICT(account, kind, ref) DO UPDATE SET label=excluded.label",
+                (account, kind, ref, label, json.dumps(data), int(time.time())))
+        return True
 
-    def remove_favorite(self, lang, canonical):
+    def unsave(self, account, kind, item):
+        ref = self.saved_ref(kind, item)
+        if not ref:
+            return False
         with self._db:
-            self._db.execute(
-                "DELETE FROM favorites WHERE lang IS ? AND canonical=?",
-                (lang or "", canonical))
+            return self._db.execute("DELETE FROM saved WHERE account=? AND kind=? AND ref=?",
+                                    (account, kind, ref)).rowcount > 0
+
+    def search(self, query, limit=12):
+        """Recherche dans tout le catalogue : chaines, films et series."""
+        query = (query or '').strip()
+        if not query:
+            return {'channels': [], 'movies': [], 'series': []}
+        return {'channels': self.browse(query=query, limit=limit),
+                'movies': self.vod_browse(query=query, limit=limit),
+                'series': self.series_browse(query=query, limit=limit)}
 
     # ---------------------------------------------------------- historique
 

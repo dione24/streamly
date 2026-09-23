@@ -394,6 +394,52 @@ class CatalogTests(unittest.TestCase):
             connections.append(self.cat._db); self.cat.close()
         t = threading.Thread(target=capture); t.start(); t.join()
         self.assertIsNot(self.cat._db, connections[0])
+    def test_old_favorites_move_to_every_known_account(self):
+        path = self.tmp.name + '/old.db'
+        old = Catalog(path)
+        seed_live(old)
+        with old._db:
+            old._db.execute("INSERT INTO favorites VALUES ('FR', 'TF1', 'TF1', 1)")
+            old._db.execute("INSERT INTO history (account, kind, ref, grp, updated) VALUES ('awa', 'live', 'x', 'x', 1)")
+            old._db.execute('PRAGMA user_version=1')
+        old.close()
+        fresh = Catalog(path)
+        self.assertEqual([i['canonical'] for i in fresh.saved('awa')], ['TF1'])
+        self.assertEqual([i['canonical'] for i in fresh.saved('')], ['TF1'])
+        self.assertEqual(fresh.saved('inconnu'), [])
+        fresh.close()
+    def test_saved_list_holds_channels_movies_and_series(self):
+        seed_live(self.cat)
+        with self.cat._db:
+            self.cat._db.execute("INSERT INTO vod(provider_id,stream_id,name,title,icon) VALUES ('p',7,'FR| Dune','Dune','http://img/dune.jpg')")
+            self.cat._db.execute("INSERT INTO series(provider_id,series_id,name,title) VALUES ('p',10,'FR| Lupin','Lupin')")
+        self.assertTrue(self.cat.save('awa', 'live', {'lang': 'FR', 'canonical': 'TF1', 'label': 'TF1'}))
+        self.assertTrue(self.cat.save('awa', 'movie', {'provider_id': 'p', 'stream_id': 7}))
+        self.assertTrue(self.cat.save('awa', 'series', {'provider_id': 'p', 'series_id': 10}))
+        self.assertFalse(self.cat.save('awa', 'movie', {'provider_id': 'p', 'stream_id': 999}))
+        self.assertFalse(self.cat.save('awa', 'film', {'provider_id': 'p', 'stream_id': 7}))
+        items = self.cat.saved('awa')
+        self.assertEqual({i['kind'] for i in items}, {'live', 'movie', 'series'})
+        live = next(i for i in items if i['kind'] == 'live')
+        self.assertEqual((live['icon'], live['epg_id']), ('http://img/tf1.png', 'tf1.fr'))
+        movie = next(i for i in items if i['kind'] == 'movie')
+        self.assertEqual((movie['title'], movie['stream_id']), ('Dune', 7))
+        self.assertEqual(self.cat.saved('bob'), [])
+        self.assertTrue(self.cat.unsave('awa', 'movie', {'provider_id': 'p', 'stream_id': 7}))
+        self.assertEqual([i['kind'] for i in self.cat.saved('awa', 'movie')], [])
+        # Un film retire par le fournisseur disparait de la liste.
+        with self.cat._db:
+            self.cat._db.execute("DELETE FROM series")
+        self.assertEqual([i['kind'] for i in self.cat.saved('awa')], ['live'])
+    def test_search_covers_the_whole_catalog(self):
+        seed_live(self.cat)
+        with self.cat._db:
+            self.cat._db.execute("INSERT INTO vod(provider_id,stream_id,name,title) VALUES ('p',7,'FR| Le Monde de TF1','Le Monde de TF1')")
+        found = self.cat.search('tf1')
+        self.assertEqual([c['canonical'] for c in found['channels']], ['TF1'])
+        self.assertEqual([m['title'] for m in found['movies']], ['Le Monde de TF1'])
+        self.assertEqual(found['series'], [])
+        self.assertEqual(self.cat.search('  '), {'channels': [], 'movies': [], 'series': []})
 
 class PlayerIndexTests(unittest.TestCase):
     def setUp(self):
@@ -707,6 +753,17 @@ class GuideTests(unittest.TestCase):
         before = guide.now_next(['m6.fr'], now=NOW - 600)['m6.fr']
         self.assertIsNone(before['now']); self.assertEqual(before['next']['title'], 'Film')
         self.assertNotIn('absente', found)
+    def test_grid_window_returns_overlapping_programmes(self):
+        guide = self.guide([self.source('a.xml', XMLTV)]); guide.rebuild(now=NOW)
+        for _ in range(50):
+            if guide.ready(): break
+            time.sleep(.05)
+        self.assertTrue(guide.ready())
+        rows = guide.window(['tf1.fr', 'm6.fr', 'absente'], NOW + 1800, NOW + 5400)
+        self.assertEqual([r[2] for r in rows['tf1.fr']], ['JT & meteo'])
+        self.assertEqual([r[2] for r in rows['m6.fr']], ['Film'])
+        self.assertNotIn('absente', rows)
+        self.assertEqual(guide.window(['tf1.fr'], NOW + 3600, NOW + 7200), {})
     def test_a_sync_forces_a_rebuild_even_when_fresh(self):
         guide = self.guide([self.source('a.xml', XMLTV)]); guide.rebuild(now=NOW)
         with patch.object(guide, 'rebuild') as rebuild:
@@ -985,6 +1042,39 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(len(self.history(awa)['items']), 1)
         self.state.cfg['users'] = []
         self.assertEqual(self.history(self.login())['items'], [])
+    def test_my_list_is_per_account(self):
+        self.seed_history_catalog()
+        seed_live(self.state.catalog)
+        salt, digest = hash_password('motdepasse1')
+        self.state.cfg['users'] = [{'username': 'awa', 'salt': salt, 'password_hash': digest, 'role': 'viewer'}]
+        awa = self.request('/api/login', {'username': 'awa', 'password': 'motdepasse1'}).headers['Set-Cookie'].split(';')[0]
+        admin = self.login()
+        self.assertEqual(self.request('/api/favorites', {'lang': 'FR', 'canonical': 'TF1', 'label': 'TF1'}, awa).status, 200)
+        self.assertEqual(self.request('/api/favorites', {'kind': 'movie', 'provider_id': 'p', 'stream_id': 7}, awa).status, 200)
+        self.assertEqual(self.request('/api/favorites', {'kind': 'movie', 'provider_id': 'p', 'stream_id': 8}, awa).status, 404)
+        mine = json.loads(self.request('/api/favorites', cookie=awa).read())
+        self.assertEqual([i['kind'] for i in mine], ['movie', 'live'])
+        self.assertEqual(json.loads(self.request('/api/favorites', cookie=admin).read()), [])
+        self.request('/api/favorites/delete', {'kind': 'movie', 'provider_id': 'p', 'stream_id': 7}, awa)
+        self.assertEqual([i['kind'] for i in json.loads(self.request('/api/favorites', cookie=awa).read())], ['live'])
+        self.state.cfg['users'] = []
+    def test_search_and_guide_grid_endpoints(self):
+        self.seed_history_catalog()
+        cookie = self.login()
+        found = json.loads(self.request('/api/search?q=lup', cookie=cookie).read())
+        self.assertEqual([s['title'] for s in found['series']], ['Lupin'])
+        grid = json.loads(self.request('/api/guide/grid?ids=tf1.fr&from=%d&to=%d' % (NOW, NOW + 3600), cookie=cookie).read())
+        self.assertEqual(grid['programs'], {})
+    def test_admin_can_free_a_connection_held_by_another_stream(self):
+        admin, viewer = self.login(), self.login('test-viewer')
+        with patch.object(Transcoder, '_spawn'):
+            self.state.transcoder.open('ailleurs', 'FR|TF1', [{'provider': 'p', 'url': 'http://x/1'}], 'TF1')
+        key = next(iter(self.state.transcoder.workers))
+        self.assertEqual(self.request('/api/streams/stop', {'key': key}, viewer).status, 403)
+        self.assertEqual(self.request('/api/streams/stop', {'key': key}, admin).status, 200)
+        self.assertEqual(self.state.transcoder.workers, {})
+        self.assertEqual(self.state.transcoder.tickets, {})
+        self.assertEqual(self.request('/api/streams/stop', {'key': key}, admin).status, 404)
     def test_web_files_are_compressed_cached_and_revalidated(self):
         versioned = self.request('/app.js?v=test', headers={'Accept-Encoding': 'gzip'})
         self.assertEqual(versioned.headers['Content-Encoding'], 'gzip')

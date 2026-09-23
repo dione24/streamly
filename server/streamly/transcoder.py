@@ -797,6 +797,16 @@ class Transcoder:
             if not any(x['key'] == t['key'] for x in self.tickets.values()):
                 self._stop_locked(t['key'])
 
+    def stop_worker(self, key):
+        """Arrete une chaine pour tous ses spectateurs. Rend False si inconnue."""
+        with self._lock:
+            if key not in self.workers:
+                return False
+            for ticket in [k for k, t in self.tickets.items() if t['key'] == key]:
+                del self.tickets[ticket]
+            self._stop_locked(key)
+            return True
+
     def release_owner(self, owner):
         with self._lock:
             for ticket in [k for k, t in self.tickets.items() if t['owner'] == owner]:

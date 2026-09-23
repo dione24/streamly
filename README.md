@@ -39,17 +39,23 @@ abonnement IPTV ──▶ Streamly (FFmpeg, à la demande) ──▶ interface w
 - Direct, films et séries en grilles : vignettes de chaînes numérotées avec le
   programme en cours, pastilles de catégories, affiches ; en lecture, « maintenant
   / ensuite » et la rangée des chaînes sous l'image pour zapper ; pilotable au
-  clavier et à la télécommande.
+  clavier et à la télécommande. Abonnement et langue se choisissent dans une
+  fiche « Filtres » ; qualité, connexion et budget dans les réglages du lecteur.
+- Guide TV en grille dans l'onglet Direct : chaînes à gauche, heures en haut,
+  le programme en cours se lance d'un geste.
 - Écrans explicites plutôt qu'une image figée : préparation (avec le débit
   mesuré de votre connexion), reprise du direct, connexion trop lente pour la
   qualité en cours, connexion interrompue, chaîne indisponible chez le
-  fournisseur.
+  fournisseur, abonnement déjà utilisé (avec la lecture qui le retient,
+  que l'administrateur peut arrêter), budget de séance atteint.
 - Page d'accueil par compte : reprendre là où on s'était arrêté, films et
   épisodes en cours, épisode suivant des séries, chaînes récentes, favoris.
   L'historique est gardé par le serveur, donc partagé entre tous les appareils.
 - Actualiser la page ramène au même onglet et propose de reprendre la lecture
   en cours ; les sessions survivent à un redémarrage du serveur.
-- Favoris, recherche, PWA installable, mini-lecteur, plein écran.
+- « Ma liste » par compte : chaînes, films et séries.
+- Recherche dans tout le catalogue (chaînes, films, séries) depuis la loupe
+  ou la touche « / », PWA installable, mini-lecteur, plein écran.
 - Fiches enrichies : image de fond, genre, année, réalisation, distribution et
   bande-annonce lues dans la fiche TMDB que renvoie le panel ; notes IMDb,
   Rotten Tomatoes et Metacritic si une clé OMDb (gratuite) est configurée
