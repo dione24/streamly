@@ -21,7 +21,7 @@ const state = {
   generation: null, retries: 0, statusMisses: 0, recoveryTimer: null, playback: 0, stalls: 0, started: 0,
   frames: false, movie: null, job: null, role: 'viewer', configTimer: null, jobTimer: null,
   configOpen: false, configReturnMode: 'live', configSnapshot: null,
-  channelList: [], zapTimer: null, liveView: store.get('live_view', 'grid') === 'guide' ? 'guide' : 'grid',
+  channelList: [], zapTimer: null, providerCreds: {}, shownProvider: null, liveView: store.get('live_view', 'grid') === 'guide' ? 'guide' : 'grid',
   selectedChannelIndex: -1,
   // Historique du compte (serveur) ; watch : film ou episode en lecture.
   history: {items: [], next: {}}, watch: null, startAt: 0, savedAt: 0, liveTimer: null, homeRender: 0
@@ -50,6 +50,7 @@ function requireLogin(msg = '') {
   state.role = 'viewer';
   state.ticket = null; state.current = null; state.job = null; ++state.playback;
   state.favorites = [];
+  state.providerCreds = {}; state.shownProvider = null;
   state.history = {items: [], next: {}}; state.watch = null;
   if (state.controller) state.controller.abort(); state.controller = null;
   destroyPlayer(); $('#player-wrap').hidden = true;
@@ -1611,6 +1612,7 @@ async function setMode(mode, {route = true, query = ''} = {}) {
     // etat, sinon la page restait en mode reglages et le lecteur masque.
     state.configOpen = false;
     state.configReturnMode = null;
+    state.providerCreds = {}; state.shownProvider = null;
     document.body.classList.remove('view-config');
     clearInterval(state.configTimer);
     state.configTimer = null;
@@ -1703,6 +1705,7 @@ async function openSettings() {
 async function closeSettings() {
   if (!state.configOpen) return;
   state.configOpen = false;
+  state.providerCreds = {}; state.shownProvider = null;
   document.body.classList.remove('view-config');
   $('#config').hidden = true;
   clearInterval(state.configTimer);
@@ -3184,6 +3187,10 @@ async function refreshConfig() {
     details.dataset.providerDetails = p.id;
     details.append(el('span', 'detail-line', 'Lecture des informations…'));
     li.append(details);
+    const shown = state.shownProvider === p.id && state.providerCreds[p.id];
+    const creds = el('button', 'quiet', shown ? 'Masquer les identifiants' : 'Identifiants');
+    creds.setAttribute('aria-expanded', String(!!shown));
+    creds.onclick = () => toggleProviderCreds(p.id).catch(failure);
     const sync = el('button', 'quiet', 'Synchroniser');
     sync.onclick = async () => { await post('/sync', {id: p.id}); message('Synchronisation démarrée.'); };
     const del = el('button', 'quiet', 'Supprimer');
@@ -3193,7 +3200,8 @@ async function refreshConfig() {
         await refreshConfig();
       }
     };
-    li.append(sync, del);
+    li.append(creds, sync, del);
+    if (shown) li.append(providerCredsBlock(state.providerCreds[p.id]));
     $('#provider-list').append(li);
   });
   // Les details interrogent le panel : on ne bloque pas l'affichage de la
@@ -3201,6 +3209,37 @@ async function refreshConfig() {
   loadProviderDetails().catch(() => {});
   // Sans abonnement, le formulaire d'ajout est la seule chose utile : on l'ouvre.
   if (!(st.providers || []).length) $('#add-provider').open = true;
+}
+
+// Identifiants de l'abonnement, pour les retrouver sans ouvrir le serveur.
+// Gardes en memoire le temps des Reglages : la liste est reconstruite toutes les 8 s.
+async function toggleProviderCreds(id) {
+  if (state.shownProvider === id) {
+    state.shownProvider = null;
+  } else {
+    state.providerCreds[id] = await api('/providers/credentials?id=' + encodeURIComponent(id));
+    state.shownProvider = id;
+    state.revealProviderPass = false;
+  }
+  await refreshConfig();
+}
+
+function providerCredsBlock(c) {
+  const box = el('div', 'access-card provider-creds');
+  const reveal = !!state.revealProviderPass;
+  if (c.kind === 'm3u') {
+    box.append(accessRow('Lien M3U', c.url, reveal ? c.url : c.url.replace(/(password=)[^&]+/i, '$1••••••')));
+  } else {
+    box.append(accessRow('Serveur', c.host, c.host), accessRow('Identifiant', c.username, c.username),
+      accessRow('Mot de passe', c.password, reveal ? c.password : '•'.repeat(Math.min(12, c.password.length))));
+  }
+  const tools = el('div', 'access-tools');
+  const toggle = el('button', 'quiet', reveal ? 'Masquer le mot de passe' : 'Afficher le mot de passe');
+  toggle.type = 'button';
+  toggle.onclick = () => { state.revealProviderPass = !reveal; refreshConfig().catch(failure); };
+  tools.append(toggle, el('span', 'label-hint', 'Utilisés dans un autre lecteur pendant que Streamly lit une chaîne, ils prennent une connexion de plus chez le fournisseur.'));
+  box.append(tools);
+  return box;
 }
 
 $('#tab-conf').onclick = async () => {

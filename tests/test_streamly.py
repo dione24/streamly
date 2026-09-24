@@ -1065,6 +1065,12 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual([s['title'] for s in found['series']], ['Lupin'])
         grid = json.loads(self.request('/api/guide/grid?ids=tf1.fr&from=%d&to=%d' % (NOW, NOW + 3600), cookie=cookie).read())
         self.assertEqual(grid['programs'], {})
+    def test_admin_sees_the_subscription_credentials(self):
+        admin, viewer = self.login(), self.login('test-viewer')
+        creds = json.loads(self.request('/api/providers/credentials?id=p', cookie=admin).read())
+        self.assertEqual(creds, {'kind': 'xtream', 'host': 'http://example.invalid', 'username': 'u', 'password': 'p'})
+        self.assertEqual(self.request('/api/providers/credentials?id=p', cookie=viewer).status, 403)
+        self.assertEqual(self.request('/api/providers/credentials?id=autre', cookie=admin).status, 404)
     def test_admin_can_free_a_connection_held_by_another_stream(self):
         admin, viewer = self.login(), self.login('test-viewer')
         with patch.object(Transcoder, '_spawn'):

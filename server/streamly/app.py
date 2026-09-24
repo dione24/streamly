@@ -1224,6 +1224,17 @@ class Handler(BaseHTTPRequestHandler):
                 limit=max(1, min(int(one("limit", 120)), 500)),
                 offset=max(0, int(one("offset", 0)))))
 
+        if path == "/api/providers/credentials":
+            # Reglages : l'administrateur retrouve les identifiants de son
+            # abonnement (pour un autre lecteur, ou pour le fournisseur).
+            if not self._admin():
+                return self._err(403, "accès administrateur requis")
+            provider = STATE.provider(one("id"))
+            if not provider:
+                return self._err(404, "abonnement introuvable")
+            keys = ("url",) if provider.get("kind") == "m3u" else ("host", "username", "password")
+            return self._json(dict({k: provider.get(k) or "" for k in keys}, kind=provider.get("kind") or "xtream"))
+
         if path == "/api/providers/info":
             if not self._admin():
                 return self._err(403, "accès administrateur requis")

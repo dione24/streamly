@@ -812,6 +812,9 @@ dialog.confirm p { margin-top: 8px; font-size: 0.9rem; line-height: 1.5; }
 .kind-badge { padding: 2px 7px; border-radius: 5px; font-size: 0.64rem; font-weight: 800; letter-spacing: 0.06em; color: var(--accent); background: rgba(139, 92, 246, 0.16); }
 .provider-details { order: 3; flex: 1 1 100%; display: flex; flex-direction: column; gap: 2px; }
 .provider-details.unreachable .detail-line { color: var(--danger); }
+.provider-creds { order: 4; flex: 1 1 100%; margin-top: 6px; background: rgba(0, 0, 0, 0.25); }
+.provider-creds .access-tools { align-items: center; }
+.provider-creds .label-hint { font-size: 0.74rem; }
 .detail-line { font-size: 0.8rem; color: var(--muted); }
 #provider-list li > button, .device-list li > button { min-height: 30px; padding: 0 12px; font-size: 0.78rem; }
 #provider-list li > button:first-of-type { margin-left: auto; }
