@@ -444,10 +444,10 @@ Sans `action` (auth de panel) :
     "message": "",
     "auth": 1,
     "status": "Active",
-    "exp_date": null,
+    "exp_date": "<dans un an, timestamp en texte : null est lu comme « expiré » par Smart One>",
     "is_trial": "0",
     "active_cons": "<nombre de workers Transcoder>",
-    "created_at": null,
+    "created_at": "<il y a 30 jours, timestamp en texte>",
     "max_connections": 1,
     "allowed_output_formats": ["m3u8"]
   },

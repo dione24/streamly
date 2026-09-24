@@ -290,11 +290,15 @@ class PlayerFacade:
         https = parsed.scheme == 'https'
         port = str(parsed.port or (443 if https else 80))
         now = time.time()
+        # Une echeance reelle, comme un panel : certaines applis TV (Smart One)
+        # lisent « null » comme 1970 et affichent « Playlist Expired ».
+        # Dans un an, arrondie au jour pour ne pas changer a chaque requete.
+        today = int(now // 86400 * 86400)
         return {
             'user_info': {
                 'username': player['username'], 'password': player['password'],
-                'message': '', 'auth': 1, 'status': 'Active', 'exp_date': None,
-                'is_trial': '0', 'active_cons': str(active), 'created_at': None,
+                'message': '', 'auth': 1, 'status': 'Active', 'exp_date': str(today + 365 * 86400),
+                'is_trial': '0', 'active_cons': str(active), 'created_at': str(today - 30 * 86400),
                 'max_connections': '1', 'allowed_output_formats': ['m3u8'],
             },
             'server_info': {

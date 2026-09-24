@@ -1344,6 +1344,8 @@ class HTTPTests(unittest.TestCase):
                                           headers={'Host': 'tv.example:8088'}).read())
         self.assertEqual(account['user_info']['auth'], 1)
         self.assertEqual(account['user_info']['allowed_output_formats'], ['m3u8'])
+        # Echeance lisible par les applis TV : une date future en texte, jamais null.
+        self.assertGreater(int(account['user_info']['exp_date']), time.time() + 300 * 86400)
         self.assertEqual((account['server_info']['url'], account['server_info']['port']), ('tv.example', '8088'))
         cats = json.loads(self.request('/player_api.php?username=tv&password=salon2024xyz&action=get_live_categories').read())
         self.assertEqual([c['category_name'] for c in cats], ['Autres', 'France', 'UK "News"'])
