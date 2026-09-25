@@ -731,6 +731,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_web(self, path, params=None):
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
+        # Un dossier (/landing/) sert sa page d'index, avec ses adresses relatives.
+        if rel.endswith("/"):
+            rel += "index.html"
         rel = posixpath.normpath(rel)
         if rel.startswith("..") or os.path.isabs(rel):
             return self._err(403, "chemin refuse")

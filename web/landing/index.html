@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Streamly — Le direct, compressé pour votre connexion</title>
+<meta name="description" content="Streamly recompresse votre abonnement IPTV à la volée : le même match pour 0,4 Go/h au lieu de 3. Qualité adaptée à votre connexion, sur vos écrans et dans vos lecteurs habituels.">
+<meta name="theme-color" content="#07060d">
+<meta name="referrer" content="no-referrer">
+<meta property="og:title" content="Streamly — Le match entier. Pas votre forfait entier.">
+<meta property="og:description" content="Votre IPTV recompressée à la volée : 0,2 à 0,7 Go par heure au lieu de 3.">
+<meta property="og:type" content="website">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/barlow-condensed-800.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="landing.css?v=2">
+<script>document.documentElement.classList.add('js')</script>
+<script defer src="landing.js?v=2"></script>
+</head>
+<body>
+<a class="skip" href="#contenu">Aller au contenu</a>
+
+<header class="nav" id="haut">
+ <a class="brand" href="#haut" aria-label="Streamly, retour en haut"><span class="brand-mark" aria-hidden="true">S</span><span>streamly</span></a>
+ <nav aria-label="Sections">
+  <a href="#fonctionnement">Fonctionnement</a>
+  <a href="#modes">Modes</a>
+  <a href="#ecrans">Vos écrans</a>
+  <a href="#questions">Questions</a>
+ </nav>
+ <div class="nav-cta">
+  <a class="link-quiet" href="/">Se connecter</a>
+  <a class="btn btn-light" href="#acces">Demander un accès</a>
+ </div>
+</header>
+
+<main id="contenu">
+
+<!-- ============================================================ Ouverture -->
+<section class="hero" aria-labelledby="hero-title">
+ <div class="hero-glow" aria-hidden="true"></div>
+ <div class="hero-copy">
+  <p class="eyebrow reveal"><span class="live-dot" aria-hidden="true"></span>IPTV compressée · adaptée à votre connexion</p>
+  <h1 id="hero-title" class="display reveal">Le match entier.<br><em>Pas votre forfait entier.</em></h1>
+  <p class="lede reveal">Streamly se place entre votre abonnement IPTV et vos écrans, et recompresse le direct à la volée. Le même match pour <strong>0,4&nbsp;Go par heure</strong> au lieu de 3, dans la meilleure qualité que votre connexion supporte.</p>
+  <div class="hero-actions reveal">
+   <a class="btn btn-violet" href="#acces">Demander un accès</a>
+   <a class="btn btn-ghost" href="#fonctionnement">Voir comment ça marche</a>
+  </div>
+  <p class="fineprint reveal">Vous apportez votre abonnement. Streamly ne fournit aucun contenu.</p>
+ </div>
+
+ <!-- Le compteur de match : ce que chaque minute coute, source contre Streamly -->
+ <figure class="screen reveal" aria-labelledby="meter-caption">
+  <div class="tv">
+   <div class="tv-image" aria-hidden="true">
+    <svg class="pitch" viewBox="0 0 400 225" preserveAspectRatio="xMidYMid slice">
+     <defs>
+      <linearGradient id="turf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1b1236"/><stop offset="1" stop-color="#0b0816"/></linearGradient>
+      <radialGradient id="flood" cx=".5" cy="-.1" r=".9"><stop offset="0" stop-color="#a78bfa" stop-opacity=".55"/><stop offset="1" stop-color="#a78bfa" stop-opacity="0"/></radialGradient>
+     </defs>
+     <rect width="400" height="225" fill="url(#turf)"/>
+     <g fill="none" stroke="#c4b5fd" stroke-opacity=".28" stroke-width="1.2">
+      <path d="M40 200 L110 60 L290 60 L360 200 Z"/>
+      <path d="M200 60 L200 200"/>
+      <ellipse cx="200" cy="122" rx="38" ry="16"/>
+      <path d="M75 130 L130 130 L140 110 L96 110"/>
+      <path d="M325 130 L270 130 L260 110 L304 110"/>
+     </g>
+     <rect width="400" height="225" fill="url(#flood)"/>
+     <circle class="ball" cx="200" cy="122" r="3.2" fill="#fff"/>
+    </svg>
+    <div class="scorebug"><span class="bug-live">DIRECT</span><span class="bug-teams">DOM&nbsp;<b>1</b>&nbsp;–&nbsp;<b>1</b>&nbsp;EXT</span><span class="bug-clock"><span id="match-minute">0</span>′</span></div>
+    <div class="quality-tag">Auto · <span id="quality-now">480p</span></div>
+   </div>
+   <div class="tv-foot" aria-hidden="true"></div>
+  </div>
+  <figcaption class="meter" id="meter-caption">
+   <p class="meter-title">Données consommées pendant ce match</p>
+   <div class="meter-row">
+    <span class="meter-label">Flux d’origine</span>
+    <span class="meter-track"><span class="meter-fill raw" id="fill-raw"></span></span>
+    <span class="meter-value" id="value-raw">0,00 Go</span>
+   </div>
+   <div class="meter-row">
+    <span class="meter-label">Avec Streamly</span>
+    <span class="meter-track"><span class="meter-fill lite" id="fill-lite"></span></span>
+    <span class="meter-value accent" id="value-lite">0,00 Go</span>
+   </div>
+   <p class="meter-note">Match de 90&nbsp;min · source 3,1&nbsp;Go/h · mode Équilibré 0,42&nbsp;Go/h</p>
+  </figcaption>
+ </figure>
+</section>
+
+<!-- ============================================================ Chiffres -->
+<section class="stats" aria-label="En chiffres">
+ <div class="stat reveal"><span class="stat-num">÷7</span><span class="stat-txt">de données en mode Équilibré, pour un rendu net sur téléphone</span></div>
+ <div class="stat reveal"><span class="stat-num">4</span><span class="stat-txt">qualités, du 720p au 240p, choisies seconde par seconde</span></div>
+ <div class="stat reveal"><span class="stat-num">2&nbsp;s</span><span class="stat-txt">par segment : la qualité suit votre réseau sans coupure</span></div>
+ <div class="stat reveal"><span class="stat-num">1×</span><span class="stat-txt">encodée, même regardée sur plusieurs écrans à la fois</span></div>
+</section>
+
+<!-- ============================================================ Fonctionnement -->
+<section class="section how" id="fonctionnement" aria-labelledby="how-title">
+ <header class="section-head reveal">
+  <p class="eyebrow">Fonctionnement</p>
+  <h2 id="how-title" class="display">Votre abonnement entre lourd.<br><em>Il ressort à votre mesure.</em></h2>
+ </header>
+ <ol class="flow">
+  <li class="flow-step reveal">
+   <span class="flow-num">01</span>
+   <h3>Vous branchez votre abonnement</h3>
+   <p>Identifiants Xtream Codes ou lien M3U. Chaînes, films, séries et guide des programmes sont importés, puis actualisés tout seuls.</p>
+   <span class="flow-weight">2,5 à 4&nbsp;Go/h</span>
+  </li>
+  <li class="flow-step reveal">
+   <span class="flow-num">02</span>
+   <h3>Streamly recompresse à la demande</h3>
+   <p>Rien n’est encodé tant qu’une chaîne n’est pas ouverte. À l’ouverture, quatre qualités sont produites en direct, avec un plafond de qualité constant : un journal télévisé coûte moins qu’un match.</p>
+   <span class="flow-weight">quelques secondes de préparation</span>
+  </li>
+  <li class="flow-step reveal">
+   <span class="flow-num">03</span>
+   <h3>Vous regardez, où vous voulez</h3>
+   <p>Sur l’interface Streamly, ou dans le lecteur que vous utilisez déjà. Le lecteur choisit la qualité que la connexion permet, et remonte dès qu’elle revient.</p>
+   <span class="flow-weight accent">0,2 à 0,7&nbsp;Go/h</span>
+  </li>
+ </ol>
+</section>
+
+<!-- ============================================================ Modes -->
+<section class="section modes" id="modes" aria-labelledby="modes-title">
+ <header class="section-head reveal">
+  <p class="eyebrow">Modes de lecture</p>
+  <h2 id="modes-title" class="display">Vous décidez<br><em>de ce que coûte une soirée.</em></h2>
+ </header>
+ <div class="mode-grid">
+  <article class="mode reveal">
+   <h3>Économie</h3><p class="mode-q">360p maximum</p>
+   <p class="mode-rate"><b>≈ 0,2</b> Go/h</p><span class="mode-bar" style="--w:9%"></span>
+   <p>Pour les forfaits serrés et les réseaux capricieux.</p>
+  </article>
+  <article class="mode reveal">
+   <h3>Équilibré</h3><p class="mode-q">480p maximum</p>
+   <p class="mode-rate"><b>≈ 0,4</b> Go/h</p><span class="mode-bar" style="--w:17%"></span>
+   <p>Net sur un téléphone, confortable sur une tablette.</p>
+  </article>
+  <article class="mode reveal">
+   <h3>Sport</h3><p class="mode-q">720p, cadence d’origine</p>
+   <p class="mode-rate"><b>≈ 0,7</b> Go/h</p><span class="mode-bar" style="--w:28%"></span>
+   <p>Le ballon reste net, même sur grand écran.</p>
+  </article>
+  <article class="mode reveal">
+   <h3>Audio seul</h3><p class="mode-q">le son du direct</p>
+   <p class="mode-rate"><b>≈ 45</b> Mo/h</p><span class="mode-bar" style="--w:2%"></span>
+   <p>Suivre le commentaire quand l’image est de trop.</p>
+  </article>
+  <article class="mode mode-feature reveal">
+   <p class="mode-kicker">Mode Budget</p>
+   <h3>« 800&nbsp;Mo pour ce match de 2&nbsp;h. »</h3>
+   <p>Vous fixez le volume et la durée : Streamly calcule le débit qui tient dedans, affiche le compteur pendant la lecture et s’arrête avant de dépasser.</p>
+   <div class="budget-demo" aria-hidden="true">
+    <div class="budget-track"><span class="budget-fill"></span></div>
+    <div class="budget-legend"><span>0</span><span class="budget-now">612 Mo</span><span>800 Mo</span></div>
+   </div>
+  </article>
+ </div>
+ <p class="baseline reveal">Comparé à un flux IPTV d’origine, qui consomme 2,5 à 4&nbsp;Go par heure.</p>
+</section>
+
+<!-- ============================================================ Calculateur -->
+<section class="section calc" aria-labelledby="calc-title">
+ <div class="calc-card reveal">
+  <div class="calc-copy">
+   <p class="eyebrow">Votre mois</p>
+   <h2 id="calc-title" class="display">Combien de Go<br><em>restent dans votre forfait ?</em></h2>
+   <label class="field" for="hours">Heures de direct par semaine <output id="hours-out" for="hours">8 h</output></label>
+   <input id="hours" type="range" min="1" max="30" value="8" step="1">
+   <fieldset class="segmented" aria-label="Mode">
+    <label><input type="radio" name="mode" value="0.2"><span>Économie</span></label>
+    <label><input type="radio" name="mode" value="0.42" checked><span>Équilibré</span></label>
+    <label><input type="radio" name="mode" value="0.7"><span>Sport</span></label>
+   </fieldset>
+  </div>
+  <div class="calc-result" aria-live="polite">
+   <div class="calc-line"><span>Sans Streamly</span><strong id="calc-raw">104 Go</strong></div>
+   <div class="calc-line"><span>Avec Streamly</span><strong class="accent" id="calc-lite">15 Go</strong></div>
+   <div class="calc-saved"><span id="calc-saved">89 Go</span><small>économisés chaque mois</small></div>
+   <p class="calc-note">Estimation sur 4,3 semaines, source à 3&nbsp;Go/h. Le débit réel dépend de la chaîne et de l’image : une scène calme coûte moins qu’un match.</p>
+  </div>
+ </div>
+</section>
+
+<!-- ============================================================ Ecrans -->
+<section class="section screens" id="ecrans" aria-labelledby="screens-title">
+ <header class="section-head reveal">
+  <p class="eyebrow">Vos écrans</p>
+  <h2 id="screens-title" class="display">Une interface de salon.<br><em>Et vos lecteurs habituels.</em></h2>
+ </header>
+ <div class="screens-grid">
+  <article class="feature feature-wide reveal">
+   <div class="guide-mock" aria-hidden="true">
+    <div class="gm-head"><span></span><span>20:00</span><span>20:30</span><span>21:00</span><span>21:30</span></div>
+    <div class="gm-row"><span class="gm-ch">Sport 1</span><span class="gm-p now" style="--l:0;--w:62">Ligue des champions · avant-match</span><span class="gm-p" style="--l:63;--w:37">Le match</span></div>
+    <div class="gm-row"><span class="gm-ch">Info</span><span class="gm-p now" style="--l:0;--w:30">Journal</span><span class="gm-p" style="--l:31;--w:44">Le grand débat</span><span class="gm-p" style="--l:76;--w:24">Météo</span></div>
+    <div class="gm-row"><span class="gm-ch">Cinéma</span><span class="gm-p now" style="--l:0;--w:85">Le film du soir</span><span class="gm-p" style="--l:86;--w:14">Court</span></div>
+    <div class="gm-row"><span class="gm-ch">Jeunesse</span><span class="gm-p" style="--l:0;--w:48">Dessins animés</span><span class="gm-p now" style="--l:49;--w:51">Série animée</span></div>
+    <span class="gm-now"></span>
+   </div>
+   <div class="feature-copy">
+    <h3>L’interface Streamly</h3>
+    <p>Direct, films et séries dans une interface de salon : guide TV en grille, zapping à la télécommande, « Ma liste », reprise là où vous vous étiez arrêté, sur tous vos appareils.</p>
+   </div>
+  </article>
+  <article class="feature reveal">
+   <h3>Vos lecteurs habituels</h3>
+   <p>Streamly se présente comme un panel Xtream Codes et comme un lien M3U. Collez les identifiants dans votre lecteur : il reçoit le flux compressé, avec le guide des programmes.</p>
+   <ul class="chips" aria-label="Lecteurs compatibles">
+    <li>TiviMate</li><li>IPTV Smarters</li><li>Smart One</li><li>IBO Player</li><li>VLC</li><li>…</li>
+   </ul>
+  </article>
+  <article class="feature reveal">
+   <h3>Des écrans qui parlent</h3>
+   <p>Pas d’image figée sans explication : préparation avec le débit mesuré de votre connexion, réseau trop lent, source instable, abonnement déjà utilisé. Et la lecture repart seule.</p>
+  </article>
+  <article class="feature reveal">
+   <h3>Films et séries allégés</h3>
+   <p>Lisibles pendant qu’ils se compressent, avec l’audio et les sous-titres de votre choix. Une fois prêts, téléchargeables pour les regarder hors connexion.</p>
+  </article>
+  <article class="feature reveal">
+   <h3>Secours automatique</h3>
+   <p>Quand un flux se fige chez le fournisseur, Streamly bascule sur une autre source de la même chaîne, sans que vous ayez à relancer.</p>
+  </article>
+ </div>
+</section>
+
+<!-- ============================================================ Principes -->
+<section class="section trust" aria-labelledby="trust-title">
+ <div class="trust-inner reveal">
+  <h2 id="trust-title" class="display">Votre serveur.<br><em>Vos flux.</em></h2>
+  <ul class="trust-list">
+   <li><b>Auto-hébergé.</b> Streamly tourne sur votre machine ou votre serveur ; vos identifiants ne quittent pas chez vous.</li>
+   <li><b>Aucun contenu fourni.</b> Vous apportez votre abonnement. Streamly ne fournit, ne référence et ne préconfigure aucune chaîne.</li>
+   <li><b>Sobre.</b> Aucun encodage tant que personne ne regarde ; une chaîne vue sur plusieurs écrans n’est compressée qu’une fois.</li>
+  </ul>
+ </div>
+</section>
+
+<!-- ============================================================ Questions -->
+<section class="section faq" id="questions" aria-labelledby="faq-title">
+ <header class="section-head reveal">
+  <p class="eyebrow">Questions</p>
+  <h2 id="faq-title" class="display">Avant de commencer</h2>
+ </header>
+ <div class="faq-list">
+  <details class="reveal">
+   <summary>Est-ce que je dois changer d’abonnement IPTV ?</summary>
+   <p>Non. Streamly utilise celui que vous avez déjà, en Xtream Codes ou en lien M3U. Il ne fait que le recevoir et le recompresser pour vous.</p>
+  </details>
+  <details class="reveal">
+   <summary>La qualité est-elle dégradée ?</summary>
+   <p>Elle est adaptée. En mode Sport, l’image monte jusqu’en 720p à la cadence d’origine, ce qui reste net sur un téléviseur. En Économie, l’image est plus douce mais le direct tient sur une connexion faible. Le lecteur remonte en qualité dès que le réseau le permet.</p>
+  </details>
+  <details class="reveal">
+   <summary>Combien de temps pour qu’une chaîne démarre ?</summary>
+   <p>Quelques secondes : le serveur prépare le direct à l’ouverture. Pendant ce temps, un écran l’indique et mesure votre connexion, plutôt qu’un écran noir.</p>
+  </details>
+  <details class="reveal">
+   <summary>Puis-je garder TiviMate, Smart One ou IBO Player ?</summary>
+   <p>Oui. Streamly vous donne un lien M3U et des identifiants Xtream Codes à coller dans votre lecteur. Le flux qu’il reçoit est déjà compressé.</p>
+  </details>
+  <details class="reveal">
+   <summary>Mon abonnement n’autorise qu’une connexion : ça marche ?</summary>
+   <p>Oui. Streamly n’ouvre qu’une connexion par chaîne regardée, même si plusieurs écrans la suivent, et libère l’abonnement dès que plus personne ne regarde.</p>
+  </details>
+ </div>
+</section>
+
+<!-- ============================================================ Acces -->
+<section class="section access" id="acces" aria-labelledby="access-title">
+ <div class="access-card reveal">
+  <div class="access-glow" aria-hidden="true"></div>
+  <p class="eyebrow">Bêta privée</p>
+  <h2 id="access-title" class="display">Regardez plus.<br><em>Dépensez moins de données.</em></h2>
+  <p>Streamly est ouvert sur invitation pendant la bêta. Demandez la vôtre à la personne qui vous a présenté Streamly : elle prépare votre accès et vous aide à brancher votre abonnement.</p>
+  <div class="hero-actions">
+   <!-- Quand une adresse de contact existera (https://wa.me/<numero> ou mailto:), un bouton « Demander un accès » viendra ici. -->
+   <a class="btn btn-violet" href="/">J’ai mon invitation : se connecter</a>
+  </div>
+ </div>
+</section>
+
+</main>
+
+<footer class="foot">
+ <a class="brand" href="#haut"><span class="brand-mark" aria-hidden="true">S</span><span>streamly</span></a>
+ <p>Streamly est un logiciel de recompression. Il ne fournit, ne vend ni ne référence aucun contenu : vous restez responsable de votre abonnement et de son usage.</p>
+ <p class="foot-small">© 2026 Streamly</p>
+</footer>
+</body>
+</html>

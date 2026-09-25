@@ -1081,6 +1081,13 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.state.transcoder.workers, {})
         self.assertEqual(self.state.transcoder.tickets, {})
         self.assertEqual(self.request('/api/streams/stop', {'key': key}, admin).status, 404)
+    def test_presentation_page_is_served_from_its_folder(self):
+        page = self.request('/landing/')
+        self.assertEqual(page.status, 200)
+        self.assertIn(b'Streamly', page.read())
+        self.assertEqual(self.request('/landing/landing.css?v=2').status, 200)
+        self.assertEqual(self.request('/landing/fonts/hanken-grotesk.woff2').status, 200)
+        self.assertEqual(self.request('/landing/../../server/config.json').status, 403)
     def test_web_files_are_compressed_cached_and_revalidated(self):
         versioned = self.request('/app.js?v=test', headers={'Accept-Encoding': 'gzip'})
         self.assertEqual(versioned.headers['Content-Encoding'], 'gzip')
