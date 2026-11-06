@@ -23,3 +23,10 @@ venv/
 # Systeme
 .DS_Store
 Thumbs.db
+
+# App macOS
+apple/.build/
+apple/.swiftpm/
+apple/*.xcodeproj/
+apple/App/Info.plist
+apple/build/

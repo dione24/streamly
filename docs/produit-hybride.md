@@ -72,6 +72,11 @@ Différence Streamly : bascule « Économie de données » (automatique en donn�
 - **Plateforme** : base commune **Flutter** (Android et iOS, Android TV ensuite), lecteur vidéo natif de chaque système en dessous.
 - **Premium de départ** : moteur **auto-hébergé**. Le cloud payant viendra après validation.
 
+## Décision du 2026-11-06
+
+- **macOS** : app native en Swift avec libmpv, dans `apple/`. Le cœur `StreamlyKit` n'a aucune interface, pour pouvoir servir sur iOS et tvOS.
+- Flutter reste le plan pour Android. Swift ou Flutter pour iOS : à trancher après l'essai sur Mac.
+
 ## Décisions ouvertes
 
 - Nom commercial, prix, domaine (remplacer `sslip.io`).

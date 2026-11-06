@@ -1,0 +1,48 @@
+# Regenerate the Xcode project with: cd apple && xcodegen generate
+name: Streamly
+options:
+  bundleIdPrefix: com.streamly
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+packages:
+  StreamlyApple:
+    path: .
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_HARDENED_RUNTIME: NO
+targets:
+  Streamly:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    dependencies:
+      - package: StreamlyApple
+        product: StreamlyKit
+      - package: StreamlyApple
+        product: StreamlyPlayer
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Streamly
+        CFBundleDevelopmentRegion: fr
+        LSApplicationCategoryType: public.app-category.entertainment
+        NSHumanReadableCopyright: "Streamly ne fournit aucun contenu."
+        NSAppTransportSecurity:
+          # IPTV panels are plain HTTP and their addresses are not known in advance.
+          NSAllowsArbitraryLoads: true
+        NSSupportsAutomaticTermination: false
+        NSSupportsSuddenTermination: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.streamly.mac
+        PRODUCT_NAME: Streamly
+        GENERATE_INFOPLIST_FILE: NO
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+        DEAD_CODE_STRIPPING: YES
