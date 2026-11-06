@@ -54,6 +54,18 @@ struct PrimaryButtonStyle: ButtonStyle {
     }
 }
 
+struct SecondaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(Theme.text)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(Theme.surface3, in: RoundedRectangle(cornerRadius: 9))
+            .opacity(configuration.isPressed ? 0.8 : 1)
+    }
+}
+
 struct QualityBadge: View {
     let text: String
 

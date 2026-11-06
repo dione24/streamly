@@ -32,6 +32,7 @@ public struct PlayerSnapshot: Sendable {
     public let media: MediaInfo
     public let tracks: [MediaTrack]
     public let position: Double?
+    public let duration: Double?
 }
 
 /// Pixels as mpv rendered them, in BGR0 order.
@@ -53,8 +54,11 @@ public enum PlayerEvent: Sendable {
 }
 
 public enum EndReason: Sendable {
-    /// The stream stopped by itself or failed: a live channel should be reconnected.
+    /// The stream failed: a live channel should be reconnected.
     case streamStopped
+    /// mpv reached the end of the data. For a movie that is usually the end of the film, but a
+    /// dropped connection looks the same, so the caller compares the position with the duration.
+    case finished
     /// Our own doing: `loadfile` replaced it or `stop` was called.
     case replaced
 }
@@ -73,6 +77,7 @@ public final class MPVPlayer: @unchecked Sendable {
 
     private let core: Core
     private let control = DispatchQueue(label: "streamly.mpv.control", qos: .userInitiated)
+    private let rangeStreams = RangeStreamRegistry()
 
     public init(headless: Bool = false, enableAudio: Bool = true) {
         let layer = headless ? nil : MPVMetalLayer()
@@ -109,7 +114,7 @@ public final class MPVPlayer: @unchecked Sendable {
         set("cache-secs", "20")
         set("demuxer-readahead-secs", "8")
         set("demuxer-max-bytes", "64MiB")
-        set("demuxer-max-back-bytes", "8MiB")
+        set("demuxer-max-back-bytes", "32MiB")
         set("demuxer-lavf-analyzeduration", "2")
         set("hwdec", "videotoolbox")
 
@@ -129,6 +134,8 @@ public final class MPVPlayer: @unchecked Sendable {
         if initialized < 0 {
             fatalError("libmpv failed to start: \(String(cString: mpv_error_string(initialized)))")
         }
+
+        rangeStreams.install(on: handle)
 
         core.observe("paused-for-cache", MPV_FORMAT_FLAG)
         core.observe("pause", MPV_FORMAT_FLAG)
@@ -150,11 +157,28 @@ public final class MPVPlayer: @unchecked Sendable {
 
     /// Replaces the current stream: mpv closes the old connection before opening the new one, which
     /// matters on single-connection subscriptions.
-    public func play(url: String, userAgent: String) {
+    public func play(url: String, userAgent: String, startAt: Double? = nil, onDemand: Bool = false) {
+        let target: String
+        if onDemand, let parsed = URL(string: url), parsed.scheme?.lowercased().hasPrefix("http") == true {
+            target = rangeStreams.register(url: parsed, userAgent: userAgent)
+        } else {
+            target = url
+        }
         control.async { [core] in
             core.setString("user-agent", userAgent)
-            core.command(["loadfile", url, "replace"])
+            // A global option rather than a `loadfile` argument, whose position changed between mpv
+            // versions: a refused command fails silently and nothing ever starts.
+            core.setString("start", startAt.map { $0 > 0 ? String(Int($0)) : "none" } ?? "none")
+            core.command(["loadfile", target, "replace"])
         }
+    }
+
+    public func seek(to position: Double) {
+        control.async { [core] in core.command(["seek", String(max(position, 0)), "absolute"]) }
+    }
+
+    public func seek(by offset: Double) {
+        control.async { [core] in core.command(["seek", String(offset), "relative"]) }
     }
 
     public func stop() {
@@ -196,7 +220,8 @@ public final class MPVPlayer: @unchecked Sendable {
                     audioCodec: core.string("audio-codec-name"),
                     hardwareDecoder: core.string("hwdec-current")),
                 tracks: Self.readTracks(core),
-                position: core.double("time-pos"))
+                position: core.double("time-pos"),
+                duration: core.double("duration"))
         }
     }
 
@@ -291,6 +316,9 @@ private final class Core: @unchecked Sendable {
             let reason = mpv_end_file_reason(rawValue: UInt32(end.reason.rawValue))
             if reason == MPV_END_FILE_REASON_STOP || reason == MPV_END_FILE_REASON_REDIRECT || reason == MPV_END_FILE_REASON_QUIT {
                 return .ended(reason: .replaced, error: nil)
+            }
+            if reason == MPV_END_FILE_REASON_EOF {
+                return .ended(reason: .finished, error: nil)
             }
             let message = reason == MPV_END_FILE_REASON_ERROR ? String(cString: mpv_error_string(end.error)) : nil
             return .ended(reason: .streamStopped, error: message)

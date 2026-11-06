@@ -250,6 +250,144 @@ enum SelfTest {
             check(!isFullScreen, "touche F : sortie du plein écran")
         }
 
+        func waitForState(_ label: String, timeout: TimeInterval = 25, _ wanted: PlaybackState) async -> Bool {
+            await wait(for: label, timeout: timeout) { $0 == wanted }
+        }
+
+        func onDemandScenario() async {
+            log("--- Films")
+            playback.stop()
+            try? await Task.sleep(for: .seconds(2.2))
+            check(model.movies.all.count == 4, "4 films au catalogue")
+            check(model.series.all.count == 2, "2 séries au catalogue")
+            guard let movie = model.movies.all.first else { return check(false, "premier film") }
+            check(movie.title == "La Mire de l'Aube (2021)", "titre nettoyé : \(movie.title)")
+            let detail = await model.movieDetail(movie)
+            check(detail?.durationSeconds == 120 && detail?.plot != nil, "fiche du film")
+
+            model.section = .movies
+            try? await Task.sleep(for: .seconds(1))
+            await capture("films")
+            model.open(movie, kind: .movie)
+            try? await Task.sleep(for: .seconds(1))
+            await capture("fiche")
+
+            model.play(movie: movie, detail: detail)
+            check(await waitForState("film", .playing), "film : lecture")
+            try? await Task.sleep(for: .seconds(3))
+            check(abs(playback.duration - 120) < 2, String(format: "film : durée %.0f s", playback.duration))
+            log("      pistes : \(playback.tracks.map { "\($0.kind.rawValue) \($0.title)" })")
+            check(playback.tracks.filter { $0.kind == .audio }.count == 2, "film : 2 pistes audio")
+            check(playback.tracks.filter { $0.kind == .sub }.count == 1, "film : 1 piste de sous-titres")
+            await capture("film")
+
+            // Each seek reopens the connection: the panel's refusal window must not end the film.
+            playback.seek(to: 70)
+            try? await Task.sleep(for: .seconds(8))
+            check(playback.position >= 68 && playback.state == .playing,
+                  String(format: "saut à 70 s malgré le refus du panel : %.0f s, %@", playback.position, String(describing: playback.state)))
+            playback.seek(by: -20)
+            try? await Task.sleep(for: .seconds(7))
+            check(playback.position >= 48 && playback.position < 70 && playback.state == .playing,
+                  String(format: "recul de 20 s : %.0f s, %@", playback.position, String(describing: playback.state)))
+            let stoppedAt = playback.position
+            model.closeOnDemand()
+            let saved = model.progress(for: movie)
+            check(saved?.resumePosition != nil, "position enregistrée : \(saved?.resumePosition.map { Duration.clock($0) } ?? "aucune")")
+            check(model.continueWatching(.movie).first?.key == saved?.key, "film dans « Continuer à regarder »")
+
+            try? await Task.sleep(for: .seconds(2.2))
+            model.play(movie: movie, detail: detail)
+            check(await waitForState("reprise", .playing), "reprise : lecture")
+            try? await Task.sleep(for: .seconds(2))
+            check(abs(playback.position - stoppedAt) < 10, String(format: "reprise à %.0f s (arrêt à %.0f s)", playback.position, stoppedAt))
+
+            playback.seek(to: 113)
+            check(await waitForState("fin du film", timeout: 25, .finished), "le film va jusqu'à la fin")
+            check(model.progress(for: movie)?.isFinished == true, "film marqué comme vu")
+            check(!model.continueWatching(.movie).contains { $0.key == saved?.key }, "un film fini quitte « Continuer »")
+            model.closeOnDemand()
+            model.open(nil, kind: .movie)
+
+            log("--- Séries")
+            try? await Task.sleep(for: .seconds(2.2))
+            guard let show = model.series.all.first(where: { $0.title == "La Série d'Essai" }) else { return check(false, "série trouvée") }
+            let seriesDetail = await model.seriesDetail(show)
+            check(seriesDetail?.episodes.count == 3 && seriesDetail?.seasons == [1, 2], "3 épisodes sur 2 saisons")
+            model.section = .series
+            model.open(show, kind: .series)
+            try? await Task.sleep(for: .seconds(1))
+            await capture("serie")
+            guard let first = seriesDetail?.episodes.first else { return }
+            model.play(episode: first, of: show)
+            check(await waitForState("épisode", .playing), "épisode 1 : lecture")
+            check(model.nextEpisode?.id == "6012", "épisode suivant connu")
+            try? await Task.sleep(for: .seconds(2))
+            playback.seek(to: 113)
+            check(await waitForState("fin d'épisode", timeout: 25, .finished), "fin de l'épisode 1")
+            try? await Task.sleep(for: .seconds(1))
+            await capture("fin-episode")
+            // The player moves on by itself after its 8-second countdown.
+            var advanced = false
+            for _ in 0..<150 {
+                if playback.onDemand?.episode?.id == "6012", playback.state == .playing { advanced = true; break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            check(advanced, "enchaînement automatique sur l'épisode 2")
+            playback.seek(to: 40)
+            try? await Task.sleep(for: .seconds(7))
+            model.closeOnDemand()
+            let resumable = model.continueWatching(.series).first
+            check(resumable?.seriesID == show.remoteID && resumable?.key == "episode:6012", "série dans « Continuer à regarder »")
+            if let resumable {
+                try? await Task.sleep(for: .seconds(2.2))
+                await model.resume(resumable)
+                check(await waitForState("reprise d'épisode", .playing), "reprise de l'épisode : lecture")
+                try? await Task.sleep(for: .seconds(2))
+                check(playback.onDemand?.episode?.id == "6012" && playback.position > 30,
+                      String(format: "reprise de l'épisode 2 à %.0f s", playback.position))
+                model.closeOnDemand()
+            }
+            model.open(nil, kind: .series)
+
+            log("--- Rattrapage")
+            try? await Task.sleep(for: .seconds(2.2))
+            if let sport = channel("Démo Sport") {
+                check(sport.archiveStream?.id == "102", "la variante HD garde les programmes passés")
+                let archive = await model.archive(for: sport)
+                check(!archive.isEmpty && archive.allSatisfy { $0.stop <= Date() }, "\(archive.count) programmes passés à revoir")
+                check(channel("Demo Movies")?.archiveStream == nil, "pas de rattrapage sans archives")
+                if let programme = archive.first {
+                    model.section = .direct
+                    model.replay(sport, programme: programme)
+                    check(await waitForState("rattrapage", .playing), "rattrapage : lecture de « \(programme.title) »")
+                    try? await Task.sleep(for: .seconds(2))
+                    model.closeOnDemand()
+                    check(model.preferences.progress.keys.allSatisfy { !$0.contains("timeshift") }, "le rattrapage n'encombre pas la progression")
+                }
+            }
+
+            log("--- Recherche globale")
+            model.section = .search
+            model.globalQuery = "DEMO"
+            try? await Task.sleep(for: .milliseconds(500))
+            check(model.globalResults.channels.count >= 4, "« DEMO » trouve les chaînes : \(model.globalResults.channels.count)")
+            model.globalQuery = "mire de l aube"
+            try? await Task.sleep(for: .milliseconds(500))
+            check(model.globalResults.movies.first?.remoteID == "501", "recherche d'un film")
+            model.globalQuery = "serie essai"
+            try? await Task.sleep(for: .milliseconds(500))
+            check(model.globalResults.series.first?.remoteID == "601", "recherche d'une série, sans accents")
+            await capture("recherche")
+            model.globalQuery = ""
+            model.section = .direct
+            try? await Task.sleep(for: .seconds(2.2))
+            if let movies = channel("Demo Movies") {
+                model.play(movies)
+                _ = await waitForState("retour au direct", .playing)
+            }
+        }
+
         func run() async {
             playback.toggleMute()  // a test must not play tones on the user's speakers
             log("--- Abonnement")
@@ -301,6 +439,7 @@ enum SelfTest {
             let retried = await wait(for: "réessai", timeout: 15) { $0 == .playing }
             check(retried, "« Réessayer » relance la lecture une fois la connexion libérée")
 
+            await onDemandScenario()
             await interaction()
 
             log("--- Liste et préférences")
@@ -329,8 +468,8 @@ enum SelfTest {
             if let playlist = model.active {
                 await model.resync(playlist)
                 check(model.sync == .idle && model.channels.count == 6, "actualisation")
-                check(model.categories.first.map(model.name(of:)) == "Mes matchs", "le nom choisi survit à l'actualisation")
-                model.remove(playlist)
+                check(model.categories.first.map { model.name(of: $0) } == "Mes matchs", "le nom choisi survit à l'actualisation")
+                await model.remove(playlist)
                 check(!model.hasPlaylist && model.playback.state == .idle, "suppression : la lecture s'arrête")
             }
             log(failures == 0 ? "RESULTAT : tout est bon" : "RESULTAT : \(failures) échec(s)")

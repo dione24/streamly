@@ -3,7 +3,6 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @State private var theater = false
 
     var body: some View {
         @Bindable var bindable = model
@@ -12,7 +11,13 @@ struct RootView: View {
                 ContentUnavailableView("Démarrage impossible", systemImage: "exclamationmark.triangle",
                                        description: Text(error))
             } else if model.hasPlaylist {
-                browser
+                ZStack {
+                    browser
+                    if model.playback.onDemand != nil {
+                        OnDemandPlayerView()
+                            .transition(.opacity)
+                    }
+                }
             } else {
                 AddPlaylistView(isWelcome: true)
             }
@@ -25,7 +30,16 @@ struct RootView: View {
                 .frame(width: 520, height: 560)
                 .background(Theme.background)
         }
+        // The green button and the system's Esc also change full screen: follow them.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+            model.noteFullScreen(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+            model.noteFullScreen(true)
+        }
     }
+
+    private var theater: Bool { model.isFullScreen && model.section == .direct }
 
     private var browser: some View {
         HStack(spacing: 0) {
@@ -33,34 +47,31 @@ struct RootView: View {
                 SidebarView()
                     .frame(width: 216)
                 Divider().overlay(Theme.line)
-                ChannelListView(onOpen: { setTheater(true) })
-                    .frame(width: 340)
-                Divider().overlay(Theme.line)
             }
-            PlayerPane(theater: theater, toggleTheater: { setTheater(!theater) })
-        }
-        // The green button and the system's Esc also change full screen: follow them.
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
-            theater = false
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
-            theater = true
-        }
-    }
-
-    private func setTheater(_ value: Bool) {
-        guard value != theater else { return }
-        theater = value
-        guard let window = NSApp.keyWindow ?? NSApp.windows.first else { return }
-        if window.styleMask.contains(.fullScreen) != value {
-            window.toggleFullScreen(nil)
+            switch model.section {
+            case .direct:
+                if !theater {
+                    ChannelListView(onOpen: { model.setFullScreen(true) })
+                        .frame(width: 340)
+                    Divider().overlay(Theme.line)
+                }
+                PlayerPane(theater: theater, toggleTheater: { model.setFullScreen(!model.isFullScreen) })
+            case .guide:
+                GuideScreen()
+            case .movies:
+                CatalogView(kind: .movie)
+            case .series:
+                CatalogView(kind: .series)
+            case .search:
+                SearchView()
+            }
         }
     }
 }
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
-    @State private var renaming: ChannelCategory?
+    @State private var renaming: (category: ChannelCategory, section: String)?
     @State private var renameText = ""
 
     var body: some View {
@@ -70,7 +81,7 @@ struct SidebarView: View {
         ) {
             TextField("Nom", text: $renameText)
             Button("Renommer") {
-                if let renaming { model.rename(renaming, to: renameText) }
+                if let renaming { model.rename(renaming.category, in: renaming.section, to: renameText) }
             }
             Button("Annuler", role: .cancel) {}
         } message: {
@@ -96,33 +107,33 @@ struct SidebarView: View {
             }
             .padding(.horizontal, 14)
             .padding(.top, 8)
-            .padding(.bottom, 12)
+            .padding(.bottom, 10)
+
+            VStack(spacing: 2) {
+                ForEach(AppSection.allCases, id: \.self) { section in
+                    sectionRow(section)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 8)
+
+            Divider().overlay(Theme.line)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    row("Toutes les chaînes", icon: "square.grid.2x2", item: .all)
-                    row("Favoris", icon: "star", item: .favorites)
-                    row("Récents", icon: "clock", item: .recents)
-                    if !model.categories.isEmpty {
-                        Text("CATÉGORIES")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Theme.faint)
-                            .padding(.horizontal, 10)
-                            .padding(.top, 16)
-                            .padding(.bottom, 4)
-                        ForEach(model.orderedCategories) { category in
-                            row(model.name(of: category), icon: nil, item: .category(category.id))
-                                .contextMenu {
-                                    Button("Renommer…") {
-                                        renameText = model.name(of: category)
-                                        renaming = category
-                                    }
-                                }
-                        }
+                    switch model.section {
+                    case .direct, .guide:
+                        liveFilters
+                    case .movies:
+                        catalogFilters(.movie)
+                    case .series:
+                        catalogFilters(.series)
+                    case .search:
+                        EmptyView()
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.bottom, 12)
+                .padding(.vertical, 8)
             }
 
             if let account = model.active {
@@ -142,11 +153,94 @@ struct SidebarView: View {
         .background(Theme.surface)
     }
 
-    private func row(_ title: String, icon: String?, item: SidebarItem) -> some View {
-        let selected = model.sidebar == item
+    private func sectionRow(_ section: AppSection) -> some View {
+        let selected = model.section == section
         return Button {
-            model.sidebar = item
+            model.section = section
+            if section == .movies { model.open(nil, kind: .movie) }
+            if section == .series { model.open(nil, kind: .series) }
         } label: {
+            HStack(spacing: 9) {
+                Image(systemName: section.icon)
+                    .frame(width: 17)
+                    .foregroundStyle(selected ? Theme.accent : Theme.muted)
+                Text(section.title)
+                Spacer()
+            }
+            .font(.system(size: 13, weight: selected ? .semibold : .medium))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+            .background(selected ? Theme.violet.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var liveFilters: some View {
+        row("Toutes les chaînes", icon: "square.grid.2x2", selected: model.sidebar == .all,
+            count: model.count(in: .all)) { model.sidebar = .all }
+        row("Favoris", icon: "star", selected: model.sidebar == .favorites,
+            count: model.count(in: .favorites)) { model.sidebar = .favorites }
+        row("Récents", icon: "clock", selected: model.sidebar == .recents,
+            count: model.count(in: .recents)) { model.sidebar = .recents }
+        if !model.categories.isEmpty {
+            caption("CATÉGORIES")
+            ForEach(model.orderedCategories) { category in
+                let item = SidebarItem.category(category.id)
+                row(model.name(of: category), icon: nil, selected: model.sidebar == item,
+                    count: model.count(in: item)) { model.sidebar = item }
+                    .contextMenu { renameButton(category, section: "live") }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func catalogFilters(_ kind: CatalogEntry.Kind) -> some View {
+        let section = model.catalog(kind)
+        row(kind == .movie ? "Tous les films" : "Toutes les séries", icon: "square.grid.2x2",
+            selected: section.filter == .all, count: model.catalogCount(in: .all, kind: kind)) {
+            model.setFilter(.all, for: kind)
+        }
+        row("Ma liste", icon: "bookmark", selected: section.filter == .favorites,
+            count: model.catalogCount(in: .favorites, kind: kind)) {
+            model.setFilter(.favorites, for: kind)
+        }
+        row("Continuer à regarder", icon: "play.circle", selected: section.filter == .recents,
+            count: model.catalogCount(in: .recents, kind: kind)) {
+            model.setFilter(.recents, for: kind)
+        }
+        if !section.categories.isEmpty {
+            caption("CATÉGORIES")
+            ForEach(model.orderedCategories(kind)) { category in
+                let item = SidebarItem.category(category.id)
+                row(model.name(of: category, in: kind.rawValue), icon: nil, selected: section.filter == item,
+                    count: model.catalogCount(in: item, kind: kind)) {
+                    model.setFilter(item, for: kind)
+                }
+                .contextMenu { renameButton(category, section: kind.rawValue) }
+            }
+        }
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Theme.faint)
+            .padding(.horizontal, 10)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
+    }
+
+    private func renameButton(_ category: ChannelCategory, section: String) -> some View {
+        Button("Renommer…") {
+            renameText = model.name(of: category, in: section)
+            renaming = (category, section)
+        }
+    }
+
+    private func row(_ title: String, icon: String?, selected: Bool, count: Int, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             HStack(spacing: 8) {
                 if let icon {
                     Image(systemName: icon)
@@ -155,17 +249,25 @@ struct SidebarView: View {
                 }
                 Text(title).lineLimit(1)
                 Spacer(minLength: 4)
-                Text("\(model.count(in: item))")
+                Text("\(count)")
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(Theme.faint)
             }
-            .font(.system(size: 13, weight: selected ? .semibold : .regular))
+            .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.vertical, 6)
             .contentShape(Rectangle())
-            .background(selected ? Theme.violet.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .background(selected ? Theme.violet.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Temporary until the guide grid lands.
+struct GuideScreen: View {
+    var body: some View {
+        ContentUnavailableView("Guide TV", systemImage: "calendar")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -193,21 +295,7 @@ struct ChannelListView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(Theme.faint)
                 }
-                Menu {
-                    Picker("Trier", selection: Binding(get: { model.preferences.order }, set: { model.setOrder($0) })) {
-                        Text("Ordre du fournisseur").tag(ListOrder.provider)
-                        Text("De A à Z").tag(ListOrder.ascending)
-                        Text("De Z à A").tag(ListOrder.descending)
-                    }
-                    .pickerStyle(.inline)
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .foregroundStyle(model.preferences.order == .provider ? Theme.faint : Theme.accent)
-                .help("Trier les chaînes et les catégories")
+                SortMenu()
             }
             .font(.system(size: 13))
             .padding(.horizontal, 10)

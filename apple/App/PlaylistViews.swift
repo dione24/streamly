@@ -199,7 +199,9 @@ struct SettingsView: View {
             titleVisibility: .visible
         ) {
             Button("Supprimer", role: .destructive) {
-                if let pendingRemoval { model.remove(pendingRemoval) }
+                if let pendingRemoval {
+                    Task { await model.remove(pendingRemoval) }
+                }
                 pendingRemoval = nil
             }
         } message: {
@@ -211,7 +213,7 @@ struct SettingsView: View {
         HStack(spacing: 10) {
             Image(systemName: model.active?.id == playlist.id ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(model.active?.id == playlist.id ? Theme.accent : Theme.faint)
-                .onTapGesture { model.activate(playlist) }
+                .onTapGesture { Task { await model.activate(playlist) } }
             VStack(alignment: .leading, spacing: 2) {
                 Text(playlist.name).font(.system(size: 13, weight: .medium))
                 Text(summary(of: playlist))

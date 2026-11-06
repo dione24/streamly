@@ -12,6 +12,8 @@ struct StreamlyApp: App {
     @State private var model: AppModel
 
     init() {
+        // Posters are small but numerous: keep them instead of downloading them again.
+        URLCache.shared = URLCache(memoryCapacity: 64 << 20, diskCapacity: 512 << 20)
         #if DEBUG
         _model = State(initialValue: SelfTest.makeModel())
         #else

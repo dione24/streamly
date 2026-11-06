@@ -3,15 +3,16 @@ import StreamlyKit
 import StreamlyPlayer
 
 // Decodes a stream without a window and reports what happened. Exit code 0 means playback really
-// progressed. Usage: streamly-smoke <url> [seconds]
+// progressed. Usage: streamly-smoke <url> [seconds] [--on-demand]
 
 let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
-    print("usage: streamly-smoke <url> [seconds]")
+    print("usage: streamly-smoke <url> [seconds] [--on-demand]")
     exit(2)
 }
 let url = arguments[1]
 let duration = arguments.count > 2 ? (Double(arguments[2]) ?? 6) : 6
+let onDemand = arguments.contains("--on-demand")
 let label = Redact.secrets(in: url)
 
 let player = MPVPlayer(headless: true, enableAudio: false)
@@ -48,13 +49,13 @@ player.onEvent = { event in
             await finish()
         }
     case .ended(let reason, let error):
-        if reason == .streamStopped { report(failure: error ?? "fin du flux") }
+        if reason != .replaced { report(failure: error ?? "fin du flux") }
     default:
         break
     }
 }
 
-player.play(url: url, userAgent: Playlist.defaultUserAgent)
+player.play(url: url, userAgent: Playlist.defaultUserAgent, onDemand: onDemand)
 DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
     report(failure: "aucune image après 30 s")
 }

@@ -11,6 +11,7 @@ struct PlayerPane: View {
     @State private var controlsVisible = true
     @State private var hideTask: Task<Void, Never>?
     @State private var channelListVisible = false
+    @State private var showingArchive = false
     @FocusState private var focused: Bool
 
     private var playback: PlaybackController { model.playback }
@@ -39,7 +40,7 @@ struct PlayerPane: View {
     private var video: some View {
         ZStack {
             Color.black
-            if let layer = playback.player.layer {
+            if model.videoLocation == .main, playback.onDemand == nil, let layer = playback.player.layer {
                 VideoSurface(layer: layer)
             }
             stateOverlay
@@ -151,7 +152,7 @@ struct PlayerPane: View {
             }
             .padding(24)
             .background(Theme.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: 14))
-        case .playing:
+        case .playing, .finished:
             EmptyView()
         }
     }
@@ -236,7 +237,7 @@ struct PlayerPane: View {
                     }
                     .help("Liste des chaînes (L)")
                 }
-                tracksMenu
+                TracksMenu()
                 Button(action: toggleTheater) {
                     Image(systemName: theater ? "arrow.down.right.and.arrow.up.left"
                                               : "arrow.up.left.and.arrow.down.right")
@@ -253,37 +254,6 @@ struct PlayerPane: View {
                 .frame(height: theater ? 240 : 90)
                 .allowsHitTesting(false)
         }
-    }
-
-    private var tracksMenu: some View {
-        let audio = playback.tracks.filter { $0.kind == .audio }
-        let subtitles = playback.tracks.filter { $0.kind == .sub }
-        return Menu {
-            Section("Audio") {
-                ForEach(audio) { track in
-                    Button { playback.select(track) } label: {
-                        Label(track.title, systemImage: track.selected ? "checkmark" : "")
-                    }
-                }
-            }
-            if !subtitles.isEmpty {
-                Section("Sous-titres") {
-                    Button("Aucun") { playback.disableSubtitles() }
-                    ForEach(subtitles) { track in
-                        Button { playback.select(track) } label: {
-                            Label(track.title, systemImage: track.selected ? "checkmark" : "")
-                        }
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: "text.bubble")
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .disabled(audio.isEmpty && subtitles.isEmpty)
-        .help("Pistes audio et sous-titres")
     }
 
     @ViewBuilder
@@ -304,6 +274,19 @@ struct PlayerPane: View {
                             .foregroundStyle(Theme.muted)
                     }
                     Spacer()
+                    if channel.archiveStream != nil {
+                        Button {
+                            showingArchive = true
+                        } label: {
+                            Label("Rattrapage", systemImage: "clock.arrow.circlepath")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
+                        .help("Revoir un programme passé")
+                        .sheet(isPresented: $showingArchive) {
+                            CatchUpSheet(channel: channel)
+                        }
+                    }
                     Button {
                         model.toggleFavorite(channel)
                     } label: {
@@ -370,5 +353,75 @@ struct PlayerPane: View {
                     .tint(Theme.violet)
             }
         }
+    }
+}
+
+/// Past programmes of a channel, latest first, grouped by day.
+struct CatchUpSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let channel: Channel
+    @State private var programmes: [Programme]?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Rattrapage").font(.system(size: 20, weight: .heavy))
+                    Text(channel.name).font(.system(size: 12)).foregroundStyle(Theme.muted)
+                }
+                Spacer()
+                Button("Fermer") { dismiss() }
+                    .buttonStyle(SecondaryButtonStyle())
+                    .keyboardShortcut(.cancelAction)
+            }
+            if let programmes {
+                if programmes.isEmpty {
+                    ContentUnavailableView("Aucun programme à revoir", systemImage: "clock",
+                                           description: Text("Le fournisseur n'en propose pas pour cette chaîne en ce moment."))
+                        .foregroundStyle(Theme.muted)
+                        .frame(maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            ForEach(programmes, id: \.self) { programme in
+                                Button {
+                                    dismiss()
+                                    model.replay(channel, programme: programme)
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(Format.time(programme.start))
+                                                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                                            Text(Format.date(programme.start))
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(Theme.muted)
+                                        }
+                                        .frame(width: 96, alignment: .leading)
+                                        Text(programme.title)
+                                            .font(.system(size: 13))
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Image(systemName: "play.fill")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(Theme.accent)
+                                    }
+                                    .padding(9)
+                                    .contentShape(Rectangle())
+                                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .padding(22)
+        .frame(width: 520, height: 500)
+        .background(Theme.background)
+        .task { programmes = await model.archive(for: channel) }
     }
 }
