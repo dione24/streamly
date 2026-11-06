@@ -78,7 +78,7 @@ public enum StreamURL {
         }
     }
 
-    private static func encode(_ component: String) -> String {
+    static func encode(_ component: String) -> String {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/?#")
         return component.addingPercentEncoding(withAllowedCharacters: allowed) ?? component
@@ -90,7 +90,7 @@ public enum Redact {
     private static let query = try! NSRegularExpression(
         pattern: "((?:username|password|user|pass|token)=)[^&\\s]+", options: .caseInsensitive)
     private static let xtreamPath = try! NSRegularExpression(
-        pattern: "(https?://[^/\\s]+/(?:live/|movie/|series/)?)[^/\\s]+/[^/\\s]+/([^/\\s]+)")
+        pattern: "(https?://[^/\\s]+/(?:live/|movie/|series/|timeshift/)?)[^/\\s]+/[^/\\s]+/([^/\\s]+)")
 
     public static func secrets(in text: String) -> String {
         var out = query.stringByReplacingMatches(

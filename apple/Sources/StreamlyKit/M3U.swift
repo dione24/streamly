@@ -129,7 +129,7 @@ public enum M3UParser {
         return Library(categories: categories, streams: streams)
     }
 
-    private static func stableID(_ url: String) -> String {
+    static func stableID(_ url: String) -> String {
         SHA256.hash(data: Data(url.utf8)).prefix(10).map { String(format: "%02x", $0) }.joined()
     }
 }

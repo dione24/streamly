@@ -10,13 +10,15 @@ public struct AccountInfo: Codable, Hashable, Sendable {
     public var expiresAt: Date?
     public var maxConnections: Int?
     public var activeConnections: Int?
+    public var serverTimeZone: String?
 
     public init(status: String? = nil, expiresAt: Date? = nil,
-                maxConnections: Int? = nil, activeConnections: Int? = nil) {
+                maxConnections: Int? = nil, activeConnections: Int? = nil, serverTimeZone: String? = nil) {
         self.status = status
         self.expiresAt = expiresAt
         self.maxConnections = maxConnections
         self.activeConnections = activeConnections
+        self.serverTimeZone = serverTimeZone
     }
 }
 
@@ -60,9 +62,11 @@ public struct LiveStream: Codable, Hashable, Sendable {
     public let number: Int?
     /// M3U only: the entry's own URL. Xtream URLs are rebuilt so the password is never cached.
     public let url: String?
+    /// Set when the provider keeps past programmes of this channel: how many days back.
+    public let archiveDays: Int?
 
     public init(id: String, name: String, categoryID: String? = nil, logo: String? = nil,
-                epgID: String? = nil, number: Int? = nil, url: String? = nil) {
+                epgID: String? = nil, number: Int? = nil, url: String? = nil, archiveDays: Int? = nil) {
         self.id = id
         self.name = name
         self.categoryID = categoryID
@@ -70,6 +74,7 @@ public struct LiveStream: Codable, Hashable, Sendable {
         self.epgID = epgID
         self.number = number
         self.url = url
+        self.archiveDays = archiveDays
     }
 }
 
@@ -106,6 +111,11 @@ public struct Channel: Identifiable, Hashable, Sendable {
     }
 
     public var primaryStream: LiveStream? { variants.first?.stream }
+
+    /// The variant that can replay past programmes, if any.
+    public var archiveStream: LiveStream? {
+        variants.first { $0.stream.archiveDays != nil }?.stream
+    }
 
     public static func == (lhs: Channel, rhs: Channel) -> Bool { lhs.id == rhs.id }
     public func hash(into hasher: inout Hasher) { hasher.combine(id) }

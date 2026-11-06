@@ -204,6 +204,174 @@ final class RedactTests: XCTestCase {
     }
 }
 
+final class VODTests: XCTestCase {
+    private func client(_ session: URLSession) -> XtreamClient {
+        XtreamClient(host: "http://panel.test", username: "u", password: "p", session: session)
+    }
+
+    func testCatalogSurvivesMalformedRowsAndMissingEndpoints() async {
+        let session = FakeProvider.session { url in
+            if url.contains("get_vod_categories") { return (200, #"[{"category_id":"1","category_name":"Action"},{"category_id":null}]"#) }
+            if url.contains("get_vod_streams") {
+                return (200, #"[{"stream_id":5,"name":"FR| Film 4K (2020)","category_id":"1","stream_icon":"http://i/5.jpg","rating":"7.5","container_extension":"mkv"},"#
+                    + #"{"stream_id":6,"name":"Sans note","rating":0},{"name":"pas d'id"},"oops"]"#)
+            }
+            return (500, "")  // no series on this panel
+        }
+        let library = await client(session).vodLibrary()
+        XCTAssertEqual(library.movieCategories.map(\.name), ["Action"])
+        XCTAssertEqual(library.movies.map(\.id), ["5", "6"])
+        XCTAssertEqual(library.movies[0].rating, 7.5)
+        XCTAssertEqual(library.movies[0].container, "mkv")
+        XCTAssertNil(library.movies[1].rating)
+        XCTAssertTrue(library.series.isEmpty)
+        XCTAssertEqual(CatalogEntry(movie: library.movies[0]).title, "Film (2020)")
+    }
+
+    func testMovieDetailReadsDurationInAnyFormAndBackdropList() async throws {
+        let session = FakeProvider.session { _ in
+            (200, #"{"info":{"plot":"Histoire","genre":"Drame","releasedate":"2019-05-01","duration":"01:30:00","backdrop_path":["http://i/b.jpg"]},"movie_data":{"container_extension":"mkv"}}"#)
+        }
+        let detail = try await client(session).movieDetail(id: "5")
+        XCTAssertEqual(detail.plot, "Histoire")
+        XCTAssertEqual(detail.year, "2019")
+        XCTAssertEqual(detail.durationSeconds, 5400)
+        XCTAssertEqual(detail.backdrop, "http://i/b.jpg")
+        XCTAssertEqual(detail.container, "mkv")
+    }
+
+    func testSeriesAcceptsEpisodesKeyedOrListed() throws {
+        let keyed: [String: Any] = ["info": ["plot": "Résumé"], "episodes": [
+            "2": [["id": 21, "episode_num": 1, "title": " Retour ", "container_extension": ".mkv"]],
+            "1": [["id": "12", "episode_num": "2", "season": 1], ["id": 11, "episode_num": 1, "season": 1,
+                                                                 "info": ["duration_secs": 1500]]],
+        ]]
+        let detail = XtreamClient.parseSeries(keyed)
+        XCTAssertEqual(detail.episodes.map(\.id), ["11", "12", "21"])
+        XCTAssertEqual(detail.seasons, [1, 2])
+        XCTAssertEqual(detail.episodes[2].title, "Retour")
+        XCTAssertEqual(detail.episodes[2].container, "mkv")
+        XCTAssertEqual(detail.episodes[1].container, "mp4")
+        XCTAssertEqual(detail.episodes[0].durationSeconds, 1500)
+        XCTAssertEqual(detail.episode(after: detail.episodes[1])?.id, "21", "next season follows")
+        XCTAssertNil(detail.episode(after: detail.episodes[2]))
+
+        let listed: [String: Any] = ["episodes": [[["id": 1, "episode_num": 1]], [["id": 2, "episode_num": 1]]]]
+        XCTAssertEqual(XtreamClient.parseSeries(listed).episodes.map(\.season), [1, 2])
+        XCTAssertTrue(XtreamClient.parseSeries("rien").episodes.isEmpty)
+        XCTAssertTrue(XtreamClient.parseSeries(["episodes": []]).episodes.isEmpty)
+    }
+
+    func testPlaybackURLsUseTheRightPath() {
+        XCTAssertEqual(StreamURL.movie(host: "http://p/", username: "u", password: "p/w", id: "5", container: "mkv"),
+                       "http://p/movie/u/p%2Fw/5.mkv")
+        XCTAssertEqual(StreamURL.episode(host: "http://p", username: "u", password: "p", id: "9", container: nil),
+                       "http://p/series/u/p/9.mp4")
+    }
+
+    func testCatchUpUsesThePanelsTimeZoneAndRoundsDurationUp() {
+        let programme = Programme(title: "x", start: Date(timeIntervalSince1970: 1_800_000_000),
+                                  stop: Date(timeIntervalSince1970: 1_800_000_000 + 1801))
+        // 1_800_000_000 is 2027-01-15 08:00 UTC.
+        XCTAssertEqual(
+            StreamURL.catchUp(host: "http://p", username: "u", password: "s", streamID: "7", programme: programme,
+                              timeZone: TimeZone(identifier: "Europe/Paris")),
+            "http://p/timeshift/u/s/31/2027-01-15:09-00/7.ts")
+        XCTAssertEqual(
+            StreamURL.catchUp(host: "http://p", username: "u", password: "s", streamID: "7", programme: programme, timeZone: nil),
+            "http://p/timeshift/u/s/31/2027-01-15:08-00/7.ts")
+        XCTAssertEqual(Redact.secrets(in: "http://p/timeshift/u/s/31/2027-01-15:08-00/7.ts"),
+                       "http://p/timeshift/***/***/31/2027-01-15:08-00/7.ts")
+    }
+
+    func testArchiveKeepsOnlyFinishedReplayableProgrammes() async throws {
+        let past = Int(Date().timeIntervalSince1970) - 7200
+        let title = Data("Journal".utf8).base64EncodedString()
+        let session = FakeProvider.session { _ in
+            (200, #"{"epg_listings":[{"title":"\#(title)","start_timestamp":\#(past),"stop_timestamp":\#(past + 1800),"has_archive":1},"#
+                + #"{"title":"\#(title)","start_timestamp":\#(past),"stop_timestamp":\#(past + 1800),"has_archive":0},"#
+                + #"{"title":"\#(title)","start_timestamp":\#(past),"stop_timestamp":\#(past + 90000),"has_archive":1}]}"#)
+        }
+        let programmes = try await client(session).archive(streamID: "1")
+        XCTAssertEqual(programmes.map(\.title), ["Journal"])
+    }
+
+    func testFlatPlaylistGathersEpisodesIntoSeries() {
+        let text = """
+        #EXTINF:-1 tvg-logo="http://i/s.jpg" group-title="Séries",Ma Série S01 E02
+        http://p/series/u/p/2.mkv
+        #EXTINF:-1 group-title="Séries",Ma Série S01E01
+        http://p/series/u/p/1.mkv
+        #EXTINF:-1 group-title="Films",Un Film
+        http://p/movie/u/p/9.mp4?token=x
+        #EXTINF:-1 group-title="TV",Chaine
+        http://p/live/1
+        """
+        let library = M3UParser.vodLibrary(from: M3UParser.parse(text))
+        XCTAssertEqual(library.series.map(\.name), ["Ma Série"])
+        XCTAssertEqual(library.seriesCategories.map(\.name), ["Séries"])
+        XCTAssertEqual(library.movies.map(\.name), ["Un Film"])
+        XCTAssertEqual(library.movies.first?.container, "mp4")
+        let episodes = library.flatEpisodes[library.series[0].id] ?? []
+        XCTAssertEqual(episodes.map(\.number).sorted(), [1, 2])
+        XCTAssertEqual(episodes.first?.url, "http://p/series/u/p/2.mkv")
+    }
+
+    func testDurationFormats() {
+        XCTAssertEqual(Duration.seconds("5400"), 5400)
+        XCTAssertEqual(Duration.seconds(90), 90)
+        XCTAssertEqual(Duration.seconds("00:42:30"), 2550)
+        XCTAssertNil(Duration.seconds("bientôt"))
+        XCTAssertEqual(Duration.label(seconds: 2550), "42 min")
+        XCTAssertEqual(Duration.label(seconds: 5400), "1 h 30")
+        XCTAssertEqual(Duration.clock(3723), "1:02:03")
+        XCTAssertEqual(Duration.clock(.nan), "0:00")
+    }
+}
+
+final class ProgressTests: XCTestCase {
+    private func item(_ key: String, _ position: Double, _ duration: Double = 1000, age: TimeInterval = 0, series: String? = nil) -> WatchProgress {
+        WatchProgress(key: key, title: key, position: position, duration: duration,
+                      updatedAt: Date(timeIntervalSince1970: 1000 - age), seriesID: series)
+    }
+
+    func testResumeOnlyBetweenStartAndCredits() {
+        XCTAssertNil(item("a", 10).resumePosition)
+        XCTAssertEqual(item("a", 300).resumePosition, 300)
+        XCTAssertNil(item("a", 930).resumePosition)
+        XCTAssertTrue(item("a", 930).isFinished)
+    }
+
+    func testContinueWatchingIsRecentFirstAndOneLinePerSeries() {
+        var prefs = PlaylistPreferences()
+        for progress in [item("old", 100, age: 50), item("new", 100, age: 1), item("done", 990),
+                         item("e1", 100, age: 30, series: "s"), item("e2", 100, age: 20, series: "s")] {
+            prefs.progress[progress.key] = progress
+        }
+        XCTAssertEqual(prefs.continueWatching.map(\.key), ["new", "e2", "old"])
+    }
+
+    func testWatchedFlagAndSavedEntries() {
+        var prefs = PlaylistPreferences()
+        prefs.setWatched(true, template: item("m", 0, 0))
+        XCTAssertTrue(prefs.progress["m"]?.isFinished == true)
+        prefs.setWatched(false, template: item("m", 0, 0))
+        XCTAssertNil(prefs.progress["m"])
+        prefs.toggleSaved("movie:1")
+        XCTAssertEqual(prefs.savedEntries, ["movie:1"])
+        prefs.toggleSaved("movie:1")
+        XCTAssertTrue(prefs.savedEntries.isEmpty)
+    }
+
+    func testPreferencesFromAnOlderVersionKeepTheirFavorites() throws {
+        let old = Data(#"{"favorites":["FR|TF1"],"recents":[],"order":"ascending"}"#.utf8)
+        let prefs = try JSONDecoder().decode(PlaylistPreferences.self, from: old)
+        XCTAssertEqual(prefs.favorites, ["FR|TF1"])
+        XCTAssertEqual(prefs.order, .ascending)
+        XCTAssertTrue(prefs.progress.isEmpty)
+    }
+}
+
 final class KeychainTests: XCTestCase {
     func testSecretRoundTripUpdateAndDelete() throws {
         let store = KeychainStore(service: "com.streamly.tests.\(UUID().uuidString)")

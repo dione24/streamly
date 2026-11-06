@@ -20,7 +20,7 @@ public enum ProviderError: LocalizedError, Equatable, Sendable {
         case .accountExpired: return "Cet abonnement a expiré."
         case .accountDisabled(let status): return "Cet abonnement n'est pas actif (état : \(status))."
         case .badResponse: return "Le serveur a envoyé une réponse illisible. Ce n'est peut-être pas un serveur Xtream."
-        case .emptyPlaylist: return "Cette playlist ne contient aucune chaîne en direct."
+        case .emptyPlaylist: return "Cette playlist ne contient ni chaîne, ni film, ni série."
         }
     }
 }
@@ -54,7 +54,8 @@ public struct XtreamClient: Sendable {
             status: Lenient.string(info["status"]),
             expiresAt: Lenient.double(info["exp_date"]).flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil },
             maxConnections: Lenient.int(info["max_connections"]),
-            activeConnections: Lenient.int(info["active_cons"]))
+            activeConnections: Lenient.int(info["active_cons"]),
+            serverTimeZone: Lenient.string((root["server_info"] as? [String: Any])?["timezone"]))
 
         if let status = account.status?.lowercased(), status != "active" {
             if status == "expired" { throw ProviderError.accountExpired }
@@ -77,7 +78,8 @@ public struct XtreamClient: Sendable {
                 categoryID: Lenient.string(row["category_id"]),
                 logo: Lenient.string(row["stream_icon"]),
                 epgID: Lenient.string(row["epg_channel_id"]),
-                number: Lenient.int(row["num"]))
+                number: Lenient.int(row["num"]),
+                archiveDays: Lenient.int(row["tv_archive"]) == 1 ? Lenient.int(row["tv_archive_duration"]) ?? 1 : nil)
         }
 
         var categories = rawCategories.compactMap { item -> ChannelCategory? in
@@ -92,7 +94,7 @@ public struct XtreamClient: Sendable {
         return Library(categories: categories, streams: streams)
     }
 
-    public func shortEPG(streamID: String, limit: Int = 4) async throws -> [Programme] {
+    public func shortEPG(streamID: String, limit: Int = 12) async throws -> [Programme] {
         let payload = try await api(action: "get_short_epg", extra: [
             URLQueryItem(name: "stream_id", value: streamID),
             URLQueryItem(name: "limit", value: String(limit)),
@@ -150,7 +152,7 @@ public struct XtreamClient: Sendable {
         return M3UParser.decode(try await HTTP.get(url, userAgent: userAgent, session: session))
     }
 
-    private func api(action: String? = nil, extra: [URLQueryItem] = []) async throws -> Any {
+    func api(action: String? = nil, extra: [URLQueryItem] = []) async throws -> Any {
         guard var components = URLComponents(string: host + "/player_api.php"),
               let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
               components.host?.isEmpty == false else { throw ProviderError.invalidAddress }

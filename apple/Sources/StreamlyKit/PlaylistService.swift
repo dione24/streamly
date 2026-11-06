@@ -70,10 +70,62 @@ public struct PlaylistPreferences: Codable, Sendable, Equatable {
     public var order: ListOrder = .provider
     /// Names the user gave to the provider's categories, by category id. They survive a refresh.
     public var categoryNames: [String: String] = [:]
+    /// "Movie:12" and "series:34" entries of "My list".
+    public var savedEntries: [String] = []
+    /// By `WatchProgress.key`.
+    public var progress: [String: WatchProgress] = [:]
 
     public init() {}
 
+    /// Every field is optional on disk: a file written by an older version must not lose favorites.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
+        recents = try container.decodeIfPresent([String].self, forKey: .recents) ?? []
+        lastChannel = try container.decodeIfPresent(String.self, forKey: .lastChannel)
+        maxHeight = try container.decodeIfPresent(Int.self, forKey: .maxHeight)
+        order = try container.decodeIfPresent(ListOrder.self, forKey: .order) ?? .provider
+        categoryNames = try container.decodeIfPresent([String: String].self, forKey: .categoryNames) ?? [:]
+        savedEntries = try container.decodeIfPresent([String].self, forKey: .savedEntries) ?? []
+        progress = try container.decodeIfPresent([String: WatchProgress].self, forKey: .progress) ?? [:]
+    }
+
     public static let recentsLimit = 30
+    public static let continueLimit = 20
+
+    /// Unfinished items, latest first, one line per series.
+    public var continueWatching: [WatchProgress] {
+        var seenSeries = Set<String>()
+        return progress.values
+            .filter { $0.resumePosition != nil }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .filter { item in
+                guard let series = item.seriesID else { return true }
+                return seenSeries.insert(series).inserted
+            }
+            .prefix(Self.continueLimit)
+            .map { $0 }
+    }
+
+    public mutating func toggleSaved(_ entryID: String) {
+        if let index = savedEntries.firstIndex(of: entryID) {
+            savedEntries.remove(at: index)
+        } else {
+            savedEntries.append(entryID)
+        }
+    }
+
+    public mutating func setWatched(_ watched: Bool, template: WatchProgress) {
+        if watched {
+            var item = template
+            item.duration = max(item.duration, 1)
+            item.position = item.duration
+            item.updatedAt = Date()
+            progress[item.key] = item
+        } else {
+            progress[template.key] = nil
+        }
+    }
 
     public mutating func rename(category id: String, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -143,11 +195,12 @@ public struct SyncResult: Sendable {
     public let playlist: Playlist
     public let secret: String
     public let library: Library
+    public let vod: VODLibrary
 }
 
 public struct PlaylistService: Sendable {
     public enum Stage: Sendable {
-        case checkingAccount, downloadingChannels
+        case checkingAccount, downloadingChannels, downloadingCatalog
     }
 
     private let session: URLSession
@@ -186,6 +239,7 @@ public struct PlaylistService: Sendable {
                      progress: @Sendable @escaping (Stage) -> Void = { _ in }) async throws -> SyncResult {
         var playlist = original
         let library: Library
+        let vod: VODLibrary
 
         switch playlist.kind {
         case let .xtream(host, username):
@@ -195,17 +249,24 @@ public struct PlaylistService: Sendable {
             playlist.account = try await client.account()
             progress(.downloadingChannels)
             library = try await client.library()
+            progress(.downloadingCatalog)
+            vod = await client.vodLibrary()
 
         case .m3u:
             guard let url = URL(string: secret) else { throw ProviderError.invalidAddress }
             progress(.downloadingChannels)
             let data = try await HTTP.get(url, userAgent: playlist.userAgent, session: session)
-            library = M3UParser.library(from: M3UParser.parse(M3UParser.decode(data)))
+            let entries = M3UParser.parse(M3UParser.decode(data))
+            library = M3UParser.library(from: entries)
+            vod = M3UParser.vodLibrary(from: entries)
         }
 
-        guard !library.streams.isEmpty else { throw ProviderError.emptyPlaylist }
+        // A VOD-only playlist is still worth keeping.
+        guard !library.streams.isEmpty || !vod.movies.isEmpty || !vod.series.isEmpty else {
+            throw ProviderError.emptyPlaylist
+        }
         playlist.lastSync = Date()
-        return SyncResult(playlist: playlist, secret: secret, library: library)
+        return SyncResult(playlist: playlist, secret: secret, library: library, vod: vod)
     }
 
     public static func normalizeHost(_ raw: String) -> String {
