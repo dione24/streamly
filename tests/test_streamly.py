@@ -743,7 +743,12 @@ class GuideTests(unittest.TestCase):
         self.assertEqual([p.findtext('title') for p in self.parsed(guide).iter('programme')], ['JT & meteo'])
     def test_now_and_next_come_from_the_cached_guide(self):
         guide = self.guide([self.source('a.xml', XMLTV)]); guide.rebuild(now=NOW)
-        self.assertEqual(guide.now_next(['tf1.fr'], now=NOW), {})   # lecture en tache de fond
+        # Le premier appel repond vide pendant la lecture en tache de fond. On la
+        # retient le temps de le verifier : sinon elle peut finir avant l'assertion.
+        release, load = threading.Event(), guide._load_index
+        guide._load_index = lambda stamp: (release.wait(5), load(stamp))
+        self.assertEqual(guide.now_next(['tf1.fr'], now=NOW), {})
+        release.set()
         for _ in range(50):
             if guide.now_next(['tf1.fr'], now=NOW): break
             time.sleep(.05)
